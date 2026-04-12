@@ -67,6 +67,20 @@ impl Catalog {
             .collect();
         Self { entries, deleted }
     }
+
+    pub fn replace_active_entries(&mut self, active: Vec<Inode>) {
+        self.entries = active
+            .into_iter()
+            .map(|inode| (inode.path.clone(), inode))
+            .collect();
+    }
+
+    pub fn replace_deleted_entries(&mut self, deleted: Vec<Inode>) {
+        self.deleted = deleted
+            .into_iter()
+            .map(|inode| (inode.path.clone(), inode))
+            .collect();
+    }
 }
 
 #[cfg(test)]

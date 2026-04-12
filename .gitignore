@@ -2,3 +2,6 @@
 **/*.profraw
 **/*.profdata
 Cargo.lock
+*.img
+mnt/
+dist/**

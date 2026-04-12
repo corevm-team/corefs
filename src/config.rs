@@ -31,6 +31,12 @@ pub struct PerformancePolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaPolicy {
+    pub max_files: Option<usize>,
+    pub max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoreFsConfig {
     pub volume_name: String,
     pub block_size: usize,
@@ -39,6 +45,7 @@ pub struct CoreFsConfig {
     pub versioning: VersioningPolicy,
     pub security: SecurityPolicy,
     pub performance: PerformancePolicy,
+    pub quotas: QuotaPolicy,
 }
 
 impl Default for CoreFsConfig {
@@ -64,6 +71,10 @@ impl Default for CoreFsConfig {
                 compression_enabled: true,
                 deduplication_enabled: false,
                 trim_enabled: true,
+            },
+            quotas: QuotaPolicy {
+                max_files: None,
+                max_bytes: None,
             },
         }
     }
@@ -91,5 +102,7 @@ mod tests {
         assert!(config.performance.compression_enabled);
         assert!(!config.performance.deduplication_enabled);
         assert!(config.performance.trim_enabled);
+        assert_eq!(config.quotas.max_files, None);
+        assert_eq!(config.quotas.max_bytes, None);
     }
 }

@@ -1,0 +1,11 @@
+{
+  "name": "corefs",
+  "package_version": "0.1.0",
+  "build_version": "0.1.0+a98eac2",
+  "profile": "release",
+  "git_commit": "a98eac2",
+  "git_branch": "main",
+  "git_dirty": false,
+  "build_timestamp_utc": "2026-04-12T18:20:41Z",
+  "build_epoch": 1776018041
+}
