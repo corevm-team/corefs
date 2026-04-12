@@ -75,7 +75,12 @@ pub fn diagnose_mount(
     checks.push(diagnose_mountpoint(&mountpoint));
     checks.push(diagnose_fuse_kernel_support());
     checks.push(diagnose_fuse_device());
+    checks.push(diagnose_current_identity());
     checks.push(diagnose_userspace_tooling());
+    checks.push(diagnose_fusermount_permissions());
+    checks.push(diagnose_fuse_configuration());
+    checks.push(diagnose_namespace_context());
+    checks.push(diagnose_lsm_context());
 
     MountDiagnosisReport {
         image_path,
@@ -108,6 +113,11 @@ pub fn render_mount_diagnosis(report: &MountDiagnosisReport) -> Vec<String> {
     } else if report.has_warnings() {
         lines.push(
             "hint: der Mount ist grundsaetzlich plausibel, aber die WARN-Hinweise koennen spaeter stoeren."
+                .to_string(),
+        );
+    } else {
+        lines.push(
+            "hint: alle offensichtlichen FUSE-Voraussetzungen sind erfuellt; wenn mount-image trotzdem mit EPERM oder `file descriptor 3 is not a socket` scheitert, spricht das fuer eine Host-Policy, Namespace- oder Helper-Inkompatibilitaet ausserhalb des CoreFS-Images."
                 .to_string(),
         );
     }
@@ -348,6 +358,17 @@ fn diagnose_fuse_device() -> DiagnosticCheck {
     }
 }
 
+fn diagnose_current_identity() -> DiagnosticCheck {
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    let groups = command_output("id", ["-nG"]).unwrap_or_else(|| "unbekannt".to_string());
+    DiagnosticCheck {
+        name: "identity".to_string(),
+        status: DiagnosticStatus::Pass,
+        detail: format!("euid={} egid={} gruppen={}", uid, gid, groups.trim()),
+    }
+}
+
 fn diagnose_userspace_tooling() -> DiagnosticCheck {
     let mut found = Vec::new();
     for tool in ["fuser", "fusermount3", "fusermount"] {
@@ -374,6 +395,190 @@ fn diagnose_userspace_tooling() -> DiagnosticCheck {
         name: "userspace-tooling".to_string(),
         status: DiagnosticStatus::Pass,
         detail,
+    }
+}
+
+fn diagnose_fusermount_permissions() -> DiagnosticCheck {
+    let fusermount = Path::new("/usr/bin/fusermount3");
+    if !fusermount.exists() {
+        return DiagnosticCheck {
+            name: "fusermount3".to_string(),
+            status: DiagnosticStatus::Warn,
+            detail: "/usr/bin/fusermount3 wurde nicht gefunden".to_string(),
+        };
+    }
+
+    let metadata = match fs::metadata(fusermount) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return DiagnosticCheck {
+                name: "fusermount3".to_string(),
+                status: DiagnosticStatus::Warn,
+                detail: format!(
+                    "Metadaten fuer /usr/bin/fusermount3 nicht lesbar: {}",
+                    error
+                ),
+            };
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let mode = metadata.mode();
+        let is_setuid = mode & 0o4000 != 0;
+        let status = if is_setuid {
+            DiagnosticStatus::Pass
+        } else {
+            DiagnosticStatus::Warn
+        };
+        let detail = if is_setuid {
+            format!(
+                "fusermount3 ist vorhanden und setuid-root (mode={:o})",
+                mode & 0o7777
+            )
+        } else {
+            format!(
+                "fusermount3 ist vorhanden, aber ohne setuid-root-Bit (mode={:o})",
+                mode & 0o7777
+            )
+        };
+        return DiagnosticCheck {
+            name: "fusermount3".to_string(),
+            status,
+            detail,
+        };
+    }
+
+    #[allow(unreachable_code)]
+    DiagnosticCheck {
+        name: "fusermount3".to_string(),
+        status: DiagnosticStatus::Pass,
+        detail: "fusermount3 ist vorhanden".to_string(),
+    }
+}
+
+fn diagnose_fuse_configuration() -> DiagnosticCheck {
+    let config = Path::new("/etc/fuse.conf");
+    if !config.exists() {
+        return DiagnosticCheck {
+            name: "fuse-conf".to_string(),
+            status: DiagnosticStatus::Warn,
+            detail: "/etc/fuse.conf fehlt; Standardverhalten wird angenommen".to_string(),
+        };
+    }
+
+    match fs::read_to_string(config) {
+        Ok(content) => {
+            let user_allow_other = content
+                .lines()
+                .map(str::trim)
+                .any(|line| !line.starts_with('#') && line == "user_allow_other");
+            let detail = if user_allow_other {
+                "/etc/fuse.conf erlaubt `user_allow_other`".to_string()
+            } else {
+                "/etc/fuse.conf setzt kein `user_allow_other`; fuer `allow_other`-Mounts waere das spaeter relevant".to_string()
+            };
+            DiagnosticCheck {
+                name: "fuse-conf".to_string(),
+                status: if user_allow_other {
+                    DiagnosticStatus::Pass
+                } else {
+                    DiagnosticStatus::Warn
+                },
+                detail,
+            }
+        }
+        Err(error) => DiagnosticCheck {
+            name: "fuse-conf".to_string(),
+            status: DiagnosticStatus::Warn,
+            detail: format!("/etc/fuse.conf konnte nicht gelesen werden: {}", error),
+        },
+    }
+}
+
+fn diagnose_namespace_context() -> DiagnosticCheck {
+    let uid_map = fs::read_to_string("/proc/self/uid_map").ok();
+    let gid_map = fs::read_to_string("/proc/self/gid_map").ok();
+    let cgroup = fs::read_to_string("/proc/1/cgroup").ok();
+    let in_container =
+        Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists();
+
+    let userns_hint = uid_map
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unbekannt");
+    let gidns_hint = gid_map
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unbekannt");
+
+    let suspicious_cgroup = cgroup
+        .as_deref()
+        .map(|value| {
+            let lowered = value.to_ascii_lowercase();
+            lowered.contains("docker")
+                || lowered.contains("podman")
+                || lowered.contains("kubepods")
+                || lowered.contains("lxc")
+                || lowered.contains("container")
+        })
+        .unwrap_or(false);
+
+    let status = if in_container || suspicious_cgroup {
+        DiagnosticStatus::Warn
+    } else {
+        DiagnosticStatus::Pass
+    };
+
+    DiagnosticCheck {
+        name: "namespace-context".to_string(),
+        status,
+        detail: format!(
+            "uid_map=`{}` gid_map=`{}` container_hints={}",
+            userns_hint,
+            gidns_hint,
+            if in_container || suspicious_cgroup {
+                "ja"
+            } else {
+                "nein"
+            }
+        ),
+    }
+}
+
+fn diagnose_lsm_context() -> DiagnosticCheck {
+    let apparmor = fs::read_to_string("/sys/module/apparmor/parameters/enabled")
+        .ok()
+        .map(|value| value.trim().to_string());
+    let selinux = fs::read_to_string("/sys/fs/selinux/enforce")
+        .ok()
+        .map(|value| value.trim().to_string());
+
+    let mut parts = Vec::new();
+    if let Some(value) = apparmor {
+        parts.push(format!("apparmor={value}"));
+    }
+    if let Some(value) = selinux {
+        parts.push(format!("selinux={value}"));
+    }
+
+    if parts.is_empty() {
+        DiagnosticCheck {
+            name: "security-context".to_string(),
+            status: DiagnosticStatus::Pass,
+            detail: "keine offensichtliche AppArmor-/SELinux-Info gefunden".to_string(),
+        }
+    } else {
+        DiagnosticCheck {
+            name: "security-context".to_string(),
+            status: DiagnosticStatus::Warn,
+            detail: format!(
+                "{}; bei EPERM koennen Host-Sicherheitsrichtlinien hier hineinspielen",
+                parts.join(" ")
+            ),
+        }
     }
 }
 
