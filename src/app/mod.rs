@@ -363,6 +363,37 @@ impl CoreFsService {
         self.catalog.get(path)
     }
 
+    /// Rename `from` to `to`, cascading to all descendants.
+    /// If `to` already exists it is soft-deleted before the rename.
+    pub fn rename_entry(&mut self, from: &str, to: &str) -> CoreFsResult<()> {
+        if self.catalog.get(from).is_none() {
+            return Err(CoreFsError::NotFound(format!("path not found: {from}")));
+        }
+        // Overwrite target with soft-delete semantics if it exists.
+        if self.catalog.get(to).is_some() {
+            self.delete_file(to, false)?;
+        }
+        // Collect all paths that share the `from` prefix (entry + descendants).
+        let prefix = format!("{from}/");
+        let old_paths: Vec<String> = self
+            .catalog
+            .list_paths()
+            .into_iter()
+            .filter(|p| p == from || p.starts_with(&prefix))
+            .collect();
+
+        for old_path in old_paths {
+            let new_path = format!("{to}{}", &old_path[from.len()..]);
+            if let Some(mut inode) = self.catalog.remove(&old_path) {
+                inode.path = new_path;
+                inode.modified_at = SystemTime::now();
+                self.catalog.insert(inode);
+            }
+        }
+        self.journal.record("rename", from, format!("to={to}"));
+        Ok(())
+    }
+
     fn persisted_state(&self) -> PersistedState {
         PersistedState {
             config: self.config.clone(),
@@ -712,6 +743,68 @@ mod tests {
         assert_eq!(loaded.recoverable_paths(), vec!["/replay.txt".to_string()]);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rename_entry_moves_file_to_new_path() {
+        let mut fs = test_fs();
+        fs.create_file("/old.txt", b"content", &[]).expect("file");
+        fs.rename_entry("/old.txt", "/new.txt").expect("rename");
+
+        assert!(fs.read_file("/old.txt").is_err());
+        assert_eq!(
+            fs.read_file("/new.txt").expect("new path"),
+            b"content".to_vec()
+        );
+    }
+
+    #[test]
+    fn rename_entry_cascades_to_directory_children() {
+        let mut fs = test_fs();
+        fs.create_directory("/src").expect("dir");
+        fs.create_file("/src/main.rs", b"fn main(){}", &[])
+            .expect("file");
+        fs.create_directory("/src/utils").expect("subdir");
+        fs.create_file("/src/utils/helper.rs", b"// helper", &[])
+            .expect("file");
+
+        fs.rename_entry("/src", "/lib").expect("rename dir");
+
+        assert!(!fs.list_paths().iter().any(|p| p.starts_with("/src")));
+        assert_eq!(
+            fs.read_file("/lib/main.rs").expect("main.rs"),
+            b"fn main(){}".to_vec()
+        );
+        assert_eq!(
+            fs.read_file("/lib/utils/helper.rs").expect("helper.rs"),
+            b"// helper".to_vec()
+        );
+    }
+
+    #[test]
+    fn rename_entry_overwrites_existing_target() {
+        let mut fs = test_fs();
+        fs.create_file("/a.txt", b"aaa", &[]).expect("file a");
+        fs.create_file("/b.txt", b"bbb", &[]).expect("file b");
+
+        fs.rename_entry("/a.txt", "/b.txt").expect("rename over");
+
+        assert!(fs.read_file("/a.txt").is_err());
+        assert_eq!(
+            fs.read_file("/b.txt").expect("b.txt"),
+            b"aaa".to_vec()
+        );
+        // overwritten entry is soft-deleted and recoverable
+        assert!(fs.recoverable_paths().contains(&"/b.txt".to_string()));
+    }
+
+    #[test]
+    fn rename_entry_fails_for_missing_source() {
+        let mut fs = test_fs();
+        assert!(matches!(
+            fs.rename_entry("/missing.txt", "/target.txt"),
+            Err(CoreFsError::NotFound(_))
+        ));
     }
 
     #[test]

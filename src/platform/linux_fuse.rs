@@ -5,7 +5,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData,
     ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
 };
-use libc::{EEXIST, EISDIR, EIO, ENOENT, ENOTEMPTY, ENOTDIR, EROFS};
+use libc::{EEXIST, EINVAL, EISDIR, EIO, ENOENT, ENOTEMPTY, ENOTDIR, EROFS};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -354,23 +354,41 @@ struct CoreFsFuseMountRw {
 
 impl CoreFsFuseMountRw {
     fn from_service(service: CoreFsService, image_path: PathBuf) -> Self {
-        let state = service.export_state();
-        let mut nodes_by_ino = HashMap::new();
-        let mut ino_by_path = HashMap::new();
-        let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut mount = Self {
+            service,
+            image_path,
+            nodes_by_ino: HashMap::new(),
+            ino_by_path: HashMap::new(),
+            children: BTreeMap::new(),
+            dirty: false,
+        };
+        mount.rebuild_indexes();
+        mount
+    }
+
+    /// Rebuild all FUSE index maps from the current service state.
+    /// Called after `from_service` and after any operation that changes paths (rename).
+    fn rebuild_indexes(&mut self) {
+        let state = self.service.export_state();
         let block_map: HashMap<crate::domain::inode::InodeId, Vec<u8>> = state
             .block_records
             .into_iter()
             .map(|r| (r.inode, r.bytes))
             .collect();
 
-        let root = FuseNode {
-            path: "/".to_string(),
-            parent_path: "/".to_string(),
-            inode: None,
-            data: Vec::new(),
-        };
-        nodes_by_ino.insert(ROOT_INO, root);
+        let mut nodes_by_ino = HashMap::new();
+        let mut ino_by_path = HashMap::new();
+        let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+        nodes_by_ino.insert(
+            ROOT_INO,
+            FuseNode {
+                path: "/".to_string(),
+                parent_path: "/".to_string(),
+                inode: None,
+                data: Vec::new(),
+            },
+        );
         ino_by_path.insert("/".to_string(), ROOT_INO);
         children.entry("/".to_string()).or_default();
 
@@ -399,14 +417,9 @@ impl CoreFsFuseMountRw {
             names.dedup();
         }
 
-        Self {
-            service,
-            image_path,
-            nodes_by_ino,
-            ino_by_path,
-            children,
-            dirty: false,
-        }
+        self.nodes_by_ino = nodes_by_ino;
+        self.ino_by_path = ino_by_path;
+        self.children = children;
     }
 
     fn node(&self, ino: u64) -> Option<&FuseNode> {
@@ -820,6 +833,81 @@ impl Filesystem for CoreFsFuseMountRw {
         reply.ok();
     }
 
+    fn rename(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        flags: u32,
+        reply: ReplyEmpty,
+    ) {
+        // RENAME_EXCHANGE (2) is not supported.
+        if flags & 2 != 0 {
+            reply.error(EINVAL);
+            return;
+        }
+        let Some(src_path) = self.child_path(parent, name) else {
+            reply.error(ENOENT);
+            return;
+        };
+        let Some(dst_path) = self.child_path(newparent, newname) else {
+            reply.error(ENOENT);
+            return;
+        };
+        let Some(&src_ino) = self.ino_by_path.get(&src_path) else {
+            reply.error(ENOENT);
+            return;
+        };
+        // RENAME_NOREPLACE (1): fail if target already exists.
+        if flags & 1 != 0 && self.ino_by_path.contains_key(&dst_path) {
+            reply.error(EEXIST);
+            return;
+        }
+        let src_is_dir = self
+            .nodes_by_ino
+            .get(&src_ino)
+            .map(|n| matches!(n.kind(), InodeKind::Directory))
+            .unwrap_or(false);
+
+        // Type-compatibility and emptiness checks when overwriting an existing target.
+        if let Some(&dst_ino) = self.ino_by_path.get(&dst_path) {
+            let dst_is_dir = self
+                .nodes_by_ino
+                .get(&dst_ino)
+                .map(|n| matches!(n.kind(), InodeKind::Directory))
+                .unwrap_or(false);
+            if src_is_dir && !dst_is_dir {
+                reply.error(ENOTDIR);
+                return;
+            }
+            if !src_is_dir && dst_is_dir {
+                reply.error(EISDIR);
+                return;
+            }
+            if dst_is_dir {
+                let empty = self
+                    .children
+                    .get(&dst_path)
+                    .map(|c| c.is_empty())
+                    .unwrap_or(true);
+                if !empty {
+                    reply.error(ENOTEMPTY);
+                    return;
+                }
+            }
+        }
+
+        if self.service.rename_entry(&src_path, &dst_path).is_err() {
+            reply.error(EIO);
+            return;
+        }
+        self.rebuild_indexes();
+        self.dirty = true;
+        reply.ok();
+    }
+
     fn flush(
         &mut self,
         _req: &Request<'_>,
@@ -1130,6 +1218,74 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(!siblings.contains(&"readme.txt".to_string()));
+    }
+
+    #[test]
+    fn rw_mount_rename_file_updates_indexes() {
+        let mut mount = rw_mount_from_demo();
+
+        let docs_ino = mount
+            .lookup_child(ROOT_INO, OsStr::new("docs"))
+            .expect("docs")
+            .ino();
+
+        // rename /docs/readme.txt → /docs/notes.txt via service + rebuild
+        mount
+            .service
+            .rename_entry("/docs/readme.txt", "/docs/notes.txt")
+            .expect("rename");
+        mount.rebuild_indexes();
+
+        assert!(
+            mount
+                .lookup_child(docs_ino, OsStr::new("readme.txt"))
+                .is_none(),
+            "old name should be gone"
+        );
+        assert!(
+            mount
+                .lookup_child(docs_ino, OsStr::new("notes.txt"))
+                .is_some(),
+            "new name should be visible"
+        );
+    }
+
+    #[test]
+    fn rw_mount_rename_directory_cascades_in_indexes() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_directory("/src").expect("dir");
+        fs.create_file("/src/main.rs", b"fn main(){}", &[])
+            .expect("file");
+        fs.create_directory("/src/utils").expect("subdir");
+        fs.create_file("/src/utils/helper.rs", b"//h", &[])
+            .expect("file");
+        let mut mount = CoreFsFuseMountRw::from_service(fs, PathBuf::from("/tmp/test.img"));
+
+        mount
+            .service
+            .rename_entry("/src", "/lib")
+            .expect("rename dir");
+        mount.rebuild_indexes();
+
+        assert!(mount.lookup_child(ROOT_INO, OsStr::new("src")).is_none());
+        let lib_ino = mount
+            .lookup_child(ROOT_INO, OsStr::new("lib"))
+            .expect("lib dir after rename")
+            .ino();
+        assert!(
+            mount
+                .lookup_child(lib_ino, OsStr::new("main.rs"))
+                .is_some()
+        );
+        let utils_ino = mount
+            .lookup_child(lib_ino, OsStr::new("utils"))
+            .expect("utils")
+            .ino();
+        assert!(
+            mount
+                .lookup_child(utils_ino, OsStr::new("helper.rs"))
+                .is_some()
+        );
     }
 
     #[test]
