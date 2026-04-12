@@ -5,6 +5,7 @@ use crate::domain::snapshot::Snapshot;
 use crate::domain::volume::VolumeDescriptor;
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::services::journal::JournalEntry;
+use crate::services::journal::{JournalRepairSummary, reconcile_persisted_state};
 use crate::services::sync::SyncStatus;
 use crate::services::versioning::FileVersion;
 use crate::storage::block_store::BlockRecord;
@@ -19,6 +20,10 @@ const SEGMENT_ALIGNMENT: usize = 64;
 const SEGMENT_ENTRY_SIZE: usize = 24;
 const HEADER_SIZE: usize = 16;
 const SUPERBLOCK_SIZE: usize = 52;
+const EXPECTED_SEGMENT_KINDS: [[u8; 4]; 12] = [
+    *b"SUPR", *b"SUP2", *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC",
+    *b"SNAP", *b"BLKD", *b"DATA",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BlockDescriptor {
@@ -100,11 +105,29 @@ pub struct VolumeImageInspectionReport {
     pub block_descriptors: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeImageRepairReport {
+    pub repaired_superblocks: usize,
+    pub selected_generation: u64,
+    pub resulting_valid_superblocks: usize,
+    pub recovered_without_valid_superblock: bool,
+    pub reconstructed_segment_directory: bool,
+    pub reconstructed_block_descriptors: bool,
+    pub journal_repair: JournalRepairSummary,
+}
+
 #[derive(Debug, Clone)]
 struct InspectedImage {
     entries: Vec<SegmentEntry>,
     superblock: Superblock,
     report: VolumeImageInspectionReport,
+}
+
+#[derive(Debug, Clone)]
+struct RecoveredImageState {
+    state: PersistedState,
+    reconstructed_segment_directory: bool,
+    reconstructed_block_descriptors: bool,
 }
 
 pub fn save_volume_image(path: impl AsRef<Path>, state: &PersistedState) -> CoreFsResult<()> {
@@ -257,37 +280,7 @@ pub fn load_volume_image(path: impl AsRef<Path>) -> CoreFsResult<PersistedState>
         )));
     }
 
-    let config: ConfigSegment =
-        deserialize_segment(&bytes, find_segment(&entries, b"CNFG")?, path)?;
-    let volume: VolumeSegment =
-        deserialize_segment(&bytes, find_segment(&entries, b"VOLM")?, path)?;
-    let active: InodeSegment = deserialize_segment(&bytes, find_segment(&entries, b"AINO")?, path)?;
-    let deleted: InodeSegment =
-        deserialize_segment(&bytes, find_segment(&entries, b"DINO")?, path)?;
-    let journal: JournalSegment =
-        deserialize_segment(&bytes, find_segment(&entries, b"JOUR")?, path)?;
-    let versions: VersionSegment =
-        deserialize_segment(&bytes, find_segment(&entries, b"VERS")?, path)?;
-    let sync: SyncSegment = deserialize_segment(&bytes, find_segment(&entries, b"SYNC")?, path)?;
-    let snapshots: SnapshotSegment =
-        deserialize_segment(&bytes, find_segment(&entries, b"SNAP")?, path)?;
-    let block_descriptors: BlockDescriptorSegment =
-        deserialize_segment(&bytes, find_segment(&entries, b"BLKD")?, path)?;
-    let data = segment_bytes(&bytes, find_segment(&entries, b"DATA")?, path)?;
-    let block_records = join_blocks(block_descriptors.descriptors, data)?;
-
-    Ok(PersistedState {
-        config: config.config,
-        volume: volume.volume,
-        active_inodes: active.inodes,
-        deleted_inodes: deleted.inodes,
-        block_records,
-        journal_entries: journal.journal_entries,
-        versions: versions.versions,
-        sync_statuses: sync.sync_statuses,
-        snapshots: snapshots.snapshots,
-        next_snapshot_id: snapshots.next_snapshot_id,
-    })
+    persisted_state_from_entries(&bytes, &entries, path)
 }
 
 pub fn inspect_volume_image(path: impl AsRef<Path>) -> CoreFsResult<VolumeImageInspectionReport> {
@@ -299,6 +292,48 @@ pub fn inspect_volume_image(path: impl AsRef<Path>) -> CoreFsResult<VolumeImageI
         ))
     })?;
     Ok(inspect_volume_image_bytes(&bytes, path)?.report)
+}
+
+pub fn repair_volume_image_superblocks(
+    path: impl AsRef<Path>,
+) -> CoreFsResult<VolumeImageRepairReport> {
+    let path = path.as_ref();
+    let before = inspect_volume_image(path).ok();
+    let repaired_superblocks = before
+        .as_ref()
+        .map(|report| 2usize.saturating_sub(report.valid_superblocks))
+        .unwrap_or(2);
+    let recovered_without_valid_superblock = before.is_none();
+    let recovered = match load_volume_image(path) {
+        Ok(state) => RecoveredImageState {
+            state,
+            reconstructed_segment_directory: false,
+            reconstructed_block_descriptors: false,
+        },
+        Err(_) => load_volume_image_relaxed(path)?,
+    };
+    let mut state = recovered.state;
+    let journal_repair = reconcile_persisted_state(&mut state);
+    let needs_rewrite = repaired_superblocks > 0
+        || recovered_without_valid_superblock
+        || recovered.reconstructed_segment_directory
+        || recovered.reconstructed_block_descriptors
+        || journal_repair != JournalRepairSummary::default();
+
+    if needs_rewrite {
+        save_volume_image(path, &state)?;
+    }
+
+    let after = inspect_volume_image(path)?;
+    Ok(VolumeImageRepairReport {
+        repaired_superblocks,
+        selected_generation: after.selected_generation,
+        resulting_valid_superblocks: after.valid_superblocks,
+        recovered_without_valid_superblock,
+        reconstructed_segment_directory: recovered.reconstructed_segment_directory,
+        reconstructed_block_descriptors: recovered.reconstructed_block_descriptors,
+        journal_repair,
+    })
 }
 
 struct SegmentPayload {
@@ -340,9 +375,27 @@ fn deserialize_segment<T: for<'de> Deserialize<'de>>(
     })
 }
 
+fn deserialize_optional_segment<T: for<'de> Deserialize<'de>>(
+    bytes: &[u8],
+    entries: &[SegmentEntry],
+    kind: &[u8; 4],
+    path: &Path,
+) -> CoreFsResult<Option<T>> {
+    match find_segment(entries, kind) {
+        Ok(entry) => deserialize_segment(bytes, entry, path).map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
 fn segment_bytes<'a>(bytes: &'a [u8], entry: &SegmentEntry, path: &Path) -> CoreFsResult<&'a [u8]> {
     let start = entry.offset as usize;
-    let end = start + entry.length as usize;
+    let end = start.checked_add(entry.length as usize).ok_or_else(|| {
+        CoreFsError::State(format!(
+            "invalid CoreFS volume image segment range {} in {}",
+            String::from_utf8_lossy(&entry.kind),
+            path.display()
+        ))
+    })?;
     bytes.get(start..end).ok_or_else(|| {
         CoreFsError::State(format!(
             "truncated CoreFS volume image segment {} in {}",
@@ -470,21 +523,45 @@ fn decode_superblock(bytes: &[u8]) -> CoreFsResult<Superblock> {
     })
 }
 
-fn inspect_volume_image_bytes(bytes: &[u8], path: &Path) -> CoreFsResult<InspectedImage> {
+fn load_volume_image_relaxed(path: &Path) -> CoreFsResult<RecoveredImageState> {
+    let bytes = fs::read(path).map_err(|error| {
+        CoreFsError::State(format!(
+            "failed to read CoreFS volume image from {}: {error}",
+            path.display()
+        ))
+    })?;
+    let (entries, reconstructed_segment_directory) = load_directory_for_recovery(&bytes, path)?;
+    match persisted_state_from_entries_relaxed(&bytes, &entries, path) {
+        Ok((state, reconstructed_block_descriptors)) => Ok(RecoveredImageState {
+            state,
+            reconstructed_segment_directory,
+            reconstructed_block_descriptors,
+        }),
+        Err(_) => {
+            let entries = reconstruct_directory_from_payloads(&bytes, path)?;
+            let (state, _) = persisted_state_from_entries_relaxed(&bytes, &entries, path)?;
+            Ok(RecoveredImageState {
+                state,
+                reconstructed_segment_directory: true,
+                reconstructed_block_descriptors: true,
+            })
+        }
+    }
+}
+
+fn load_directory_from_header(bytes: &[u8], path: &Path) -> CoreFsResult<Vec<SegmentEntry>> {
     if bytes.len() < HEADER_SIZE {
         return Err(CoreFsError::State(format!(
             "invalid CoreFS volume image, file too small: {}",
             path.display()
         )));
     }
-
     if &bytes[..8] != MAGIC {
         return Err(CoreFsError::State(format!(
             "invalid CoreFS volume image magic in {}",
             path.display()
         )));
     }
-
     let version = u32::from_le_bytes(bytes[8..12].try_into().expect("fixed slice"));
     if version != FORMAT_VERSION {
         return Err(CoreFsError::State(format!(
@@ -493,7 +570,6 @@ fn inspect_volume_image_bytes(bytes: &[u8], path: &Path) -> CoreFsResult<Inspect
             path.display()
         )));
     }
-
     let segment_count = u32::from_le_bytes(bytes[12..16].try_into().expect("fixed slice")) as usize;
     let directory_offset = HEADER_SIZE;
     let directory_length = segment_count * SEGMENT_ENTRY_SIZE;
@@ -504,7 +580,237 @@ fn inspect_volume_image_bytes(bytes: &[u8], path: &Path) -> CoreFsResult<Inspect
             path.display()
         ))
     })?;
-    let entries = parse_directory(directory)?;
+    parse_directory(directory)
+}
+
+fn load_directory_for_recovery(
+    bytes: &[u8],
+    path: &Path,
+) -> CoreFsResult<(Vec<SegmentEntry>, bool)> {
+    match load_directory_from_header(bytes, path) {
+        Ok(entries) => Ok((entries, false)),
+        Err(_) => Ok((reconstruct_directory_from_payloads(bytes, path)?, true)),
+    }
+}
+
+fn persisted_state_from_entries(
+    bytes: &[u8],
+    entries: &[SegmentEntry],
+    path: &Path,
+) -> CoreFsResult<PersistedState> {
+    let config = deserialize_optional_segment::<ConfigSegment>(bytes, entries, b"CNFG", path)?
+        .map(|segment| segment.config)
+        .unwrap_or_default();
+    let volume = deserialize_optional_segment::<VolumeSegment>(bytes, entries, b"VOLM", path)?
+        .map(|segment| segment.volume)
+        .unwrap_or_else(|| VolumeDescriptor::from_config(&config));
+    let active = deserialize_optional_segment::<InodeSegment>(bytes, entries, b"AINO", path)?
+        .map(|segment| segment.inodes)
+        .unwrap_or_default();
+    let deleted = deserialize_optional_segment::<InodeSegment>(bytes, entries, b"DINO", path)?
+        .map(|segment| segment.inodes)
+        .unwrap_or_default();
+    let journal = deserialize_optional_segment::<JournalSegment>(bytes, entries, b"JOUR", path)?
+        .map(|segment| segment.journal_entries)
+        .unwrap_or_default();
+    let versions = deserialize_optional_segment::<VersionSegment>(bytes, entries, b"VERS", path)?
+        .map(|segment| segment.versions)
+        .unwrap_or_default();
+    let sync = deserialize_optional_segment::<SyncSegment>(bytes, entries, b"SYNC", path)?
+        .map(|segment| segment.sync_statuses)
+        .unwrap_or_default();
+    let snapshots = deserialize_optional_segment::<SnapshotSegment>(bytes, entries, b"SNAP", path)?
+        .unwrap_or(SnapshotSegment {
+            snapshots: Vec::new(),
+            next_snapshot_id: 0,
+        });
+
+    let block_records = match (
+        deserialize_optional_segment::<BlockDescriptorSegment>(bytes, entries, b"BLKD", path)?,
+        find_segment(entries, b"DATA").ok(),
+    ) {
+        (Some(descriptors), Some(data_entry)) => {
+            let data = segment_bytes(bytes, data_entry, path)?;
+            join_blocks(descriptors.descriptors, data)?
+        }
+        _ => Vec::new(),
+    };
+
+    Ok(PersistedState {
+        config,
+        volume,
+        active_inodes: active,
+        deleted_inodes: deleted,
+        block_records,
+        journal_entries: journal,
+        versions,
+        sync_statuses: sync,
+        snapshots: snapshots.snapshots,
+        next_snapshot_id: snapshots.next_snapshot_id,
+    })
+}
+
+fn persisted_state_from_entries_relaxed(
+    bytes: &[u8],
+    entries: &[SegmentEntry],
+    path: &Path,
+) -> CoreFsResult<(PersistedState, bool)> {
+    let state = persisted_state_from_entries(bytes, entries, path)?;
+    Ok((state, false))
+}
+
+fn reconstruct_directory_from_payloads(
+    bytes: &[u8],
+    path: &Path,
+) -> CoreFsResult<Vec<SegmentEntry>> {
+    validate_header_basics(bytes, path)?;
+    let segment_count = u32::from_le_bytes(bytes[12..16].try_into().expect("fixed slice")) as usize;
+    if segment_count != EXPECTED_SEGMENT_KINDS.len() {
+        return Err(CoreFsError::State(format!(
+            "unsupported reconstructed segment count {} in {}",
+            segment_count,
+            path.display()
+        )));
+    }
+
+    let mut entries = Vec::with_capacity(EXPECTED_SEGMENT_KINDS.len());
+    let mut offset = align_up(
+        HEADER_SIZE + (segment_count * SEGMENT_ENTRY_SIZE),
+        SEGMENT_ALIGNMENT,
+    );
+
+    entries.push(SegmentEntry {
+        kind: *b"SUPR",
+        offset: offset as u64,
+        length: SUPERBLOCK_SIZE as u64,
+    });
+    offset = align_up(offset + SUPERBLOCK_SIZE, SEGMENT_ALIGNMENT);
+
+    entries.push(SegmentEntry {
+        kind: *b"SUP2",
+        offset: offset as u64,
+        length: SUPERBLOCK_SIZE as u64,
+    });
+    offset = align_up(offset + SUPERBLOCK_SIZE, SEGMENT_ALIGNMENT);
+
+    for kind in [
+        *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC", *b"SNAP",
+    ] {
+        let length = detect_json_segment_length(bytes, offset, &kind, path)?;
+        entries.push(SegmentEntry {
+            kind,
+            offset: offset as u64,
+            length: length as u64,
+        });
+        offset = align_up(offset + length, SEGMENT_ALIGNMENT);
+    }
+
+    let descriptor_length = detect_json_segment_length(bytes, offset, b"BLKD", path)?;
+    let descriptor_entry = SegmentEntry {
+        kind: *b"BLKD",
+        offset: offset as u64,
+        length: descriptor_length as u64,
+    };
+    entries.push(descriptor_entry.clone());
+    offset = align_up(offset + descriptor_length, SEGMENT_ALIGNMENT);
+
+    let descriptors: BlockDescriptorSegment = deserialize_segment(bytes, &descriptor_entry, path)?;
+    let data_length = descriptors
+        .descriptors
+        .iter()
+        .map(|descriptor| descriptor.offset + descriptor.length)
+        .max()
+        .unwrap_or(0) as usize;
+    let data_end = offset + data_length;
+    if data_end > bytes.len() {
+        return Err(CoreFsError::State(format!(
+            "reconstructed DATA segment exceeds image size in {}",
+            path.display()
+        )));
+    }
+    entries.push(SegmentEntry {
+        kind: *b"DATA",
+        offset: offset as u64,
+        length: data_length as u64,
+    });
+
+    Ok(entries)
+}
+
+fn detect_json_segment_length(
+    bytes: &[u8],
+    offset: usize,
+    kind: &[u8; 4],
+    path: &Path,
+) -> CoreFsResult<usize> {
+    let payload = bytes.get(offset..).ok_or_else(|| {
+        CoreFsError::State(format!(
+            "reconstructed segment {} starts outside image {}",
+            String::from_utf8_lossy(kind),
+            path.display()
+        ))
+    })?;
+
+    match kind {
+        b"CNFG" => detect_json_length::<ConfigSegment>(payload, kind, path),
+        b"VOLM" => detect_json_length::<VolumeSegment>(payload, kind, path),
+        b"AINO" | b"DINO" => detect_json_length::<InodeSegment>(payload, kind, path),
+        b"JOUR" => detect_json_length::<JournalSegment>(payload, kind, path),
+        b"VERS" => detect_json_length::<VersionSegment>(payload, kind, path),
+        b"SYNC" => detect_json_length::<SyncSegment>(payload, kind, path),
+        b"SNAP" => detect_json_length::<SnapshotSegment>(payload, kind, path),
+        b"BLKD" => detect_json_length::<BlockDescriptorSegment>(payload, kind, path),
+        _ => Err(CoreFsError::State(format!(
+            "cannot reconstruct unsupported segment {} in {}",
+            String::from_utf8_lossy(kind),
+            path.display()
+        ))),
+    }
+}
+
+fn detect_json_length<T>(payload: &[u8], kind: &[u8; 4], path: &Path) -> CoreFsResult<usize>
+where
+    T: for<'de> Deserialize<'de> + Serialize,
+{
+    for length in 1..=payload.len() {
+        let prefix = &payload[..length];
+        let parsed = match serde_json::from_slice::<T>(prefix) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let normalized = serde_json::to_vec(&parsed).map_err(|error| {
+            CoreFsError::State(format!(
+                "failed to reserialize reconstructed segment {} for {}: {error}",
+                String::from_utf8_lossy(kind),
+                path.display()
+            ))
+        })?;
+        if normalized == prefix {
+            return Ok(length);
+        }
+    }
+
+    Err(CoreFsError::State(format!(
+        "unable to reconstruct segment {} in {}",
+        String::from_utf8_lossy(kind),
+        path.display()
+    )))
+}
+
+fn inspect_volume_image_bytes(bytes: &[u8], path: &Path) -> CoreFsResult<InspectedImage> {
+    validate_header_basics(bytes, path)?;
+    let version = u32::from_le_bytes(bytes[8..12].try_into().expect("fixed slice"));
+    let segment_count = u32::from_le_bytes(bytes[12..16].try_into().expect("fixed slice")) as usize;
+    let directory_offset = HEADER_SIZE;
+    let directory_length = segment_count * SEGMENT_ENTRY_SIZE;
+    let directory_end = directory_offset + directory_length;
+    let directory = bytes.get(directory_offset..directory_end).ok_or_else(|| {
+        CoreFsError::State(format!(
+            "truncated CoreFS volume image segment directory in {}",
+            path.display()
+        ))
+    })?;
+    let entries = load_directory_from_header(bytes, path)?;
 
     let primary_entry = find_segment(&entries, b"SUPR")?;
     let secondary_entry = find_segment(&entries, b"SUP2")?;
@@ -547,6 +853,33 @@ fn inspect_volume_image_bytes(bytes: &[u8], path: &Path) -> CoreFsResult<Inspect
     })
 }
 
+fn validate_header_basics(bytes: &[u8], path: &Path) -> CoreFsResult<()> {
+    if bytes.len() < HEADER_SIZE {
+        return Err(CoreFsError::State(format!(
+            "invalid CoreFS volume image, file too small: {}",
+            path.display()
+        )));
+    }
+
+    if &bytes[..8] != MAGIC {
+        return Err(CoreFsError::State(format!(
+            "invalid CoreFS volume image magic in {}",
+            path.display()
+        )));
+    }
+
+    let version = u32::from_le_bytes(bytes[8..12].try_into().expect("fixed slice"));
+    if version != FORMAT_VERSION {
+        return Err(CoreFsError::State(format!(
+            "unsupported CoreFS volume image version {} in {}",
+            version,
+            path.display()
+        )));
+    }
+
+    Ok(())
+}
+
 fn read_best_superblock(
     bytes: &[u8],
     primary: &SegmentEntry,
@@ -561,12 +894,12 @@ fn read_best_superblock(
     for entry in [primary, secondary] {
         let payload = segment_bytes(bytes, entry, path)?;
         if let Ok(superblock) = decode_superblock(payload) {
-            if superblock.directory_checksum == expected_directory_checksum
-                && superblock.payload_checksum == expected_payload_checksum
-                && superblock.format_version == FORMAT_VERSION
-                && superblock.alignment as usize == SEGMENT_ALIGNMENT
-                && superblock.segment_count as usize == expected_segment_count
-            {
+            if is_valid_superblock(
+                &superblock,
+                expected_directory_checksum,
+                expected_payload_checksum,
+                expected_segment_count,
+            ) {
                 valid.push(superblock);
             }
         }
@@ -584,6 +917,19 @@ fn read_best_superblock(
         "no valid CoreFS superblock copy found in {}",
         path.display()
     )))
+}
+
+fn is_valid_superblock(
+    superblock: &Superblock,
+    expected_directory_checksum: u64,
+    expected_payload_checksum: u64,
+    expected_segment_count: usize,
+) -> bool {
+    superblock.directory_checksum == expected_directory_checksum
+        && superblock.payload_checksum == expected_payload_checksum
+        && superblock.format_version == FORMAT_VERSION
+        && superblock.alignment as usize == SEGMENT_ALIGNMENT
+        && superblock.segment_count as usize == expected_segment_count
 }
 
 fn validate_required_segments(entries: &[SegmentEntry]) -> CoreFsResult<()> {
@@ -637,8 +983,12 @@ mod tests {
     use super::*;
     use crate::app::PersistedState;
     use crate::config::CoreFsConfig;
+    use crate::domain::inode::{Inode, InodeId, InodeKind};
+    use crate::domain::metadata::FileMetadata;
     use crate::domain::snapshot::Snapshot;
     use crate::domain::volume::VolumeDescriptor;
+    use crate::services::journal::JournalEntry;
+    use crate::storage::block_store::BlockRecord;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_path(name: &str) -> std::path::PathBuf {
@@ -785,6 +1135,151 @@ mod tests {
         let report = inspect_volume_image(&path).expect("inspection should succeed");
         assert_eq!(report.valid_superblocks, 2);
         assert_eq!(report.selected_generation, old_generation + 7);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn repair_volume_image_rebuilds_both_superblock_copies() {
+        let path = temp_path("repair-superblocks");
+        let state = sample_state();
+
+        save_volume_image(&path, &state).expect("volume image should be written");
+        let mut bytes = fs::read(&path).expect("image should exist");
+        let primary_offset = u64::from_le_bytes(bytes[24..32].try_into().expect("fixed")) as usize;
+        bytes[primary_offset] ^= 0xFF;
+        fs::write(&path, bytes).expect("corrupted image should be written");
+
+        let repaired =
+            repair_volume_image_superblocks(&path).expect("repair should restore redundancy");
+        assert_eq!(repaired.repaired_superblocks, 1);
+        assert_eq!(repaired.resulting_valid_superblocks, 2);
+
+        let report = inspect_volume_image(&path).expect("inspection should succeed");
+        assert_eq!(report.valid_superblocks, 2);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn repair_volume_image_applies_journal_reconciliation() {
+        let path = temp_path("repair-journal");
+        let mut active_inode = Inode::new(
+            InodeId(1),
+            InodeKind::File,
+            "/a".to_string(),
+            FileMetadata::default(),
+        );
+        active_inode.size = 999;
+        let deleted_inode = Inode::new(
+            InodeId(2),
+            InodeKind::File,
+            "/b".to_string(),
+            FileMetadata::default(),
+        );
+        let state = PersistedState {
+            config: CoreFsConfig::default(),
+            volume: VolumeDescriptor::from_config(&CoreFsConfig::default()),
+            active_inodes: vec![active_inode],
+            deleted_inodes: vec![deleted_inode],
+            block_records: vec![
+                BlockRecord {
+                    inode: InodeId(1),
+                    bytes: b"hello".to_vec(),
+                    checksum: 123,
+                },
+                BlockRecord {
+                    inode: InodeId(99),
+                    bytes: b"orphan".to_vec(),
+                    checksum: 456,
+                },
+            ],
+            journal_entries: vec![
+                JournalEntry {
+                    timestamp: SystemTime::now(),
+                    operation: "delete".to_string(),
+                    target: "/a".to_string(),
+                    details: String::new(),
+                },
+                JournalEntry {
+                    timestamp: SystemTime::now(),
+                    operation: "restore".to_string(),
+                    target: "/b".to_string(),
+                    details: String::new(),
+                },
+            ],
+            versions: Vec::new(),
+            sync_statuses: Vec::new(),
+            snapshots: Vec::new(),
+            next_snapshot_id: 0,
+        };
+
+        save_volume_image(&path, &state).expect("volume image should be written");
+        let repaired = repair_volume_image_superblocks(&path).expect("repair should succeed");
+
+        assert_eq!(repaired.journal_repair.moved_to_deleted, 1);
+        assert_eq!(repaired.journal_repair.restored_to_active, 1);
+        assert_eq!(repaired.journal_repair.removed_orphan_blocks, 1);
+        assert_eq!(repaired.journal_repair.resized_inodes, 1);
+
+        let loaded = load_volume_image(&path).expect("repaired image should load");
+        assert_eq!(loaded.active_inodes.len(), 1);
+        assert_eq!(loaded.active_inodes[0].path, "/b");
+        assert_eq!(loaded.deleted_inodes.len(), 1);
+        assert_eq!(loaded.deleted_inodes[0].path, "/a");
+        assert_eq!(loaded.block_records.len(), 1);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn repair_volume_image_recovers_from_missing_valid_superblocks_via_header_directory() {
+        let path = temp_path("repair-header-fallback");
+        let state = sample_state();
+
+        save_volume_image(&path, &state).expect("volume image should be written");
+        let mut bytes = fs::read(&path).expect("image should exist");
+        let primary_offset = u64::from_le_bytes(bytes[24..32].try_into().expect("fixed")) as usize;
+        let secondary_offset =
+            u64::from_le_bytes(bytes[48..56].try_into().expect("fixed")) as usize;
+        bytes[primary_offset] ^= 0xFF;
+        bytes[secondary_offset] ^= 0xFF;
+        fs::write(&path, bytes).expect("corrupted image should be written");
+
+        let repaired = repair_volume_image_superblocks(&path)
+            .expect("repair should succeed via header directory recovery");
+
+        assert!(repaired.recovered_without_valid_superblock);
+        assert!(!repaired.reconstructed_segment_directory);
+        assert!(!repaired.reconstructed_block_descriptors);
+        assert_eq!(repaired.resulting_valid_superblocks, 2);
+
+        let report = inspect_volume_image(&path).expect("repaired image should inspect");
+        assert_eq!(report.valid_superblocks, 2);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn repair_volume_image_reconstructs_corrupted_directory_entries() {
+        let path = temp_path("repair-corrupted-directory");
+        let state = sample_state();
+
+        save_volume_image(&path, &state).expect("volume image should be written");
+        let mut bytes = fs::read(&path).expect("image should exist");
+        bytes[72..80].copy_from_slice(&u64::MAX.to_le_bytes());
+        bytes[80..88].copy_from_slice(&u64::MAX.to_le_bytes());
+        fs::write(&path, bytes).expect("corrupted directory should be written");
+
+        let repaired = repair_volume_image_superblocks(&path)
+            .expect("repair should reconstruct the directory");
+
+        assert!(repaired.reconstructed_segment_directory);
+        assert!(repaired.reconstructed_block_descriptors);
+        assert_eq!(repaired.resulting_valid_superblocks, 2);
+
+        let loaded = load_volume_image(&path).expect("repaired image should load cleanly");
+        assert_eq!(loaded.next_snapshot_id, 1);
 
         let _ = fs::remove_file(path);
     }

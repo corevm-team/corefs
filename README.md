@@ -21,7 +21,7 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `56/56` Tests erfolgreich
+- Test-Status: `63/63` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -87,11 +87,15 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Checksummenbasierte Integritätsprüfung
 - Scrubbing über vorhandene Datenblöcke
 - `fsck-image` zur strukturellen Prüfung persistierter Volume-Images
+- mehrstufige `fsck-image --repair`-Reparatur mit Wiederaufbau redundanter Superblocks, Rekonstruktion beschädigter Segmentverzeichnisse aus validierbaren Payloads, Header-/Segmenttabellen-Fallback, Journal-Abgleich und Bereinigung verwaister Block-Deskriptoren
 - Sync-Status-Verfolgung
 - semantische Inhaltsklassifikation
 - ACL-, Tag- und Metadaten-Grundmodell
 - Journal-Replay zur Zustandsabstimmung beim Laden persistierter Images
 - Auswahl der besten gültigen Superblock-Kopie über Generation Counter
+- Journal-basierte Kanonisierung aktiver und gelöschter Inodes beim Image-Repair
+- best-effort-Recovery über Header und Segmenttabelle, auch wenn keine gültige Superblock-Kopie mehr vorhanden ist
+- Rekonstruktion einzelner Segmenteinträge aus bekannter Segmentreihenfolge und JSON-validierbaren Payload-Grenzen
 - plattformneutrales Runtime-Blueprint-Modell
 - synthetisches Performance-Tool
 - Markdown-basierte Performance-Historie
@@ -225,6 +229,12 @@ Volume-Image prüfen:
 
 ```bash
 cargo run -- fsck-image ./corefs-volume.img
+```
+
+Volume-Image prüfen und redundante Superblocks reparieren:
+
+```bash
+cargo run -- fsck-image ./corefs-volume.img --repair
 ```
 
 Verfuegbare Profile:

@@ -1,7 +1,7 @@
 use crate::domain::inode::InodeId;
 use crate::error::CoreFsResult;
 use crate::storage::block_store::BlockStore;
-use crate::storage::volume_image::{self, VolumeImageInspectionReport};
+use crate::storage::volume_image::{self, VolumeImageInspectionReport, VolumeImageRepairReport};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +20,22 @@ pub struct ImageIntegrityReport {
     pub directory_checksum_valid: bool,
     pub payload_checksum_valid: bool,
     pub block_descriptors: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRepairReport {
+    pub repaired_superblocks: usize,
+    pub selected_generation: u64,
+    pub resulting_valid_superblocks: usize,
+    pub recovered_without_valid_superblock: bool,
+    pub reconstructed_segment_directory: bool,
+    pub reconstructed_block_descriptors: bool,
+    pub moved_to_deleted: usize,
+    pub restored_to_active: usize,
+    pub purged_deleted: usize,
+    pub removed_orphan_blocks: usize,
+    pub resized_inodes: usize,
+    pub snapshot_id_adjusted: bool,
 }
 
 #[derive(Debug, Default)]
@@ -55,6 +71,11 @@ impl IntegrityService {
         let report = volume_image::inspect_volume_image(path)?;
         Ok(map_image_report(report))
     }
+
+    pub fn repair_image(&self, path: impl AsRef<Path>) -> CoreFsResult<ImageRepairReport> {
+        let report = volume_image::repair_volume_image_superblocks(path)?;
+        Ok(map_repair_report(report))
+    }
 }
 
 fn map_image_report(report: VolumeImageInspectionReport) -> ImageIntegrityReport {
@@ -66,6 +87,23 @@ fn map_image_report(report: VolumeImageInspectionReport) -> ImageIntegrityReport
         directory_checksum_valid: report.directory_checksum_valid,
         payload_checksum_valid: report.payload_checksum_valid,
         block_descriptors: report.block_descriptors,
+    }
+}
+
+fn map_repair_report(report: VolumeImageRepairReport) -> ImageRepairReport {
+    ImageRepairReport {
+        repaired_superblocks: report.repaired_superblocks,
+        selected_generation: report.selected_generation,
+        resulting_valid_superblocks: report.resulting_valid_superblocks,
+        recovered_without_valid_superblock: report.recovered_without_valid_superblock,
+        reconstructed_segment_directory: report.reconstructed_segment_directory,
+        reconstructed_block_descriptors: report.reconstructed_block_descriptors,
+        moved_to_deleted: report.journal_repair.moved_to_deleted,
+        restored_to_active: report.journal_repair.restored_to_active,
+        purged_deleted: report.journal_repair.purged_deleted,
+        removed_orphan_blocks: report.journal_repair.removed_orphan_blocks,
+        resized_inodes: report.journal_repair.resized_inodes,
+        snapshot_id_adjusted: report.journal_repair.snapshot_id_adjusted,
     }
 }
 
@@ -156,6 +194,65 @@ mod tests {
         let report = service.fsck_image(&path);
 
         assert!(report.is_err());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn repair_image_restores_missing_superblock_copy() {
+        let service = IntegrityService;
+        let path = temp_path("repair-superblock");
+        let state = sample_state();
+        volume_image::save_volume_image(&path, &state).expect("volume image should be written");
+        let mut bytes = fs::read(&path).expect("image should exist");
+        let primary_offset = u64::from_le_bytes(bytes[24..32].try_into().expect("fixed")) as usize;
+        bytes[primary_offset] ^= 0xFF;
+        fs::write(&path, bytes).expect("corrupted image should be written");
+
+        let repaired = service
+            .repair_image(&path)
+            .expect("repair should succeed from secondary copy");
+
+        assert_eq!(repaired.repaired_superblocks, 1);
+        assert_eq!(repaired.resulting_valid_superblocks, 2);
+        assert!(!repaired.recovered_without_valid_superblock);
+        assert!(!repaired.reconstructed_segment_directory);
+        assert!(!repaired.reconstructed_block_descriptors);
+        assert_eq!(repaired.removed_orphan_blocks, 0);
+
+        let report = service
+            .fsck_image(&path)
+            .expect("image should be healthy again");
+        assert_eq!(report.valid_superblocks, 2);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn repair_image_can_recover_without_any_valid_superblock() {
+        let service = IntegrityService;
+        let path = temp_path("repair-no-superblocks");
+        let state = sample_state();
+        volume_image::save_volume_image(&path, &state).expect("volume image should be written");
+        let mut bytes = fs::read(&path).expect("image should exist");
+        let primary_offset = u64::from_le_bytes(bytes[24..32].try_into().expect("fixed")) as usize;
+        let secondary_offset =
+            u64::from_le_bytes(bytes[48..56].try_into().expect("fixed")) as usize;
+        bytes[primary_offset] ^= 0xFF;
+        bytes[secondary_offset] ^= 0xFF;
+        fs::write(&path, bytes).expect("corrupted image should be written");
+
+        let repaired = service
+            .repair_image(&path)
+            .expect("repair should succeed from header directory");
+
+        assert!(repaired.recovered_without_valid_superblock);
+        assert_eq!(repaired.resulting_valid_superblocks, 2);
+
+        let report = service
+            .fsck_image(&path)
+            .expect("repaired image should be healthy");
+        assert_eq!(report.valid_superblocks, 2);
 
         let _ = fs::remove_file(path);
     }

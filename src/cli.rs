@@ -124,17 +124,43 @@ where
             let path = args.get(2).ok_or_else(|| {
                 CoreFsError::InvalidCommand("missing path for fsck-image".to_string())
             })?;
-            let report = IntegrityService.fsck_image(path)?;
-            println!("fsck-image ok: {path}");
-            println!("format_version: {}", report.format_version);
-            println!("segment_count: {}", report.segment_count);
-            println!("valid_superblocks: {}", report.valid_superblocks);
-            println!("selected_generation: {}", report.selected_generation);
-            println!(
-                "checksums: directory={} payload={}",
-                report.directory_checksum_valid, report.payload_checksum_valid
-            );
-            println!("block_descriptors: {}", report.block_descriptors);
+            if args.iter().any(|arg| arg == "--repair") {
+                let repaired = IntegrityService.repair_image(path)?;
+                println!("fsck-image repaired: {path}");
+                println!("repaired_superblocks: {}", repaired.repaired_superblocks);
+                println!("selected_generation: {}", repaired.selected_generation);
+                println!(
+                    "resulting_valid_superblocks: {}",
+                    repaired.resulting_valid_superblocks
+                );
+                println!(
+                    "layout_repair: recovered_without_valid_superblock={} reconstructed_segment_directory={} reconstructed_block_descriptors={}",
+                    repaired.recovered_without_valid_superblock,
+                    repaired.reconstructed_segment_directory,
+                    repaired.reconstructed_block_descriptors
+                );
+                println!(
+                    "journal_repair: moved_to_deleted={} restored_to_active={} purged_deleted={} removed_orphan_blocks={} resized_inodes={} snapshot_id_adjusted={}",
+                    repaired.moved_to_deleted,
+                    repaired.restored_to_active,
+                    repaired.purged_deleted,
+                    repaired.removed_orphan_blocks,
+                    repaired.resized_inodes,
+                    repaired.snapshot_id_adjusted
+                );
+            } else {
+                let report = IntegrityService.fsck_image(path)?;
+                println!("fsck-image ok: {path}");
+                println!("format_version: {}", report.format_version);
+                println!("segment_count: {}", report.segment_count);
+                println!("valid_superblocks: {}", report.valid_superblocks);
+                println!("selected_generation: {}", report.selected_generation);
+                println!(
+                    "checksums: directory={} payload={}",
+                    report.directory_checksum_valid, report.payload_checksum_valid
+                );
+                println!("block_descriptors: {}", report.block_descriptors);
+            }
         }
         "benchmark" => {
             let config = benchmark_config_from_args(&args[2..])?;
@@ -211,7 +237,7 @@ fn print_usage() {
     println!("  save-image <path>");
     println!("  load <path>");
     println!("  load-image <path>");
-    println!("  fsck-image <path>");
+    println!("  fsck-image <path> [--repair]");
     println!(
         "  benchmark [--profile <name>] [--files <n>] [--payload <bytes>] [--snapshots <n>] [--saves <n>]"
     );
@@ -302,9 +328,17 @@ mod tests {
     #[test]
     fn cli_supports_successful_commands() {
         let fsck_image_path = temp_path("fsck", "img");
+        let repair_image_path = temp_path("fsck-repair", "img");
         let fs = bootstrap_demo_fs().expect("bootstrap should succeed");
         fs.save_image_to_path(&fsck_image_path)
             .expect("image should be saved");
+        fs.save_image_to_path(&repair_image_path)
+            .expect("repair image should be saved");
+        let mut repair_bytes = fs::read(&repair_image_path).expect("repair image should exist");
+        let primary_offset =
+            u64::from_le_bytes(repair_bytes[24..32].try_into().expect("fixed")) as usize;
+        repair_bytes[primary_offset] ^= 0xFF;
+        fs::write(&repair_image_path, repair_bytes).expect("corrupted repair image should save");
 
         let successful = [
             vec!["corefs".to_string(), "mkfs".to_string()],
@@ -344,6 +378,12 @@ mod tests {
                 "corefs".to_string(),
                 "fsck-image".to_string(),
                 fsck_image_path.clone(),
+            ],
+            vec![
+                "corefs".to_string(),
+                "fsck-image".to_string(),
+                repair_image_path.clone(),
+                "--repair".to_string(),
             ],
             vec!["corefs".to_string(), "benchmark".to_string()],
             vec![
@@ -388,6 +428,7 @@ mod tests {
         }
 
         let _ = fs::remove_file(fsck_image_path);
+        let _ = fs::remove_file(repair_image_path);
     }
 
     #[test]
