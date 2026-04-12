@@ -672,6 +672,7 @@ fn encode_snapshot_payload(segment: &SnapshotSegment) -> Result<Vec<u8>, String>
     for snapshot in &segment.snapshots {
         push_u64(&mut bytes, snapshot.id);
         push_string(&mut bytes, &snapshot.name)?;
+        push_string(&mut bytes, &snapshot.scope_root)?;
         push_system_time(&mut bytes, snapshot.created_at)?;
         push_u32(&mut bytes, snapshot.paths.len() as u32);
         for path in &snapshot.paths {
@@ -689,6 +690,7 @@ fn decode_snapshot_payload(bytes: &[u8]) -> Result<SnapshotSegment, String> {
     for _ in 0..count {
         let id = read_u64(bytes, &mut cursor)?;
         let name = read_string(bytes, &mut cursor)?;
+        let scope_root = read_string(bytes, &mut cursor)?;
         let created_at = read_system_time(bytes, &mut cursor)?;
         let path_count = read_u32(bytes, &mut cursor)? as usize;
         let mut paths = Vec::with_capacity(path_count);
@@ -698,6 +700,7 @@ fn decode_snapshot_payload(bytes: &[u8]) -> Result<SnapshotSegment, String> {
         snapshots.push(Snapshot {
             id,
             name,
+            scope_root,
             created_at,
             paths,
         });
@@ -1657,6 +1660,7 @@ mod tests {
             snapshots: vec![Snapshot {
                 id: 1,
                 name: "baseline".to_string(),
+                scope_root: "/".to_string(),
                 created_at: SystemTime::now(),
                 paths: vec!["/".to_string()],
             }],

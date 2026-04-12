@@ -249,6 +249,7 @@ impl CoreFsService {
         let snapshot = Snapshot {
             id: self.next_snapshot_id,
             name: name.to_string(),
+            scope_root: "/".to_string(),
             created_at: SystemTime::now(),
             paths: self.catalog.list_paths(),
         };

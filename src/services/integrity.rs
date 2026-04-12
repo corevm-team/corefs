@@ -140,7 +140,6 @@ mod tests {
             journal_entries: Vec::new(),
             versions: Vec::new(),
             sync_statuses: Vec::new(),
-            hot_path_records: Vec::new(),
             snapshots: vec![Snapshot {
                 id: 1,
                 name: "baseline".to_string(),
@@ -175,7 +174,7 @@ mod tests {
         let report = service.fsck_image(&path).expect("fsck should succeed");
 
         assert_eq!(report.format_version, 4);
-        assert_eq!(report.segment_count, 13);
+        assert_eq!(report.segment_count, 12);
         assert_eq!(report.valid_superblocks, 2);
         assert!(report.directory_checksum_valid);
         assert!(report.payload_checksum_valid);
