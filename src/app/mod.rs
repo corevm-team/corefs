@@ -269,8 +269,22 @@ impl CoreFsService {
     }
 
     pub fn save_image_to_path(&self, path: impl AsRef<Path>) -> CoreFsResult<()> {
+        let path = path.as_ref();
         let state = self.persisted_state();
-        volume_image::save_volume_image(path, &state)
+        // Write to a sibling temp file first, then rename atomically so a crash
+        // during the write never leaves a partially-written image behind.
+        let tmp_name = path
+            .file_name()
+            .map(|n| format!("{}.tmp", n.to_string_lossy()))
+            .unwrap_or_else(|| "corefs.img.tmp".to_string());
+        let tmp_path = path.with_file_name(tmp_name);
+        volume_image::save_volume_image(&tmp_path, &state)?;
+        std::fs::rename(&tmp_path, path).map_err(|error| {
+            let _ = std::fs::remove_file(&tmp_path);
+            CoreFsError::State(format!(
+                "atomic rename of image failed: {error}"
+            ))
+        })
     }
 
     pub fn load_image_from_path(path: impl AsRef<Path>) -> CoreFsResult<Self> {
@@ -743,6 +757,39 @@ mod tests {
         assert_eq!(loaded.recoverable_paths(), vec!["/replay.txt".to_string()]);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_image_to_path_is_atomic_and_leaves_no_tmp_file() {
+        let path = std::env::temp_dir().join(format!(
+            "corefs-atomic-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be after unix epoch")
+                .as_nanos()
+        ));
+        let tmp_path = path.with_file_name(format!(
+            "{}.tmp",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+
+        let mut fs = test_fs();
+        fs.create_file("/atomic.txt", b"hello", &[]).expect("file");
+        fs.save_image_to_path(&path).expect("save");
+
+        // The final image exists and the tmp file is gone.
+        assert!(path.exists(), "image should exist");
+        assert!(!tmp_path.exists(), "tmp file should be cleaned up");
+
+        // Reload to confirm the image is readable.
+        let loaded = CoreFsService::load_image_from_path(&path).expect("load");
+        assert_eq!(
+            loaded.read_file("/atomic.txt").expect("read"),
+            b"hello".to_vec()
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

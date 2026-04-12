@@ -3,7 +3,7 @@ use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::error::{CoreFsError, CoreFsResult};
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
+    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
 use libc::{EEXIST, EINVAL, EISDIR, EIO, ENOENT, ENOTEMPTY, ENOTDIR, EROFS};
 use std::collections::{BTreeMap, HashMap};
@@ -337,6 +337,19 @@ impl Filesystem for CoreFsFuseMount {
         }
 
         reply.ok();
+    }
+
+    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
+        reply.statfs(
+            fuse_total_blocks(),
+            fuse_free_blocks(&self.view.nodes_by_ino),
+            fuse_free_blocks(&self.view.nodes_by_ino),
+            self.view.nodes_by_ino.len() as u64,
+            fuse_free_inodes(self.view.nodes_by_ino.len()),
+            FUSE_BLOCK_SIZE,
+            255,
+            FUSE_BLOCK_SIZE,
+        );
     }
 }
 
@@ -908,6 +921,19 @@ impl Filesystem for CoreFsFuseMountRw {
         reply.ok();
     }
 
+    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
+        reply.statfs(
+            fuse_total_blocks(),
+            fuse_free_blocks(&self.nodes_by_ino),
+            fuse_free_blocks(&self.nodes_by_ino),
+            self.nodes_by_ino.len() as u64,
+            fuse_free_inodes(self.nodes_by_ino.len()),
+            FUSE_BLOCK_SIZE,
+            255,
+            FUSE_BLOCK_SIZE,
+        );
+    }
+
     fn flush(
         &mut self,
         _req: &Request<'_>,
@@ -988,6 +1014,29 @@ pub fn mount_image_rw(
             mount_point.display()
         ))
     })
+}
+
+// ── statfs helpers ───────────────────────────────────────────────────────────
+
+/// Logical block size reported to the kernel.
+const FUSE_BLOCK_SIZE: u32 = 4096;
+/// Virtual total capacity: 1 GiB expressed in 4 KiB blocks.
+const FUSE_TOTAL_BLOCKS: u64 = 1024 * 1024 * 1024 / FUSE_BLOCK_SIZE as u64; // 262 144
+
+fn fuse_total_blocks() -> u64 {
+    FUSE_TOTAL_BLOCKS
+}
+
+/// Compute used blocks from the in-memory node cache and return free blocks.
+fn fuse_free_blocks(nodes: &HashMap<u64, FuseNode>) -> u64 {
+    let used_bytes: u64 = nodes.values().map(|n| n.data.len() as u64).sum();
+    let used_blocks = used_bytes.div_ceil(FUSE_BLOCK_SIZE as u64);
+    FUSE_TOTAL_BLOCKS.saturating_sub(used_blocks)
+}
+
+/// Estimate free inode slots against the same virtual capacity.
+fn fuse_free_inodes(active: usize) -> u64 {
+    FUSE_TOTAL_BLOCKS.saturating_sub(active as u64)
 }
 
 fn demo_fs() -> CoreFsResult<CoreFsService> {
@@ -1218,6 +1267,30 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(!siblings.contains(&"readme.txt".to_string()));
+    }
+
+    #[test]
+    fn statfs_reports_capacity_and_decreases_free_blocks_with_data() {
+        // Empty mount: all blocks should be free.
+        let empty = CoreFsFuseMountRw::from_service(
+            CoreFsService::format(CoreFsConfig::default()),
+            PathBuf::from("/tmp/test.img"),
+        );
+        let total = fuse_total_blocks();
+        let free_empty = fuse_free_blocks(&empty.nodes_by_ino);
+        assert_eq!(free_empty, total, "no data means all blocks free");
+
+        // Mount with one file: free blocks must decrease.
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/big.bin", &vec![0u8; 8192], &[])
+            .expect("file");
+        let mount = CoreFsFuseMountRw::from_service(fs, PathBuf::from("/tmp/test.img"));
+        let free_with_data = fuse_free_blocks(&mount.nodes_by_ino);
+        assert!(
+            free_with_data < total,
+            "used data should reduce free block count"
+        );
+        assert_eq!(total - free_with_data, 2, "8 KiB = 2 blocks of 4 KiB");
     }
 
     #[test]
