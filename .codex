@@ -1,0 +1,11 @@
+CoreFS workspace directives
+
+- CoreFS wird in Rust entwickelt.
+- CoreFS ist plattformneutral und darf nicht konzeptionell auf Linux ausgerichtet sein.
+- Primaeres Ziel ist ein natives Standard-Dateisystem fuer das eigene Betriebssystem.
+- Fremdsysteme werden nur ueber optionale Kompatibilitaets- und Plattformadapter angebunden.
+- Architektur soll enterprise-artig sein: klare Modulgrenzen, getrennte Verantwortlichkeiten, saubere Domaenen- und Service-Schichten.
+- Anforderungen aus features_corefs.md und corefs_brainstorming.txt sind zu beruecksichtigen.
+- Bei Erweiterungen sollen Struktur, Testbarkeit und Wartbarkeit Vorrang haben.
+- Moeglichst vollstaendige Testabdeckung fuer die vorhandene Implementierung anstreben.
+- Projektfortschritt zentral in PROJECT_PROGRESS.md pflegen.
