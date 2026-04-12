@@ -1,0 +1,439 @@
+{
+  "config": {
+    "volume_name": "corefs",
+    "block_size": 4096,
+    "inode_table_capacity": 1000000,
+    "default_tier": "Warm",
+    "versioning": {
+      "keep_latest": 16,
+      "auto_prune": true,
+      "expose_time_travel": true
+    },
+    "security": {
+      "encryption_at_rest": true,
+      "acl_enabled": true,
+      "secure_delete_supported": true
+    },
+    "performance": {
+      "journaling_enabled": true,
+      "copy_on_write": true,
+      "compression_enabled": true,
+      "deduplication_enabled": false,
+      "trim_enabled": true
+    }
+  },
+  "volume": {
+    "name": "corefs",
+    "block_size": 4096,
+    "created_at": {
+      "secs_since_epoch": 1775990881,
+      "nanos_since_epoch": 855144815
+    },
+    "feature_flags": [
+      "journaling",
+      "copy_on_write",
+      "compression",
+      "encryption",
+      "acl",
+      "time_travel"
+    ]
+  },
+  "active_inodes": [
+    {
+      "id": 1,
+      "kind": "Directory",
+      "path": "/etc",
+      "size": 0,
+      "created_at": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855157097
+      },
+      "modified_at": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855157097
+      },
+      "metadata": {
+        "tags": [],
+        "attributes": [],
+        "content_class": "Unknown",
+        "storage_tier": "Warm",
+        "acl": [],
+        "encrypted": false,
+        "compressed": false
+      }
+    },
+    {
+      "id": 5,
+      "kind": "Symlink",
+      "path": "/etc/corefs-current",
+      "size": 16,
+      "created_at": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855209767
+      },
+      "modified_at": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855209767
+      },
+      "metadata": {
+        "tags": [],
+        "attributes": [],
+        "content_class": "Unknown",
+        "storage_tier": "Warm",
+        "acl": [],
+        "encrypted": false,
+        "compressed": false
+      }
+    },
+    {
+      "id": 3,
+      "kind": "File",
+      "path": "/etc/corefs.conf",
+      "size": 43,
+      "created_at": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855177783
+      },
+      "modified_at": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855177783
+      },
+      "metadata": {
+        "tags": [
+          "config",
+          "system"
+        ],
+        "attributes": [],
+        "content_class": "Binary",
+        "storage_tier": "Warm",
+        "acl": [
+          {
+            "principal": {
+              "Role": "system"
+            },
+            "can_read": true,
+            "can_write": true,
+            "can_execute": true
+          }
+        ],
+        "encrypted": true,
+        "compressed": true
+      }
+    },
+    {
+      "id": 2,
+      "kind": "Directory",
+      "path": "/var",
+      "size": 0,
+      "created_at": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855166803
+      },
+      "modified_at": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855166803
+      },
+      "metadata": {
+        "tags": [],
+        "attributes": [],
+        "content_class": "Unknown",
+        "storage_tier": "Warm",
+        "acl": [],
+        "encrypted": false,
+        "compressed": false
+      }
+    },
+    {
+      "id": 4,
+      "kind": "File",
+      "path": "/var/readme.txt",
+      "size": 27,
+      "created_at": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855202391
+      },
+      "modified_at": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855202391
+      },
+      "metadata": {
+        "tags": [
+          "docs"
+        ],
+        "attributes": [],
+        "content_class": "Text",
+        "storage_tier": "Warm",
+        "acl": [
+          {
+            "principal": {
+              "Role": "system"
+            },
+            "can_read": true,
+            "can_write": true,
+            "can_execute": true
+          }
+        ],
+        "encrypted": true,
+        "compressed": true
+      }
+    }
+  ],
+  "deleted_inodes": [],
+  "block_records": [
+    {
+      "inode": 3,
+      "bytes": [
+        118,
+        111,
+        108,
+        117,
+        109,
+        101,
+        61,
+        99,
+        111,
+        114,
+        101,
+        102,
+        115,
+        10,
+        99,
+        111,
+        109,
+        112,
+        114,
+        101,
+        115,
+        115,
+        105,
+        111,
+        110,
+        61,
+        111,
+        110,
+        10,
+        101,
+        110,
+        99,
+        114,
+        121,
+        112,
+        116,
+        105,
+        111,
+        110,
+        61,
+        111,
+        110,
+        10
+      ],
+      "checksum": 1382941929117179858
+    },
+    {
+      "inode": 4,
+      "bytes": [
+        67,
+        111,
+        114,
+        101,
+        70,
+        83,
+        32,
+        101,
+        110,
+        116,
+        101,
+        114,
+        112,
+        114,
+        105,
+        115,
+        101,
+        32,
+        98,
+        111,
+        111,
+        116,
+        115,
+        116,
+        114,
+        97,
+        112
+      ],
+      "checksum": 9844130432401086023
+    },
+    {
+      "inode": 5,
+      "bytes": [
+        47,
+        101,
+        116,
+        99,
+        47,
+        99,
+        111,
+        114,
+        101,
+        102,
+        115,
+        46,
+        99,
+        111,
+        110,
+        102
+      ],
+      "checksum": 8940810711470771916
+    }
+  ],
+  "journal_entries": [
+    {
+      "timestamp": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855147039
+      },
+      "operation": "format",
+      "target": "/",
+      "details": "volume=corefs"
+    },
+    {
+      "timestamp": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855164374
+      },
+      "operation": "create_directory",
+      "target": "/etc",
+      "details": ""
+    },
+    {
+      "timestamp": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855173047
+      },
+      "operation": "create_directory",
+      "target": "/var",
+      "details": ""
+    },
+    {
+      "timestamp": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855199563
+      },
+      "operation": "create_file",
+      "target": "/etc/corefs.conf",
+      "details": "bytes=43"
+    },
+    {
+      "timestamp": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855208242
+      },
+      "operation": "create_file",
+      "target": "/var/readme.txt",
+      "details": "bytes=27"
+    },
+    {
+      "timestamp": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855212052
+      },
+      "operation": "create_symlink",
+      "target": "/etc/corefs-current",
+      "details": "target=/etc/corefs.conf"
+    }
+  ],
+  "versions": [
+    {
+      "version_id": 1,
+      "path": "/etc/corefs.conf",
+      "created_at": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855181261
+      },
+      "bytes": [
+        118,
+        111,
+        108,
+        117,
+        109,
+        101,
+        61,
+        99,
+        111,
+        114,
+        101,
+        102,
+        115,
+        10,
+        99,
+        111,
+        109,
+        112,
+        114,
+        101,
+        115,
+        115,
+        105,
+        111,
+        110,
+        61,
+        111,
+        110,
+        10,
+        101,
+        110,
+        99,
+        114,
+        121,
+        112,
+        116,
+        105,
+        111,
+        110,
+        61,
+        111,
+        110,
+        10
+      ]
+    },
+    {
+      "version_id": 2,
+      "path": "/var/readme.txt",
+      "created_at": {
+        "secs_since_epoch": 1775990881,
+        "nanos_since_epoch": 855205505
+      },
+      "bytes": [
+        67,
+        111,
+        114,
+        101,
+        70,
+        83,
+        32,
+        101,
+        110,
+        116,
+        101,
+        114,
+        112,
+        114,
+        105,
+        115,
+        101,
+        32,
+        98,
+        111,
+        111,
+        116,
+        115,
+        116,
+        114,
+        97,
+        112
+      ]
+    }
+  ],
+  "sync_statuses": [],
+  "snapshots": [],
+  "next_snapshot_id": 0
+}

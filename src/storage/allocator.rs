@@ -20,6 +20,13 @@ impl InodeAllocator {
     pub fn release(&mut self, inode: InodeId) {
         self.recycled.push_back(inode);
     }
+
+    pub fn with_next_inode(next_inode: u64) -> Self {
+        Self {
+            next_inode,
+            recycled: VecDeque::new(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileVersion {
     pub version_id: u64,
     pub path: String,
@@ -41,6 +42,28 @@ impl VersioningService {
                 let split_at = items.len() - keep_latest;
                 items.drain(0..split_at);
             }
+        }
+    }
+
+    pub fn all_versions(&self) -> Vec<FileVersion> {
+        self.versions.values().flatten().cloned().collect()
+    }
+
+    pub fn from_versions(versions: Vec<FileVersion>) -> Self {
+        let mut grouped = BTreeMap::<String, Vec<FileVersion>>::new();
+        let mut next_version = 0;
+
+        for version in versions {
+            next_version = next_version.max(version.version_id);
+            grouped
+                .entry(version.path.clone())
+                .or_default()
+                .push(version);
+        }
+
+        Self {
+            next_version,
+            versions: grouped,
         }
     }
 }

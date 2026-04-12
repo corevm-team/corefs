@@ -17,6 +17,10 @@ use crate::services::versioning::VersioningService;
 use crate::storage::allocator::InodeAllocator;
 use crate::storage::block_store::BlockStore;
 use crate::storage::catalog::Catalog;
+use crate::storage::persistence;
+use crate::storage::volume_image;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +38,20 @@ pub struct AdminReport {
     pub runtime: RuntimeIntegrationBlueprint,
     pub tools: ToolRegistry,
     pub stats: FsStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedState {
+    pub config: CoreFsConfig,
+    pub volume: VolumeDescriptor,
+    pub active_inodes: Vec<Inode>,
+    pub deleted_inodes: Vec<Inode>,
+    pub block_records: Vec<crate::storage::block_store::BlockRecord>,
+    pub journal_entries: Vec<crate::services::journal::JournalEntry>,
+    pub versions: Vec<crate::services::versioning::FileVersion>,
+    pub sync_statuses: Vec<crate::services::sync::SyncStatus>,
+    pub snapshots: Vec<Snapshot>,
+    pub next_snapshot_id: u64,
 }
 
 #[derive(Debug)]
@@ -240,6 +258,26 @@ impl CoreFsService {
         snapshot
     }
 
+    pub fn save_to_path(&self, path: impl AsRef<Path>) -> CoreFsResult<()> {
+        let state = self.persisted_state();
+        persistence::save_state(path, &state)
+    }
+
+    pub fn load_from_path(path: impl AsRef<Path>) -> CoreFsResult<Self> {
+        let state = persistence::load_state(path)?;
+        Ok(Self::from_persisted_state(state))
+    }
+
+    pub fn save_image_to_path(&self, path: impl AsRef<Path>) -> CoreFsResult<()> {
+        let state = self.persisted_state();
+        volume_image::save_volume_image(path, &state)
+    }
+
+    pub fn load_image_from_path(path: impl AsRef<Path>) -> CoreFsResult<Self> {
+        let state = volume_image::load_volume_image(path)?;
+        Ok(Self::from_persisted_state(state))
+    }
+
     pub fn scrub(&self) -> IntegrityReport {
         let inode_ids = self
             .catalog
@@ -315,6 +353,86 @@ impl CoreFsService {
 
     pub fn inode_for_path(&self, path: &str) -> Option<InodeId> {
         self.catalog.get(path).map(|inode| inode.id)
+    }
+
+    fn persisted_state(&self) -> PersistedState {
+        PersistedState {
+            config: self.config.clone(),
+            volume: self.volume.clone(),
+            active_inodes: self.catalog.active_entries(),
+            deleted_inodes: self.catalog.deleted_entries(),
+            block_records: self.blocks.records(),
+            journal_entries: self.journal.entries().to_vec(),
+            versions: self.versioning.all_versions(),
+            sync_statuses: self.sync.statuses().to_vec(),
+            snapshots: self.snapshots.clone(),
+            next_snapshot_id: self.next_snapshot_id,
+        }
+    }
+
+    fn from_persisted_state(state: PersistedState) -> Self {
+        let next_inode = state
+            .active_inodes
+            .iter()
+            .chain(state.deleted_inodes.iter())
+            .map(|inode| inode.id.0)
+            .max()
+            .unwrap_or(0);
+
+        let mut recovery = RecoveryService::default();
+        for inode in &state.deleted_inodes {
+            recovery.remember(inode.clone());
+        }
+
+        let mut service = Self {
+            config: state.config,
+            volume: state.volume,
+            allocator: InodeAllocator::with_next_inode(next_inode),
+            catalog: Catalog::from_parts(state.active_inodes, state.deleted_inodes),
+            blocks: BlockStore::from_records(state.block_records),
+            journal: JournalService::from_entries(state.journal_entries),
+            versioning: VersioningService::from_versions(state.versions),
+            recovery,
+            integrity: IntegrityService,
+            indexing: IndexingService,
+            security: SecurityService,
+            sync: SyncService::from_statuses(state.sync_statuses),
+            snapshots: state.snapshots,
+            next_snapshot_id: state.next_snapshot_id,
+        };
+        service.reconcile_from_journal();
+        service
+    }
+
+    fn reconcile_from_journal(&mut self) {
+        let replay = self.journal.replay();
+
+        let active_paths = self.catalog.list_paths();
+        for path in active_paths {
+            if replay.deleted_paths.contains(&path) {
+                if let Some(inode) = self.catalog.remove(&path) {
+                    self.catalog.move_to_deleted(inode.clone());
+                    self.recovery.remember(inode);
+                }
+            }
+        }
+
+        let deleted_paths = self.catalog.list_deleted_paths();
+        for path in deleted_paths {
+            if replay.active_paths.contains(&path) {
+                if let Some(inode) = self.catalog.restore_deleted(&path) {
+                    self.recovery.forget(&path);
+                    self.catalog.insert(inode);
+                }
+            } else if !replay.deleted_paths.contains(&path) {
+                let _ = self.catalog.restore_deleted(&path);
+                self.recovery.forget(&path);
+            }
+        }
+
+        if self.next_snapshot_id < replay.snapshot_count as u64 {
+            self.next_snapshot_id = replay.snapshot_count as u64;
+        }
     }
 }
 
@@ -478,6 +596,114 @@ mod tests {
                 .any(|item| item == "native-os")
         );
         assert_eq!(report.tools.mkfs, "corefs mkfs");
+    }
+
+    #[test]
+    fn state_can_be_saved_and_loaded_again() {
+        let path = std::env::temp_dir().join(format!(
+            "corefs-service-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        ));
+
+        let mut fs = test_fs();
+        fs.create_directory("/etc").expect("dir");
+        fs.create_file("/etc/config.txt", b"cfg", &["config".to_string()])
+            .expect("file");
+        fs.create_snapshot("baseline");
+        fs.mark_synced("/etc/config.txt", "node-a").expect("sync");
+        fs.delete_file("/etc/config.txt", false).expect("delete");
+        fs.save_to_path(&path).expect("save should succeed");
+
+        let loaded = CoreFsService::load_from_path(&path).expect("load should succeed");
+
+        assert_eq!(loaded.volume_name(), "corefs");
+        assert!(loaded.list_paths().iter().any(|path| path == "/etc"));
+        assert_eq!(
+            loaded.recoverable_paths(),
+            vec!["/etc/config.txt".to_string()]
+        );
+        assert_eq!(loaded.snapshot_names(), vec!["baseline".to_string()]);
+        assert_eq!(loaded.synced_paths(), 1);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn loading_invalid_state_returns_error() {
+        let path = std::env::temp_dir().join(format!(
+            "corefs-invalid-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"not-json").expect("test file should be written");
+
+        let result = CoreFsService::load_from_path(&path);
+        assert!(matches!(result, Err(CoreFsError::State(_))));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn state_can_be_saved_and_loaded_as_binary_image() {
+        let path = std::env::temp_dir().join(format!(
+            "corefs-image-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        ));
+
+        let mut fs = test_fs();
+        fs.create_directory("/var").expect("dir");
+        fs.create_file("/var/log.bin", b"log", &["logs".to_string()])
+            .expect("file");
+        fs.create_snapshot("binary");
+        fs.save_image_to_path(&path)
+            .expect("image save should succeed");
+
+        let loaded = CoreFsService::load_image_from_path(&path).expect("image load should succeed");
+
+        assert!(
+            loaded
+                .list_paths()
+                .iter()
+                .any(|path| path == "/var/log.bin")
+        );
+        assert_eq!(loaded.snapshot_names(), vec!["binary".to_string()]);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn journal_replay_reconciles_deleted_entries_on_load() {
+        let path = std::env::temp_dir().join(format!(
+            "corefs-journal-replay-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        ));
+
+        let mut fs = test_fs();
+        fs.create_file("/replay.txt", b"data", &[]).expect("file");
+        fs.delete_file("/replay.txt", false).expect("delete");
+        fs.save_image_to_path(&path).expect("save image");
+
+        let loaded = CoreFsService::load_image_from_path(&path).expect("load image");
+
+        assert!(!loaded.list_paths().iter().any(|path| path == "/replay.txt"));
+        assert_eq!(loaded.recoverable_paths(), vec!["/replay.txt".to_string()]);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

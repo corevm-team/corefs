@@ -1,7 +1,8 @@
 use crate::config::StorageTier;
 use crate::domain::acl::AclEntry;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContentClass {
     Text,
     Binary,
@@ -11,7 +12,7 @@ pub enum ContentClass {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileMetadata {
     pub tags: Vec<String>,
     pub attributes: Vec<(String, String)>,

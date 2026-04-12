@@ -1,4 +1,6 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncStatus {
     pub path: String,
     pub synced: bool,
@@ -21,6 +23,10 @@ impl SyncService {
 
     pub fn statuses(&self) -> &[SyncStatus] {
         &self.records
+    }
+
+    pub fn from_statuses(records: Vec<SyncStatus>) -> Self {
+        Self { records }
     }
 }
 

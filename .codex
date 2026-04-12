@@ -9,3 +9,5 @@ CoreFS workspace directives
 - Bei Erweiterungen sollen Struktur, Testbarkeit und Wartbarkeit Vorrang haben.
 - Moeglichst vollstaendige Testabdeckung fuer die vorhandene Implementierung anstreben.
 - Projektfortschritt zentral in PROJECT_PROGRESS.md pflegen.
+- Performance-Tool weiter ausbauen mit mehreren vordefinierten Suites wie dev, ci, regression und storage-heavy.
+- Performance-Tool soll Benchmark-Ergebnisse kuenftig automatisch mit frueheren Messungen vergleichen koennen.

@@ -1,25 +1,27 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageTier {
     Hot,
     Warm,
     Cold,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersioningPolicy {
     pub keep_latest: usize,
     pub auto_prune: bool,
     pub expose_time_travel: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecurityPolicy {
     pub encryption_at_rest: bool,
     pub acl_enabled: bool,
     pub secure_delete_supported: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerformancePolicy {
     pub journaling_enabled: bool,
     pub copy_on_write: bool,
@@ -28,7 +30,7 @@ pub struct PerformancePolicy {
     pub trim_enabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoreFsConfig {
     pub volume_name: String,
     pub block_size: usize,

@@ -3,6 +3,7 @@ pub struct ToolRegistry {
     pub mkfs: String,
     pub fsck: String,
     pub admin: String,
+    pub benchmark: String,
 }
 
 impl Default for ToolRegistry {
@@ -11,6 +12,7 @@ impl Default for ToolRegistry {
             mkfs: "corefs mkfs".to_string(),
             fsck: "corefs fsck".to_string(),
             admin: "corefs admin".to_string(),
+            benchmark: "corefs benchmark".to_string(),
         }
     }
 }
@@ -26,5 +28,6 @@ mod tests {
         assert_eq!(registry.mkfs, "corefs mkfs");
         assert_eq!(registry.fsck, "corefs fsck");
         assert_eq!(registry.admin, "corefs admin");
+        assert_eq!(registry.benchmark, "corefs benchmark");
     }
 }

@@ -1,7 +1,8 @@
 use crate::config::CoreFsConfig;
+use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolumeDescriptor {
     pub name: String,
     pub block_size: usize,

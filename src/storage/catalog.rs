@@ -32,6 +32,10 @@ impl Catalog {
         self.deleted.remove(path)
     }
 
+    pub fn deleted_contains(&self, path: &str) -> bool {
+        self.deleted.contains_key(path)
+    }
+
     pub fn list_paths(&self) -> Vec<String> {
         self.entries.keys().cloned().collect()
     }
@@ -42,6 +46,26 @@ impl Catalog {
 
     pub fn inode_by_id(&self, inode_id: InodeId) -> Option<&Inode> {
         self.entries.values().find(|inode| inode.id == inode_id)
+    }
+
+    pub fn active_entries(&self) -> Vec<Inode> {
+        self.entries.values().cloned().collect()
+    }
+
+    pub fn deleted_entries(&self) -> Vec<Inode> {
+        self.deleted.values().cloned().collect()
+    }
+
+    pub fn from_parts(active: Vec<Inode>, deleted: Vec<Inode>) -> Self {
+        let entries = active
+            .into_iter()
+            .map(|inode| (inode.path.clone(), inode))
+            .collect();
+        let deleted = deleted
+            .into_iter()
+            .map(|inode| (inode.path.clone(), inode))
+            .collect();
+        Self { entries, deleted }
     }
 }
 

@@ -1,7 +1,8 @@
 use crate::domain::inode::InodeId;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockRecord {
     pub inode: InodeId,
     pub bytes: Vec<u8>,
@@ -45,6 +46,18 @@ impl BlockStore {
             .get(&inode)
             .map(|record| record.checksum == checksum(&record.bytes))
             .unwrap_or(false)
+    }
+
+    pub fn records(&self) -> Vec<BlockRecord> {
+        self.blocks.values().cloned().collect()
+    }
+
+    pub fn from_records(records: Vec<BlockRecord>) -> Self {
+        let blocks = records
+            .into_iter()
+            .map(|record| (record.inode, record))
+            .collect();
+        Self { blocks }
     }
 }
 

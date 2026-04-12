@@ -1,6 +1,10 @@
 use crate::app::CoreFsService;
 use crate::config::CoreFsConfig;
 use crate::error::{CoreFsError, CoreFsResult};
+use crate::platform::performance::{
+    BenchmarkConfig, BenchmarkProfile, append_benchmark_markdown, run_benchmark,
+};
+use crate::services::integrity::IntegrityService;
 
 pub fn run<I>(args: I) -> CoreFsResult<()>
 where
@@ -80,6 +84,90 @@ where
             let bytes = fs.read_file(path)?;
             println!("{}", String::from_utf8_lossy(&bytes));
         }
+        "save" => {
+            let path = args
+                .get(2)
+                .ok_or_else(|| CoreFsError::InvalidCommand("missing path for save".to_string()))?;
+            fs.save_to_path(path)?;
+            println!("saved state to {path}");
+        }
+        "save-image" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for save-image".to_string())
+            })?;
+            fs.save_image_to_path(path)?;
+            println!("saved volume image to {path}");
+        }
+        "load" => {
+            let path = args
+                .get(2)
+                .ok_or_else(|| CoreFsError::InvalidCommand("missing path for load".to_string()))?;
+            let loaded = CoreFsService::load_from_path(path)?;
+            let report = loaded.admin_report();
+            println!("loaded volume: {}", report.volume.name);
+            println!("files: {}", report.stats.files);
+            println!("snapshots: {}", report.stats.snapshots);
+            println!("journal_entries: {}", report.stats.journal_entries);
+        }
+        "load-image" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for load-image".to_string())
+            })?;
+            let loaded = CoreFsService::load_image_from_path(path)?;
+            let report = loaded.admin_report();
+            println!("loaded volume image: {}", report.volume.name);
+            println!("files: {}", report.stats.files);
+            println!("snapshots: {}", report.stats.snapshots);
+            println!("journal_entries: {}", report.stats.journal_entries);
+        }
+        "fsck-image" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for fsck-image".to_string())
+            })?;
+            let report = IntegrityService.fsck_image(path)?;
+            println!("fsck-image ok: {path}");
+            println!("format_version: {}", report.format_version);
+            println!("segment_count: {}", report.segment_count);
+            println!("valid_superblocks: {}", report.valid_superblocks);
+            println!("selected_generation: {}", report.selected_generation);
+            println!(
+                "checksums: directory={} payload={}",
+                report.directory_checksum_valid, report.payload_checksum_valid
+            );
+            println!("block_descriptors: {}", report.block_descriptors);
+        }
+        "benchmark" => {
+            let config = benchmark_config_from_args(&args[2..])?;
+            let result = run_benchmark(config)?;
+            println!("benchmark timestamp_ms={}", result.timestamp_unix_ms);
+            println!(
+                "profile={} files={} payload={} snapshots={} saves={}",
+                result.profile,
+                result.file_count,
+                result.payload_size,
+                result.snapshot_count,
+                result.persist_runs
+            );
+            println!(
+                "create_ms={} read_ms={} snapshot_ms={} save_ms={}",
+                result.create_ms, result.read_ms, result.snapshot_ms, result.save_ms
+            );
+            println!(
+                "throughput_mib={:.2} create_ops_s={:.2} read_ops_s={:.2}",
+                result.write_mib(),
+                result.create_ops_per_sec(),
+                result.read_ops_per_sec()
+            );
+        }
+        "benchmark-log" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for benchmark-log".to_string())
+            })?;
+            let config = benchmark_config_from_args(&args[3..])?;
+            let result = run_benchmark(config)?;
+            append_benchmark_markdown(path, &result)?;
+            println!("benchmark written to {path}");
+        }
         command => {
             return Err(CoreFsError::InvalidCommand(format!(
                 "unknown command: {command}"
@@ -119,11 +207,91 @@ fn print_usage() {
     println!("  restore <path>");
     println!("  write <path> <payload>");
     println!("  read <path>");
+    println!("  save <path>");
+    println!("  save-image <path>");
+    println!("  load <path>");
+    println!("  load-image <path>");
+    println!("  fsck-image <path>");
+    println!(
+        "  benchmark [--profile <name>] [--files <n>] [--payload <bytes>] [--snapshots <n>] [--saves <n>]"
+    );
+    println!(
+        "  benchmark-log <path> [--profile <name>] [--files <n>] [--payload <bytes>] [--snapshots <n>] [--saves <n>]"
+    );
+    println!(
+        "  profiles: balanced | small-files | metadata-heavy | snapshot-heavy | persist-heavy"
+    );
+}
+
+fn benchmark_config_from_args(args: &[String]) -> CoreFsResult<BenchmarkConfig> {
+    let mut config = BenchmarkConfig::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--profile" => {
+                let value = args.get(index + 1).ok_or_else(|| {
+                    CoreFsError::InvalidCommand("missing value for --profile".to_string())
+                })?;
+                config = BenchmarkConfig::from_profile(BenchmarkProfile::from_str(value)?);
+                index += 2;
+            }
+            "--files" => {
+                config.file_count = parse_usize_flag(args, index, "--files")?;
+                index += 2;
+            }
+            "--payload" => {
+                config.payload_size = parse_usize_flag(args, index, "--payload")?;
+                index += 2;
+            }
+            "--snapshots" => {
+                config.snapshot_count = parse_usize_flag(args, index, "--snapshots")?;
+                index += 2;
+            }
+            "--saves" => {
+                config.persist_runs = parse_usize_flag(args, index, "--saves")?;
+                index += 2;
+            }
+            other => {
+                return Err(CoreFsError::InvalidCommand(format!(
+                    "unknown benchmark option: {other}"
+                )));
+            }
+        }
+    }
+
+    Ok(config)
+}
+
+fn parse_usize_flag(args: &[String], index: usize, flag: &str) -> CoreFsResult<usize> {
+    let value = args
+        .get(index + 1)
+        .ok_or_else(|| CoreFsError::InvalidCommand(format!("missing value for {flag}")))?;
+    value.parse::<usize>().map_err(|error| {
+        CoreFsError::InvalidInput(format!("invalid numeric value for {flag}: {error}"))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_path(name: &str, extension: &str) -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "corefs-cli-{name}-{}-{}.{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time should be after unix epoch")
+                    .as_nanos(),
+                extension
+            ))
+            .display()
+            .to_string()
+    }
 
     #[test]
     fn cli_without_command_returns_ok() {
@@ -133,6 +301,11 @@ mod tests {
 
     #[test]
     fn cli_supports_successful_commands() {
+        let fsck_image_path = temp_path("fsck", "img");
+        let fs = bootstrap_demo_fs().expect("bootstrap should succeed");
+        fs.save_image_to_path(&fsck_image_path)
+            .expect("image should be saved");
+
         let successful = [
             vec!["corefs".to_string(), "mkfs".to_string()],
             vec!["corefs".to_string(), "status".to_string()],
@@ -156,6 +329,49 @@ mod tests {
             ],
             vec![
                 "corefs".to_string(),
+                "save".to_string(),
+                std::env::temp_dir()
+                    .join("corefs-cli-save.json")
+                    .display()
+                    .to_string(),
+            ],
+            vec![
+                "corefs".to_string(),
+                "save-image".to_string(),
+                temp_path("save", "img"),
+            ],
+            vec![
+                "corefs".to_string(),
+                "fsck-image".to_string(),
+                fsck_image_path.clone(),
+            ],
+            vec!["corefs".to_string(), "benchmark".to_string()],
+            vec![
+                "corefs".to_string(),
+                "benchmark".to_string(),
+                "--profile".to_string(),
+                "small-files".to_string(),
+                "--files".to_string(),
+                "16".to_string(),
+                "--payload".to_string(),
+                "128".to_string(),
+                "--snapshots".to_string(),
+                "2".to_string(),
+                "--saves".to_string(),
+                "2".to_string(),
+            ],
+            vec![
+                "corefs".to_string(),
+                "benchmark-log".to_string(),
+                std::env::temp_dir()
+                    .join("corefs-cli-benchmark.md")
+                    .display()
+                    .to_string(),
+                "--profile".to_string(),
+                "persist-heavy".to_string(),
+            ],
+            vec![
+                "corefs".to_string(),
                 "delete".to_string(),
                 "/var/readme.txt".to_string(),
             ],
@@ -170,6 +386,8 @@ mod tests {
         for args in successful {
             assert!(run(args).is_ok());
         }
+
+        let _ = fs::remove_file(fsck_image_path);
     }
 
     #[test]
@@ -195,6 +413,42 @@ mod tests {
 
         let read = run(vec!["corefs".to_string(), "read".to_string()]);
         assert!(matches!(read, Err(CoreFsError::InvalidCommand(_))));
+
+        let save = run(vec!["corefs".to_string(), "save".to_string()]);
+        assert!(matches!(save, Err(CoreFsError::InvalidCommand(_))));
+
+        let load = run(vec!["corefs".to_string(), "load".to_string()]);
+        assert!(matches!(load, Err(CoreFsError::InvalidCommand(_))));
+
+        let save_image = run(vec!["corefs".to_string(), "save-image".to_string()]);
+        assert!(matches!(save_image, Err(CoreFsError::InvalidCommand(_))));
+
+        let load_image = run(vec!["corefs".to_string(), "load-image".to_string()]);
+        assert!(matches!(load_image, Err(CoreFsError::InvalidCommand(_))));
+
+        let fsck_image = run(vec!["corefs".to_string(), "fsck-image".to_string()]);
+        assert!(matches!(fsck_image, Err(CoreFsError::InvalidCommand(_))));
+
+        let benchmark_log = run(vec!["corefs".to_string(), "benchmark-log".to_string()]);
+        assert!(matches!(benchmark_log, Err(CoreFsError::InvalidCommand(_))));
+
+        let benchmark_profile = run(vec![
+            "corefs".to_string(),
+            "benchmark".to_string(),
+            "--profile".to_string(),
+        ]);
+        assert!(matches!(
+            benchmark_profile,
+            Err(CoreFsError::InvalidCommand(_))
+        ));
+
+        let benchmark_value = run(vec![
+            "corefs".to_string(),
+            "benchmark".to_string(),
+            "--files".to_string(),
+            "abc".to_string(),
+        ]);
+        assert!(matches!(benchmark_value, Err(CoreFsError::InvalidInput(_))));
     }
 
     #[test]
@@ -207,5 +461,29 @@ mod tests {
         assert!(paths.iter().any(|path| path == "/etc/corefs.conf"));
         assert!(paths.iter().any(|path| path == "/var/readme.txt"));
         assert!(paths.iter().any(|path| path == "/etc/corefs-current"));
+    }
+
+    #[test]
+    fn benchmark_config_parser_accepts_overrides() {
+        let args = vec![
+            "--profile".to_string(),
+            "snapshot-heavy".to_string(),
+            "--files".to_string(),
+            "10".to_string(),
+            "--payload".to_string(),
+            "512".to_string(),
+            "--snapshots".to_string(),
+            "3".to_string(),
+            "--saves".to_string(),
+            "2".to_string(),
+        ];
+
+        let config = benchmark_config_from_args(&args).expect("config should parse");
+
+        assert_eq!(config.profile, BenchmarkProfile::SnapshotHeavy);
+        assert_eq!(config.file_count, 10);
+        assert_eq!(config.payload_size, 512);
+        assert_eq!(config.snapshot_count, 3);
+        assert_eq!(config.persist_runs, 2);
     }
 }
