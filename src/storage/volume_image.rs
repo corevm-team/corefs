@@ -655,8 +655,121 @@ fn persisted_state_from_entries_relaxed(
     entries: &[SegmentEntry],
     path: &Path,
 ) -> CoreFsResult<(PersistedState, bool)> {
-    let state = persisted_state_from_entries(bytes, entries, path)?;
-    Ok((state, false))
+    match persisted_state_from_entries(bytes, entries, path) {
+        Ok(state) => Ok((state, false)),
+        Err(_) => {
+            let mut state = persisted_state_without_blocks(bytes, entries, path)?;
+            state.block_records = reconstruct_block_records_from_data(
+                &state.active_inodes,
+                &state.deleted_inodes,
+                bytes,
+                entries,
+                path,
+            )?;
+            Ok((state, true))
+        }
+    }
+}
+
+fn persisted_state_without_blocks(
+    bytes: &[u8],
+    entries: &[SegmentEntry],
+    path: &Path,
+) -> CoreFsResult<PersistedState> {
+    let config = deserialize_optional_segment::<ConfigSegment>(bytes, entries, b"CNFG", path)?
+        .map(|segment| segment.config)
+        .unwrap_or_default();
+    let volume = deserialize_optional_segment::<VolumeSegment>(bytes, entries, b"VOLM", path)?
+        .map(|segment| segment.volume)
+        .unwrap_or_else(|| VolumeDescriptor::from_config(&config));
+    let active = deserialize_optional_segment::<InodeSegment>(bytes, entries, b"AINO", path)?
+        .map(|segment| segment.inodes)
+        .unwrap_or_default();
+    let deleted = deserialize_optional_segment::<InodeSegment>(bytes, entries, b"DINO", path)?
+        .map(|segment| segment.inodes)
+        .unwrap_or_default();
+    let journal = deserialize_optional_segment::<JournalSegment>(bytes, entries, b"JOUR", path)?
+        .map(|segment| segment.journal_entries)
+        .unwrap_or_default();
+    let versions = deserialize_optional_segment::<VersionSegment>(bytes, entries, b"VERS", path)?
+        .map(|segment| segment.versions)
+        .unwrap_or_default();
+    let sync = deserialize_optional_segment::<SyncSegment>(bytes, entries, b"SYNC", path)?
+        .map(|segment| segment.sync_statuses)
+        .unwrap_or_default();
+    let snapshots = deserialize_optional_segment::<SnapshotSegment>(bytes, entries, b"SNAP", path)?
+        .unwrap_or(SnapshotSegment {
+            snapshots: Vec::new(),
+            next_snapshot_id: 0,
+        });
+
+    Ok(PersistedState {
+        config,
+        volume,
+        active_inodes: active,
+        deleted_inodes: deleted,
+        block_records: Vec::new(),
+        journal_entries: journal,
+        versions,
+        sync_statuses: sync,
+        snapshots: snapshots.snapshots,
+        next_snapshot_id: snapshots.next_snapshot_id,
+    })
+}
+
+fn reconstruct_block_records_from_data(
+    active_inodes: &[Inode],
+    deleted_inodes: &[Inode],
+    bytes: &[u8],
+    entries: &[SegmentEntry],
+    path: &Path,
+) -> CoreFsResult<Vec<BlockRecord>> {
+    let data_entry = find_segment(entries, b"DATA")?;
+    let data = segment_bytes(bytes, data_entry, path)?;
+    let mut file_like_inodes: Vec<_> = active_inodes
+        .iter()
+        .chain(deleted_inodes.iter())
+        .filter(|inode| {
+            matches!(
+                inode.kind,
+                crate::domain::inode::InodeKind::File | crate::domain::inode::InodeKind::Symlink
+            )
+        })
+        .cloned()
+        .collect();
+    file_like_inodes.sort_by_key(|inode| inode.id);
+
+    let required_length: usize = file_like_inodes.iter().map(|inode| inode.size).sum();
+    if required_length > data.len() {
+        return Err(CoreFsError::State(format!(
+            "cannot reconstruct block descriptors, DATA segment too small in {}",
+            path.display()
+        )));
+    }
+
+    let mut offset = 0usize;
+    let mut records = Vec::with_capacity(file_like_inodes.len());
+    for inode in file_like_inodes {
+        let end = offset + inode.size;
+        let payload = data
+            .get(offset..end)
+            .ok_or_else(|| {
+                CoreFsError::State(format!(
+                    "cannot reconstruct payload for inode {} in {}",
+                    inode.id.0,
+                    path.display()
+                ))
+            })?
+            .to_vec();
+        records.push(BlockRecord {
+            inode: inode.id,
+            checksum: checksum(&payload),
+            bytes: payload,
+        });
+        offset = end;
+    }
+
+    Ok(records)
 }
 
 fn reconstruct_directory_from_payloads(
@@ -1280,6 +1393,52 @@ mod tests {
 
         let loaded = load_volume_image(&path).expect("repaired image should load cleanly");
         assert_eq!(loaded.next_snapshot_id, 1);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn repair_volume_image_reconstructs_corrupted_block_descriptors() {
+        let path = temp_path("repair-corrupted-blkd");
+        let mut inode = Inode::new(
+            InodeId(7),
+            InodeKind::File,
+            "/payload.txt".to_string(),
+            FileMetadata::default(),
+        );
+        inode.size = 5;
+        let state = PersistedState {
+            config: CoreFsConfig::default(),
+            volume: VolumeDescriptor::from_config(&CoreFsConfig::default()),
+            active_inodes: vec![inode],
+            deleted_inodes: Vec::new(),
+            block_records: vec![BlockRecord {
+                inode: InodeId(7),
+                bytes: b"hello".to_vec(),
+                checksum: checksum(b"hello"),
+            }],
+            journal_entries: Vec::new(),
+            versions: Vec::new(),
+            sync_statuses: Vec::new(),
+            snapshots: Vec::new(),
+            next_snapshot_id: 0,
+        };
+
+        save_volume_image(&path, &state).expect("volume image should be written");
+        let mut bytes = fs::read(&path).expect("image should exist");
+        let blkd_offset = u64::from_le_bytes(bytes[264..272].try_into().expect("fixed")) as usize;
+        if let Some(byte) = bytes.get_mut(blkd_offset) {
+            *byte ^= 0xFF;
+        }
+        fs::write(&path, bytes).expect("corrupted image should be written");
+
+        let repaired = repair_volume_image_superblocks(&path)
+            .expect("repair should reconstruct block descriptors");
+
+        assert!(repaired.reconstructed_block_descriptors);
+        let loaded = load_volume_image(&path).expect("repaired image should load");
+        assert_eq!(loaded.block_records.len(), 1);
+        assert_eq!(loaded.block_records[0].bytes, b"hello".to_vec());
 
         let _ = fs::remove_file(path);
     }

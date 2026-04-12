@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `63/63` Tests erfolgreich  
+**Test-Status:** `64/64` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -44,7 +44,7 @@
 - einfache Integritätsprüfung per Checksummen
 - Scrubbing über vorhandene Datenblöcke
 - `fsck-image` für strukturelle Prüfungen von Volume-Images
-- erste mehrstufige Image-Reparatur aus verbliebener gültiger Kopie oder per Header-/Segmenttabellen-Fallback mit Superblock-Wiederaufbau, Rekonstruktion beschädigter Segmentverzeichnisse, Journal-Abgleich und Bereinigung verwaister Blockdaten
+- erste mehrstufige Image-Reparatur aus verbliebener gültiger Kopie oder per Header-/Segmenttabellen-Fallback mit Superblock-Wiederaufbau, Rekonstruktion beschädigter Segmentverzeichnisse, Rekonstruktion defekter Blockdeskriptoren, Journal-Abgleich und Bereinigung verwaister Blockdaten
 - Sync-Status-Verfolgung
 - semantische Inhaltsklassifikation nach Dateiendung
 - Metadaten-, Tag- und ACL-Grundmodell
@@ -66,7 +66,7 @@
 - Regression im Recovery-/Delete-Pfad bereits gefunden und behoben
 - Persistenz-Roundtrip und Ladefehler sind testseitig abgesichert
 - Benchmark-Ausführung und Markdown-Logging sind testseitig abgesichert
-- redundante Superblock-Fallbacks, Generation-Counter-Selektion, `fsck-image`, Image-Reparatur, Header-Directory-Recovery, Rekonstruktion beschädigter Segmentverzeichnisse, Journal-Replay und Bereinigung verwaister Blockdaten sind testseitig abgesichert
+- redundante Superblock-Fallbacks, Generation-Counter-Selektion, `fsck-image`, Image-Reparatur, Header-Directory-Recovery, Rekonstruktion beschädigter Segmentverzeichnisse, Rekonstruktion defekter Blockdeskriptoren, Journal-Replay und Bereinigung verwaister Blockdaten sind testseitig abgesichert
 - `cargo test` aktuell vollständig erfolgreich
 
 ## Noch nicht umgesetzt

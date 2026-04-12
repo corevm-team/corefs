@@ -21,7 +21,7 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `63/63` Tests erfolgreich
+- Test-Status: `64/64` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -87,7 +87,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Checksummenbasierte Integritätsprüfung
 - Scrubbing über vorhandene Datenblöcke
 - `fsck-image` zur strukturellen Prüfung persistierter Volume-Images
-- mehrstufige `fsck-image --repair`-Reparatur mit Wiederaufbau redundanter Superblocks, Rekonstruktion beschädigter Segmentverzeichnisse aus validierbaren Payloads, Header-/Segmenttabellen-Fallback, Journal-Abgleich und Bereinigung verwaister Block-Deskriptoren
+- mehrstufige `fsck-image --repair`-Reparatur mit Wiederaufbau redundanter Superblocks, Rekonstruktion beschädigter Segmentverzeichnisse aus validierbaren Payloads, Rekonstruktion defekter `BLKD`-Deskriptoren aus Inode-/DATA-Informationen, Header-/Segmenttabellen-Fallback, Journal-Abgleich und Bereinigung verwaister Block-Deskriptoren
 - Sync-Status-Verfolgung
 - semantische Inhaltsklassifikation
 - ACL-, Tag- und Metadaten-Grundmodell
