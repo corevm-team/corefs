@@ -1,6 +1,8 @@
 pub mod indexing;
 pub mod integrity;
 pub mod journal;
+pub mod metadata;
+pub mod quota;
 pub mod recovery;
 pub mod security;
 pub mod sync;

@@ -315,7 +315,7 @@ fn serialize_segment<T: Serialize>(
     value: &T,
     path: &Path,
 ) -> CoreFsResult<SegmentPayload> {
-    let payload = serde_json::to_vec(value).map_err(|error| {
+    let payload = bincode::serialize(value).map_err(|error| {
         CoreFsError::State(format!(
             "failed to serialize CoreFS volume image segment {} for {}: {error}",
             String::from_utf8_lossy(&kind),
@@ -331,7 +331,7 @@ fn deserialize_segment<T: for<'de> Deserialize<'de>>(
     path: &Path,
 ) -> CoreFsResult<T> {
     let payload = segment_bytes(bytes, entry, path)?;
-    serde_json::from_slice(payload).map_err(|error| {
+    bincode::deserialize(payload).map_err(|error| {
         CoreFsError::State(format!(
             "failed to deserialize CoreFS volume image segment {} from {}: {error}",
             String::from_utf8_lossy(&entry.kind),
@@ -665,6 +665,7 @@ mod tests {
             snapshots: vec![Snapshot {
                 id: 1,
                 name: "baseline".to_string(),
+                scope_root: "/".to_string(),
                 created_at: SystemTime::now(),
                 paths: vec!["/".to_string()],
             }],

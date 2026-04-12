@@ -1,4 +1,4 @@
-use crate::config::CoreFsConfig;
+use crate::config::{CoreFsConfig, StorageTier};
 use crate::domain::acl::{AclEntry, Principal};
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::domain::metadata::FileMetadata;
@@ -10,6 +10,8 @@ use crate::platform::tools::ToolRegistry;
 use crate::services::indexing::IndexingService;
 use crate::services::integrity::{IntegrityReport, IntegrityService};
 use crate::services::journal::JournalService;
+use crate::services::metadata::MetadataService;
+use crate::services::quota::{QuotaReport, QuotaService};
 use crate::services::recovery::RecoveryService;
 use crate::services::security::SecurityService;
 use crate::services::sync::SyncService;
@@ -21,7 +23,7 @@ use crate::storage::persistence;
 use crate::storage::volume_image;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsStats {
@@ -38,6 +40,22 @@ pub struct AdminReport {
     pub runtime: RuntimeIntegrationBlueprint,
     pub tools: ToolRegistry,
     pub stats: FsStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub path: String,
+    pub inode: InodeId,
+    pub kind: InodeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataView {
+    pub path: String,
+    pub tags: Vec<String>,
+    pub attributes: Vec<(String, String)>,
+    pub storage_tier: StorageTier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +84,8 @@ pub struct CoreFsService {
     recovery: RecoveryService,
     integrity: IntegrityService,
     indexing: IndexingService,
+    metadata: MetadataService,
+    quota: QuotaService,
     security: SecurityService,
     sync: SyncService,
     snapshots: Vec<Snapshot>,
@@ -89,6 +109,8 @@ impl CoreFsService {
             recovery: RecoveryService::default(),
             integrity: IntegrityService,
             indexing: IndexingService,
+            metadata: MetadataService,
+            quota: QuotaService,
             security: SecurityService,
             sync: SyncService::default(),
             snapshots: Vec::new(),
@@ -98,11 +120,8 @@ impl CoreFsService {
 
     pub fn create_file(&mut self, path: &str, bytes: &[u8], tags: &[String]) -> CoreFsResult<()> {
         validate_path(path)?;
-        if self.catalog.get(path).is_some() {
-            return Err(CoreFsError::AlreadyExists(format!(
-                "path already exists: {path}"
-            )));
-        }
+        self.ensure_path_is_absent(path)?;
+        self.ensure_parent_directory(path)?;
 
         let inode_id = self.allocator.allocate();
         let mut metadata = FileMetadata::default();
@@ -115,6 +134,7 @@ impl CoreFsService {
         metadata.acl = vec![AclEntry::full_access(Principal::Role("system".to_string()))];
 
         let mut inode = Inode::new(inode_id, InodeKind::File, path.to_string(), metadata);
+        self.ensure_quota_allows(1, bytes.len() as isize)?;
         inode.size = self.blocks.write(inode_id, bytes.to_vec());
 
         if self.config.versioning.keep_latest > 0 {
@@ -131,11 +151,11 @@ impl CoreFsService {
 
     pub fn create_directory(&mut self, path: &str) -> CoreFsResult<()> {
         validate_path(path)?;
-        if self.catalog.get(path).is_some() {
-            return Err(CoreFsError::AlreadyExists(format!(
-                "path already exists: {path}"
-            )));
+        if path == "/" {
+            return Ok(());
         }
+        self.ensure_path_is_absent(path)?;
+        self.ensure_parent_directory(path)?;
 
         let inode_id = self.allocator.allocate();
         let inode = Inode::new(
@@ -151,11 +171,8 @@ impl CoreFsService {
 
     pub fn create_symlink(&mut self, path: &str, target: &str) -> CoreFsResult<()> {
         validate_path(path)?;
-        if self.catalog.get(path).is_some() {
-            return Err(CoreFsError::AlreadyExists(format!(
-                "path already exists: {path}"
-            )));
-        }
+        self.ensure_path_is_absent(path)?;
+        self.ensure_parent_directory(path)?;
 
         let inode_id = self.allocator.allocate();
         let mut inode = Inode::new(
@@ -164,6 +181,7 @@ impl CoreFsService {
             path.to_string(),
             FileMetadata::default(),
         );
+        self.ensure_quota_allows(1, target.len() as isize)?;
         inode.size = self.blocks.write(inode_id, target.as_bytes().to_vec());
         self.catalog.insert(inode);
         self.journal
@@ -172,6 +190,17 @@ impl CoreFsService {
     }
 
     pub fn write_file(&mut self, path: &str, bytes: &[u8]) -> CoreFsResult<()> {
+        self.write_file_range(path, 0, bytes)?;
+        Ok(())
+    }
+
+    pub fn write_file_range(
+        &mut self,
+        path: &str,
+        offset: usize,
+        bytes: &[u8],
+    ) -> CoreFsResult<usize> {
+        let existing = self.read_file(path)?;
         let inode = self
             .catalog
             .get_mut(path)
@@ -183,14 +212,29 @@ impl CoreFsService {
             )));
         }
 
+        let mut merged = existing;
+        if merged.len() < offset {
+            merged.resize(offset, 0);
+        }
+        let required_len = offset.saturating_add(bytes.len());
+        if merged.len() < required_len {
+            merged.resize(required_len, 0);
+        }
+        merged[offset..offset + bytes.len()].copy_from_slice(bytes);
+        let byte_delta = merged.len() as isize - inode.size as isize;
+        self.ensure_quota_allows(0, byte_delta)?;
+
         inode.modified_at = SystemTime::now();
-        inode.size = self.blocks.write(inode.id, bytes.to_vec());
-        self.versioning.store_version(path, bytes.to_vec());
+        inode.size = self.blocks.write(inode.id, merged.clone());
+        self.versioning.store_version(path, merged);
         self.versioning
             .prune(path, self.config.versioning.keep_latest);
-        self.journal
-            .record("write_file", path, format!("bytes={}", bytes.len()));
-        Ok(())
+        self.journal.record(
+            "write_file",
+            path,
+            format!("offset={offset} bytes={}", bytes.len()),
+        );
+        Ok(bytes.len())
     }
 
     pub fn read_file(&self, path: &str) -> CoreFsResult<Vec<u8>> {
@@ -198,6 +242,11 @@ impl CoreFsService {
             .catalog
             .get(path)
             .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+        if inode.kind == InodeKind::Directory {
+            return Err(CoreFsError::InvalidInput(format!(
+                "directories cannot be read as files: {path}"
+            )));
+        }
         let record = self
             .blocks
             .read(inode.id)
@@ -205,7 +254,25 @@ impl CoreFsService {
         Ok(record.bytes.clone())
     }
 
+    pub fn read_file_range(&self, path: &str, offset: usize, size: usize) -> CoreFsResult<Vec<u8>> {
+        let bytes = self.read_file(path)?;
+        if offset >= bytes.len() {
+            return Ok(Vec::new());
+        }
+        let end = bytes.len().min(offset.saturating_add(size));
+        Ok(bytes[offset..end].to_vec())
+    }
+
     pub fn delete_file(&mut self, path: &str, secure: bool) -> CoreFsResult<()> {
+        let inode = self
+            .catalog
+            .get(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+        if inode.kind == InodeKind::Directory {
+            return Err(CoreFsError::InvalidInput(format!(
+                "delete_file only supports regular files and symlinks: {path}"
+            )));
+        }
         let inode = self
             .catalog
             .remove(path)
@@ -230,6 +297,40 @@ impl CoreFsService {
         Ok(())
     }
 
+    pub fn remove_directory(&mut self, path: &str) -> CoreFsResult<()> {
+        validate_path(path)?;
+        if path == "/" {
+            return Err(CoreFsError::InvalidInput(
+                "root directory cannot be removed".to_string(),
+            ));
+        }
+
+        let inode = self
+            .catalog
+            .get(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+        if inode.kind != InodeKind::Directory {
+            return Err(CoreFsError::InvalidInput(format!(
+                "remove_directory only supports directories: {path}"
+            )));
+        }
+        if !self.list_directory(path)?.is_empty() {
+            return Err(CoreFsError::PolicyViolation(format!(
+                "directory is not empty: {path}"
+            )));
+        }
+
+        let inode = self
+            .catalog
+            .remove(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+        self.recovery.remember(inode.clone());
+        self.catalog.move_to_deleted(inode);
+        self.journal
+            .record("delete_directory", path, "recoverable=true");
+        Ok(())
+    }
+
     pub fn restore_file(&mut self, path: &str) -> CoreFsResult<()> {
         let inode = if let Some(inode) = self.recovery.recover(path) {
             let _ = self.catalog.restore_deleted(path);
@@ -246,16 +347,40 @@ impl CoreFsService {
     }
 
     pub fn create_snapshot(&mut self, name: &str) -> Snapshot {
+        self.create_snapshot_for_subtree(name, "/")
+            .expect("root snapshot should always be valid")
+    }
+
+    pub fn create_snapshot_for_subtree(
+        &mut self,
+        name: &str,
+        root_path: &str,
+    ) -> CoreFsResult<Snapshot> {
+        validate_path(root_path)?;
+        if root_path != "/" {
+            let inode = self
+                .catalog
+                .get(root_path)
+                .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {root_path}")))?;
+            if inode.kind != InodeKind::Directory {
+                return Err(CoreFsError::InvalidInput(format!(
+                    "snapshot roots must be directories: {root_path}"
+                )));
+            }
+        }
+
         self.next_snapshot_id += 1;
         let snapshot = Snapshot {
             id: self.next_snapshot_id,
             name: name.to_string(),
+            scope_root: root_path.to_string(),
             created_at: SystemTime::now(),
-            paths: self.catalog.list_paths(),
+            paths: self.paths_in_subtree(root_path),
         };
-        self.journal.record("snapshot", "/", format!("name={name}"));
+        self.journal
+            .record("snapshot", root_path, format!("name={name}"));
         self.snapshots.push(snapshot.clone());
-        snapshot
+        Ok(snapshot)
     }
 
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> CoreFsResult<()> {
@@ -296,6 +421,223 @@ impl CoreFsService {
         self.journal
             .record("sync", path, format!("target={target}"));
         Ok(())
+    }
+
+    pub fn truncate_file(&mut self, path: &str, size: usize) -> CoreFsResult<()> {
+        let inode = self
+            .catalog
+            .get(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+        self.ensure_quota_allows(0, size as isize - inode.size as isize)?;
+        let mut bytes = self.read_file(path)?;
+        bytes.resize(size, 0);
+        self.write_file(path, &bytes)
+    }
+
+    pub fn rename_path(&mut self, old_path: &str, new_path: &str) -> CoreFsResult<()> {
+        validate_path(old_path)?;
+        validate_path(new_path)?;
+        if old_path == "/" {
+            return Err(CoreFsError::InvalidInput(
+                "root directory cannot be renamed".to_string(),
+            ));
+        }
+        if old_path == new_path {
+            return Ok(());
+        }
+
+        let source = self
+            .catalog
+            .get(old_path)
+            .cloned()
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {old_path}")))?;
+        self.ensure_parent_directory(new_path)?;
+        if self.catalog.get(new_path).is_some() {
+            return Err(CoreFsError::AlreadyExists(format!(
+                "path already exists: {new_path}"
+            )));
+        }
+        if source.kind == InodeKind::Directory && is_descendant_path(new_path, old_path) {
+            return Err(CoreFsError::InvalidInput(format!(
+                "cannot move directory into its own subtree: {old_path} -> {new_path}"
+            )));
+        }
+
+        let mut active = self.catalog.active_entries();
+        for inode in &mut active {
+            if inode.path == old_path {
+                inode.path = new_path.to_string();
+                inode.modified_at = SystemTime::now();
+            } else if is_descendant_path(&inode.path, old_path) {
+                inode.path = rebase_path(&inode.path, old_path, new_path);
+                inode.modified_at = SystemTime::now();
+            }
+        }
+        self.catalog.replace_active_entries(active);
+        self.versioning.remap_prefix(old_path, new_path);
+        self.journal
+            .record("rename", old_path, format!("new_path={new_path}"));
+        Ok(())
+    }
+
+    pub fn read_symlink(&self, path: &str) -> CoreFsResult<String> {
+        let inode = self
+            .catalog
+            .get(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+        if inode.kind != InodeKind::Symlink {
+            return Err(CoreFsError::InvalidInput(format!(
+                "path is not a symlink: {path}"
+            )));
+        }
+        Ok(String::from_utf8_lossy(&self.read_file(path)?).into_owned())
+    }
+
+    pub fn get_inode(&self, path: &str) -> Option<Inode> {
+        if path == "/" {
+            Some(self.root_inode())
+        } else {
+            self.catalog.get(path).cloned()
+        }
+    }
+
+    pub fn get_inode_by_id(&self, inode_id: InodeId) -> Option<Inode> {
+        self.catalog.inode_by_id(inode_id).cloned()
+    }
+
+    pub fn path_for_inode(&self, inode_id: InodeId) -> Option<String> {
+        self.catalog
+            .inode_by_id(inode_id)
+            .map(|inode| inode.path.clone())
+    }
+
+    pub fn list_directory(&self, path: &str) -> CoreFsResult<Vec<DirectoryEntry>> {
+        validate_path(path)?;
+        if path != "/" {
+            let inode = self
+                .catalog
+                .get(path)
+                .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+            if inode.kind != InodeKind::Directory {
+                return Err(CoreFsError::InvalidInput(format!(
+                    "path is not a directory: {path}"
+                )));
+            }
+        }
+
+        let mut entries = Vec::new();
+        for inode in self.catalog.active_entries() {
+            if let Some(name) = direct_child_name(path, &inode.path) {
+                entries.push(DirectoryEntry {
+                    name,
+                    path: inode.path.clone(),
+                    inode: inode.id,
+                    kind: inode.kind,
+                });
+            }
+        }
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(entries)
+    }
+
+    pub fn quota_report(&self) -> QuotaReport {
+        self.quota
+            .report(&self.config.quotas, &self.catalog.active_entries())
+    }
+
+    pub fn list_versions_for_path(
+        &self,
+        path: &str,
+    ) -> CoreFsResult<Vec<crate::services::versioning::FileVersion>> {
+        validate_path(path)?;
+        Ok(self.versioning.list_versions(path).to_vec())
+    }
+
+    pub fn read_version_selector(&self, selector: &str) -> CoreFsResult<Vec<u8>> {
+        let (path, query) = parse_version_selector(selector)?;
+        let version = match query {
+            VersionQuery::Latest => self.versioning.latest_version(path),
+            VersionQuery::VersionId(version_id) => self.versioning.version_by_id(path, version_id),
+            VersionQuery::Timestamp(instant) => self.versioning.version_at_or_before(path, instant),
+        }
+        .ok_or_else(|| {
+            CoreFsError::NotFound(format!("version not found for selector: {selector}"))
+        })?;
+
+        Ok(version.bytes.clone())
+    }
+
+    pub fn metadata_for_path(&self, path: &str) -> CoreFsResult<MetadataView> {
+        validate_path(path)?;
+        let inode = self
+            .catalog
+            .get(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+        Ok(MetadataView {
+            path: path.to_string(),
+            tags: inode.metadata.tags.clone(),
+            attributes: inode.metadata.attributes.clone(),
+            storage_tier: inode.metadata.storage_tier.clone(),
+        })
+    }
+
+    pub fn add_tag(&mut self, path: &str, tag: &str) -> CoreFsResult<()> {
+        let inode = self
+            .catalog
+            .get_mut(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+        self.metadata.add_tag(inode, tag);
+        inode.modified_at = SystemTime::now();
+        self.journal.record("tag_add", path, format!("tag={tag}"));
+        Ok(())
+    }
+
+    pub fn remove_tag(&mut self, path: &str, tag: &str) -> CoreFsResult<()> {
+        let inode = self
+            .catalog
+            .get_mut(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+        self.metadata.remove_tag(inode, tag);
+        inode.modified_at = SystemTime::now();
+        self.journal
+            .record("tag_remove", path, format!("tag={tag}"));
+        Ok(())
+    }
+
+    pub fn set_attribute(&mut self, path: &str, key: &str, value: &str) -> CoreFsResult<()> {
+        let inode = self
+            .catalog
+            .get_mut(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+        self.metadata.set_attribute(inode, key, value);
+        inode.modified_at = SystemTime::now();
+        self.journal
+            .record("attribute_set", path, format!("key={key} value={value}"));
+        Ok(())
+    }
+
+    pub fn set_storage_tier(&mut self, path: &str, tier: StorageTier) -> CoreFsResult<()> {
+        let inode = self
+            .catalog
+            .get_mut(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+        self.metadata.set_storage_tier(inode, tier.clone());
+        inode.modified_at = SystemTime::now();
+        self.journal
+            .record("storage_tier", path, format!("tier={}", tier_name(&tier)));
+        Ok(())
+    }
+
+    pub fn find_by_tag(&self, tag: &str) -> Vec<String> {
+        let mut matches = self
+            .catalog
+            .active_entries()
+            .into_iter()
+            .filter(|inode| inode.metadata.tags.iter().any(|candidate| candidate == tag))
+            .map(|inode| inode.path)
+            .collect::<Vec<_>>();
+        matches.sort();
+        matches
     }
 
     pub fn stats(&self) -> FsStats {
@@ -352,7 +694,11 @@ impl CoreFsService {
     }
 
     pub fn inode_for_path(&self, path: &str) -> Option<InodeId> {
-        self.catalog.get(path).map(|inode| inode.id)
+        if path == "/" {
+            Some(InodeId(0))
+        } else {
+            self.catalog.get(path).map(|inode| inode.id)
+        }
     }
 
     fn persisted_state(&self) -> PersistedState {
@@ -395,6 +741,8 @@ impl CoreFsService {
             recovery,
             integrity: IntegrityService,
             indexing: IndexingService,
+            metadata: MetadataService,
+            quota: QuotaService,
             security: SecurityService,
             sync: SyncService::from_statuses(state.sync_statuses),
             snapshots: state.snapshots,
@@ -434,6 +782,64 @@ impl CoreFsService {
             self.next_snapshot_id = replay.snapshot_count as u64;
         }
     }
+
+    fn ensure_path_is_absent(&self, path: &str) -> CoreFsResult<()> {
+        if self.catalog.get(path).is_some() || path == "/" {
+            return Err(CoreFsError::AlreadyExists(format!(
+                "path already exists: {path}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_parent_directory(&self, path: &str) -> CoreFsResult<()> {
+        let parent = parent_path(path);
+        if parent == "/" {
+            return Ok(());
+        }
+        let inode = self.catalog.get(parent).ok_or_else(|| {
+            CoreFsError::NotFound(format!("parent directory not found: {parent}"))
+        })?;
+        if inode.kind != InodeKind::Directory {
+            return Err(CoreFsError::InvalidInput(format!(
+                "parent is not a directory: {parent}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_quota_allows(&self, file_delta: isize, byte_delta: isize) -> CoreFsResult<()> {
+        self.quota.enforce_delta(
+            &self.config.quotas,
+            &self.catalog.active_entries(),
+            file_delta,
+            byte_delta,
+        )
+    }
+
+    fn root_inode(&self) -> Inode {
+        Inode::new(
+            InodeId(0),
+            InodeKind::Directory,
+            "/".to_string(),
+            FileMetadata::default(),
+        )
+    }
+
+    fn paths_in_subtree(&self, root_path: &str) -> Vec<String> {
+        let mut paths = self
+            .catalog
+            .list_paths()
+            .into_iter()
+            .filter(|candidate| {
+                candidate == root_path
+                    || root_path == "/"
+                    || is_descendant_path(candidate, root_path)
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
 }
 
 fn validate_path(path: &str) -> CoreFsResult<()> {
@@ -447,7 +853,172 @@ fn validate_path(path: &str) -> CoreFsResult<()> {
             "path exceeds supported limit: {path}"
         )));
     }
+    if path != "/" && path.ends_with('/') {
+        return Err(CoreFsError::InvalidInput(format!(
+            "paths must not end with '/': {path}"
+        )));
+    }
     Ok(())
+}
+
+fn parent_path(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(0) | None => "/",
+        Some(index) => &path[..index],
+    }
+}
+
+fn direct_child_name(parent: &str, path: &str) -> Option<String> {
+    if parent == "/" {
+        let remainder = path.strip_prefix('/')?;
+        if remainder.is_empty() || remainder.contains('/') {
+            return None;
+        }
+        return Some(remainder.to_string());
+    }
+
+    let prefix = format!("{parent}/");
+    let remainder = path.strip_prefix(&prefix)?;
+    if remainder.is_empty() || remainder.contains('/') {
+        return None;
+    }
+    Some(remainder.to_string())
+}
+
+fn is_descendant_path(path: &str, prefix: &str) -> bool {
+    path.len() > prefix.len()
+        && path.starts_with(prefix)
+        && path.as_bytes().get(prefix.len()) == Some(&b'/')
+}
+
+fn rebase_path(path: &str, old_prefix: &str, new_prefix: &str) -> String {
+    if path == old_prefix {
+        new_prefix.to_string()
+    } else {
+        format!("{new_prefix}/{}", &path[old_prefix.len() + 1..])
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VersionQuery {
+    Latest,
+    VersionId(u64),
+    Timestamp(SystemTime),
+}
+
+fn parse_version_selector(selector: &str) -> CoreFsResult<(&str, VersionQuery)> {
+    let (path, suffix) = selector.rsplit_once('@').ok_or_else(|| {
+        CoreFsError::InvalidInput(format!("version selector must contain '@': {selector}"))
+    })?;
+    validate_path(path)?;
+
+    if suffix == "latest" {
+        return Ok((path, VersionQuery::Latest));
+    }
+    if let Some(raw) = suffix.strip_prefix('v') {
+        let version_id = raw.parse::<u64>().map_err(|error| {
+            CoreFsError::InvalidInput(format!(
+                "invalid version id in selector {selector}: {error}"
+            ))
+        })?;
+        return Ok((path, VersionQuery::VersionId(version_id)));
+    }
+
+    Ok((
+        path,
+        VersionQuery::Timestamp(parse_timestamp_selector(suffix)?),
+    ))
+}
+
+fn parse_timestamp_selector(value: &str) -> CoreFsResult<SystemTime> {
+    let normalized = value.replace('T', "-").replace(':', "-");
+    let parts = normalized
+        .split('-')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() != 6 {
+        return Err(CoreFsError::InvalidInput(format!(
+            "invalid timestamp selector: {value}"
+        )));
+    }
+
+    let year = parse_i64(parts[0], "year", value)?;
+    let month = parse_i64(parts[1], "month", value)?;
+    let day = parse_i64(parts[2], "day", value)?;
+    let hour = parse_i64(parts[3], "hour", value)?;
+    let minute = parse_i64(parts[4], "minute", value)?;
+    let second = parse_i64(parts[5], "second", value)?;
+
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=59).contains(&second)
+    {
+        return Err(CoreFsError::InvalidInput(format!(
+            "timestamp selector out of range: {value}"
+        )));
+    }
+
+    let days = days_from_civil(year, month, day)?;
+    let total_seconds = days
+        .checked_mul(86_400)
+        .and_then(|base| base.checked_add(hour * 3_600 + minute * 60 + second))
+        .ok_or_else(|| {
+            CoreFsError::InvalidInput(format!("timestamp selector overflow: {value}"))
+        })?;
+
+    if total_seconds < 0 {
+        return Err(CoreFsError::InvalidInput(format!(
+            "timestamp selector predates unix epoch: {value}"
+        )));
+    }
+
+    Ok(UNIX_EPOCH + Duration::from_secs(total_seconds as u64))
+}
+
+fn parse_i64(value: &str, label: &str, original: &str) -> CoreFsResult<i64> {
+    value.parse::<i64>().map_err(|error| {
+        CoreFsError::InvalidInput(format!(
+            "invalid {label} in timestamp selector {original}: {error}"
+        ))
+    })
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> CoreFsResult<i64> {
+    let adjusted_year = year - if month <= 2 { 1 } else { 0 };
+    let era = if adjusted_year >= 0 {
+        adjusted_year
+    } else {
+        adjusted_year - 399
+    } / 400;
+    let yoe = adjusted_year - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * month_prime + 2) / 5 + day - 1;
+    let max_day = match month {
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if leap { 29 } else { 28 }
+        }
+        _ => 31,
+    };
+    if day > max_day {
+        return Err(CoreFsError::InvalidInput(format!(
+            "invalid day {day} for month {month} in timestamp selector"
+        )));
+    }
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Ok(era * 146_097 + doe - 719_468)
+}
+
+fn tier_name(tier: &StorageTier) -> &'static str {
+    match tier {
+        StorageTier::Hot => "hot",
+        StorageTier::Warm => "warm",
+        StorageTier::Cold => "cold",
+    }
 }
 
 #[cfg(test)]
@@ -596,6 +1167,44 @@ mod tests {
                 .any(|item| item == "native-os")
         );
         assert_eq!(report.tools.mkfs, "corefs mkfs");
+    }
+
+    #[test]
+    fn list_directory_and_rename_support_nested_paths() {
+        let mut fs = test_fs();
+        fs.create_directory("/srv").expect("srv");
+        fs.create_directory("/srv/corefs").expect("corefs");
+        fs.create_file("/srv/corefs/a.txt", b"alpha", &[])
+            .expect("file");
+
+        let entries = fs.list_directory("/srv/corefs").expect("directory listing");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "a.txt");
+
+        fs.rename_path("/srv/corefs", "/srv/platform")
+            .expect("rename");
+        assert!(fs.get_inode("/srv/platform").is_some());
+        assert!(fs.get_inode("/srv/platform/a.txt").is_some());
+        assert_eq!(
+            fs.read_file("/srv/platform/a.txt").expect("renamed file"),
+            b"alpha".to_vec()
+        );
+    }
+
+    #[test]
+    fn remove_directory_requires_empty_directory() {
+        let mut fs = test_fs();
+        fs.create_directory("/data").expect("data");
+        fs.create_file("/data/file.txt", b"payload", &[])
+            .expect("file");
+        assert!(matches!(
+            fs.remove_directory("/data"),
+            Err(CoreFsError::PolicyViolation(_))
+        ));
+
+        fs.delete_file("/data/file.txt", false).expect("delete");
+        fs.remove_directory("/data").expect("remove");
+        assert!(fs.get_inode("/data").is_none());
     }
 
     #[test]

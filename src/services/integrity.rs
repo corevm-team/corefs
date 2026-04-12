@@ -105,6 +105,7 @@ mod tests {
             snapshots: vec![Snapshot {
                 id: 1,
                 name: "baseline".to_string(),
+                scope_root: "/".to_string(),
                 created_at: SystemTime::now(),
                 paths: vec!["/".to_string()],
             }],

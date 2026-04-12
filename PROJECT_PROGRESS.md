@@ -6,9 +6,9 @@
 
 ## Aktueller Status
 
-**Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts- und Performance-Prototyp  
+**Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Linux-FUSE-, Replay-, Integritäts- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `56/56` Tests erfolgreich  
+**Test-Status:** `60/60` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -35,8 +35,12 @@
 - Formatierung eines CoreFS-Volumes im Userspace-Modell
 - Persistenz eines kompletten CoreFS-Zustands als JSON-basiertes Zwischenformat
 - Persistenz eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks, Generation Countern und getrennten Fachsegmenten
+- binäre Segmentserialisierung innerhalb der Volume-Images ohne JSON-Payloads
 - Erzeugen von Dateien, Verzeichnissen und symbolischen Links
 - Lesen und Schreiben von Dateiinhalten
+- bytegenaue `read`-, `write`- und `truncate`-Operationen für POSIX-nahe Adapter
+- atomare Rename-/Move-Operationen auf Datei- und Verzeichnisbaumbasis
+- O(1)-Lookup auf bestehende Pfade über den Katalog und lineare Traversals für notwendige Verzeichnisauflistungen oder Prefix-Operationen
 - Journaling von Operationen
 - automatische Versionierung im Basismodell
 - Snapshot-Erzeugung
@@ -44,6 +48,9 @@
 - einfache Integritätsprüfung per Checksummen
 - Scrubbing über vorhandene Datenblöcke
 - `fsck-image` für strukturelle Prüfungen von Volume-Images
+- persistente Volume-Session mit atomischem Flush auf Image-Dateien
+- Linux-FUSE-Adapter mit `lookup`, `getattr`, `readdir`, `read`, `write`, `mkdir`, `create`, `unlink`, `rmdir`, `symlink`, `rename`, `truncate`, `fsync` und `statfs`
+- Linux-Skripte für `mkfs`, Mount, Unmount und gemountete Benchmarks
 - Sync-Status-Verfolgung
 - semantische Inhaltsklassifikation nach Dateiendung
 - Metadaten-, Tag- und ACL-Grundmodell
@@ -56,6 +63,7 @@
 
 - native Runtime-Integration als generisches Blueprint-Modell
 - optionale Kompatibilitätsziele als Adapter-Konzept
+- Linux-FUSE als separater Adapter statt Linux-zentrierter Kernlogik
 - Tool-Registry für `mkfs`, `fsck` und Administration
 - Tool-Registry für Benchmarking
 
@@ -87,6 +95,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - fsck als reales Reparatur- und Korrekturwerkzeug
 - native Kernel-/VFS-Integration für das eigene Betriebssystem
 - Fremdsystem-Adapter als reale Laufzeitkomponenten
+- native AnyOS-Integration als eigener Adapterpfad neben Linux-FUSE
 
 ## Architekturüberblick
 
@@ -120,6 +129,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 ### `src/platform`
 
 - plattformneutrales Runtime-Integrationsmodell
+- Linux-FUSE-Adapter
 - Blueprint für Verwaltungswerkzeuge
 - Performance-Benchmarking und Protokollierung
 
@@ -142,6 +152,7 @@ Die Datei [features_corefs.md](/daten1/development/brian/corefs/features_corefs.
 - Performance-Messung und Ergebnisprotokollierung
 - strukturelle Prüfung persistierter Volume-Images
 - profilbasierte Performance-Messung mit variablen Parametern
+- Linux-Kompatibilitätsadapter über FUSE für einen real mountbaren Userspace-Pfad
 
 Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 
@@ -149,6 +160,8 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 - fortgeschrittene Integritäts- und Redundanzmechanismen
 - semantische Tiefenanalyse
 - vollständige Runtime- und Betriebssystemintegration
+- Quota-Durchsetzung
+- echte Kompression und echte Verschlüsselung statt Policy-/Metadatenmarkierung
 
 ## Empfohlene nächste Schritte
 
@@ -156,7 +169,6 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 
 - blockorientiertes On-Disk-Format definieren
 - Metadaten-Layout festlegen
-- JSON-Zwischenformat in ein produktionsnahes Volume-Format überführen
 - Block- und Journal-Speicherung crash-konsistent machen
 - Performance-Baseline für zukünftige Persistenzumstellungen fortlaufend protokollieren
 
@@ -165,6 +177,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 - VFS-Schnittstelle für das eigene Betriebssystem definieren
 - Kernel- und Userland-Grenzen trennen
 - Mount-, Unmount- und Recovery-Lebenszyklus implementieren
+- Linux-FUSE als Referenzadapter stabilisieren, aber AnyOS-Nativadapter als primären Zielpfad ausarbeiten
 
 ### Phase 3: Integrität und Sicherheit
 
@@ -184,7 +197,9 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 
 ## Wichtige Hinweise
 
-- Das Projekt ist aktuell ein strukturierter, getesteter Kern-, Persistenz- und Volume-Layout-Prototyp und noch kein produktionsreifes Dateisystem.
+- Das Projekt ist aktuell ein strukturierter, getesteter Kern-, Persistenz-, Volume-Layout- und Linux-FUSE-Prototyp und noch kein produktionsreifes Dateisystem.
 - Performance-Messungen werden jetzt über `benchmark` und `benchmark-log` reproduzierbar ausführbar.
+- Zusätzliche Linux-Skripte unter `scripts/` decken `mkfs`, Mount, Unmount und gemountete Benchmarks ab.
+- Linux-Mounting ist als FUSE-Adapter implementiert, die tatsächliche Mountbarkeit hängt aber weiterhin von der lokalen FUSE-Laufzeitumgebung und ihren Rechten ab.
 - Die vorhandene Testsuite ist stark für die aktuelle In-Memory-Implementierung, aber keine Garantie für `100%` messbare Coverage, da in der Umgebung keine Coverage-Tools installiert sind.
 - `.codex` ist inzwischen als projektinterne Vorgabedatei befüllt.

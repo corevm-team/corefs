@@ -1,10 +1,12 @@
 use crate::app::CoreFsService;
-use crate::config::CoreFsConfig;
+use crate::config::{CoreFsConfig, StorageTier};
 use crate::error::{CoreFsError, CoreFsResult};
+use crate::platform::linux_fuse::{LinuxMountOptions, mount_volume};
 use crate::platform::performance::{
     BenchmarkConfig, BenchmarkProfile, append_benchmark_markdown, run_benchmark,
 };
 use crate::services::integrity::IntegrityService;
+use crate::storage::volume_session::VolumeSession;
 
 pub fn run<I>(args: I) -> CoreFsResult<()>
 where
@@ -21,6 +23,43 @@ where
     match args[1].as_str() {
         "mkfs" => {
             println!("formatted volume {}", fs.volume_name());
+        }
+        "mkfs-image" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for mkfs-image".to_string())
+            })?;
+            let config = config_from_args(&args[3..])?;
+            let bootstrap = args.iter().any(|arg| arg == "--bootstrap");
+            let mut session = VolumeSession::format_new(path, config)?;
+            if bootstrap {
+                seed_enterprise_volume(session.service_mut())?;
+                session.flush()?;
+            }
+            println!("formatted volume image {path}");
+        }
+        "status-image" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for status-image".to_string())
+            })?;
+            let session = VolumeSession::open(path)?;
+            let report = session.service().admin_report();
+            println!("image: {}", session.image_path().display());
+            println!("volume: {}", report.volume.name);
+            println!("block_size: {}", report.volume.block_size);
+            println!("features: {}", report.volume.feature_flags.join(", "));
+            println!("files: {}", report.stats.files);
+            println!("snapshots: {}", report.stats.snapshots);
+            println!("journal_entries: {}", report.stats.journal_entries);
+        }
+        "mount-image" => {
+            let image = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing image for mount-image".to_string())
+            })?;
+            let mountpoint = args.get(3).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing mountpoint for mount-image".to_string())
+            })?;
+            let options = mount_options_from_args(&args[4..])?;
+            mount_volume(image, mountpoint, options)?;
         }
         "status" => {
             let report = fs.admin_report();
@@ -40,8 +79,24 @@ where
             let name = args.get(2).cloned().unwrap_or_else(|| "manual".to_string());
             let snapshot = fs.create_snapshot(&name);
             println!(
-                "snapshot {} created with {} paths",
+                "snapshot {} created for {} with {} paths",
                 snapshot.name,
+                snapshot.scope_root,
+                snapshot.paths.len()
+            );
+        }
+        "snapshot-tree" => {
+            let name = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing name for snapshot-tree".to_string())
+            })?;
+            let root = args.get(3).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing root path for snapshot-tree".to_string())
+            })?;
+            let snapshot = fs.create_snapshot_for_subtree(name, root)?;
+            println!(
+                "snapshot {} created for {} with {} paths",
+                snapshot.name,
+                snapshot.scope_root,
                 snapshot.paths.len()
             );
         }
@@ -83,6 +138,105 @@ where
                 .ok_or_else(|| CoreFsError::InvalidCommand("missing path for read".to_string()))?;
             let bytes = fs.read_file(path)?;
             println!("{}", String::from_utf8_lossy(&bytes));
+        }
+        "versions" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for versions".to_string())
+            })?;
+            for version in fs.list_versions_for_path(path)? {
+                println!(
+                    "version_id={} timestamp={:?} bytes={}",
+                    version.version_id,
+                    version.created_at,
+                    version.bytes.len()
+                );
+            }
+        }
+        "read-version" => {
+            let selector = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing selector for read-version".to_string())
+            })?;
+            let bytes = fs.read_version_selector(selector)?;
+            println!("{}", String::from_utf8_lossy(&bytes));
+        }
+        "tag-add" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for tag-add".to_string())
+            })?;
+            let tag = args.get(3).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing tag for tag-add".to_string())
+            })?;
+            fs.add_tag(path, tag)?;
+            println!("tagged {path} with {tag}");
+        }
+        "tag-remove" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for tag-remove".to_string())
+            })?;
+            let tag = args.get(3).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing tag for tag-remove".to_string())
+            })?;
+            fs.remove_tag(path, tag)?;
+            println!("removed tag {tag} from {path}");
+        }
+        "find-tag" => {
+            let tag = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing tag for find-tag".to_string())
+            })?;
+            for path in fs.find_by_tag(tag) {
+                println!("{path}");
+            }
+        }
+        "attr-set" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for attr-set".to_string())
+            })?;
+            let key = args.get(3).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing key for attr-set".to_string())
+            })?;
+            let value = args.get(4).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing value for attr-set".to_string())
+            })?;
+            fs.set_attribute(path, key, value)?;
+            println!("set attribute {key} on {path}");
+        }
+        "attr-get" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for attr-get".to_string())
+            })?;
+            let metadata = fs.metadata_for_path(path)?;
+            println!("path: {}", metadata.path);
+            println!("tier: {}", storage_tier_name(&metadata.storage_tier));
+            println!("tags: {}", metadata.tags.join(", "));
+            for (key, value) in metadata.attributes {
+                println!("attr {key}={value}");
+            }
+        }
+        "set-tier" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for set-tier".to_string())
+            })?;
+            let tier = args.get(3).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing tier for set-tier".to_string())
+            })?;
+            fs.set_storage_tier(path, parse_storage_tier(tier)?)?;
+            println!("set storage tier for {path} to {tier}");
+        }
+        "quota" => {
+            let report = fs.quota_report();
+            println!(
+                "quota files={}/{} bytes={}/{}",
+                report.used_files,
+                report
+                    .max_files
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unlimited".to_string()),
+                report.used_bytes,
+                report
+                    .max_bytes
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unlimited".to_string())
+            );
         }
         "save" => {
             let path = args
@@ -180,8 +334,15 @@ where
 
 fn bootstrap_demo_fs() -> CoreFsResult<CoreFsService> {
     let mut fs = CoreFsService::format(CoreFsConfig::default());
+    seed_enterprise_volume(&mut fs)?;
+    Ok(fs)
+}
+
+fn seed_enterprise_volume(fs: &mut CoreFsService) -> CoreFsResult<()> {
     fs.create_directory("/etc")?;
+    fs.create_directory("/srv")?;
     fs.create_directory("/var")?;
+    fs.create_directory("/srv/corefs")?;
     fs.create_file(
         "/etc/corefs.conf",
         b"volume=corefs\ncompression=on\nencryption=on\n",
@@ -192,21 +353,41 @@ fn bootstrap_demo_fs() -> CoreFsResult<CoreFsService> {
         b"CoreFS enterprise bootstrap",
         &["docs".to_string()],
     )?;
+    fs.create_file(
+        "/srv/corefs/welcome.txt",
+        b"Mounted through CoreFS volume session",
+        &["docs".to_string(), "bootstrap".to_string()],
+    )?;
     fs.create_symlink("/etc/corefs-current", "/etc/corefs.conf")?;
-    Ok(fs)
+    Ok(())
 }
 
 fn print_usage() {
     println!("corefs commands:");
     println!("  mkfs");
+    println!("  mkfs-image <path> [--bootstrap] [--volume-name <name>] [--block-size <bytes>]");
+    println!("  status-image <path>");
+    println!(
+        "  mount-image <image> <mountpoint> [--create] [--read-only] [--auto-unmount] [--threads <n>]"
+    );
     println!("  status");
     println!("  ls");
     println!("  snapshot [name]");
+    println!("  snapshot-tree <name> <root>");
     println!("  scrub");
     println!("  delete <path> [--secure]");
     println!("  restore <path>");
     println!("  write <path> <payload>");
     println!("  read <path>");
+    println!("  versions <path>");
+    println!("  read-version <path@latest|path@vN|path@YYYY-MM-DD-HH-MM-SS>");
+    println!("  tag-add <path> <tag>");
+    println!("  tag-remove <path> <tag>");
+    println!("  find-tag <tag>");
+    println!("  attr-set <path> <key> <value>");
+    println!("  attr-get <path>");
+    println!("  set-tier <path> <hot|warm|cold>");
+    println!("  quota");
     println!("  save <path>");
     println!("  save-image <path>");
     println!("  load <path>");
@@ -263,6 +444,70 @@ fn benchmark_config_from_args(args: &[String]) -> CoreFsResult<BenchmarkConfig> 
     Ok(config)
 }
 
+fn config_from_args(args: &[String]) -> CoreFsResult<CoreFsConfig> {
+    let mut config = CoreFsConfig::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--bootstrap" => {
+                index += 1;
+            }
+            "--volume-name" => {
+                let value = args.get(index + 1).ok_or_else(|| {
+                    CoreFsError::InvalidCommand("missing value for --volume-name".to_string())
+                })?;
+                config.volume_name = value.clone();
+                index += 2;
+            }
+            "--block-size" => {
+                config.block_size = parse_usize_flag(args, index, "--block-size")?;
+                index += 2;
+            }
+            other => {
+                return Err(CoreFsError::InvalidCommand(format!(
+                    "unknown mkfs-image option: {other}"
+                )));
+            }
+        }
+    }
+
+    Ok(config)
+}
+
+fn mount_options_from_args(args: &[String]) -> CoreFsResult<LinuxMountOptions> {
+    let mut options = LinuxMountOptions::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--create" => {
+                options.create_if_missing = true;
+                index += 1;
+            }
+            "--read-only" => {
+                options.read_only = true;
+                index += 1;
+            }
+            "--auto-unmount" => {
+                options.auto_unmount = true;
+                index += 1;
+            }
+            "--threads" => {
+                options.threads = parse_usize_flag(args, index, "--threads")?;
+                index += 2;
+            }
+            other => {
+                return Err(CoreFsError::InvalidCommand(format!(
+                    "unknown mount-image option: {other}"
+                )));
+            }
+        }
+    }
+
+    Ok(options)
+}
+
 fn parse_usize_flag(args: &[String], index: usize, flag: &str) -> CoreFsResult<usize> {
     let value = args
         .get(index + 1)
@@ -270,6 +515,25 @@ fn parse_usize_flag(args: &[String], index: usize, flag: &str) -> CoreFsResult<u
     value.parse::<usize>().map_err(|error| {
         CoreFsError::InvalidInput(format!("invalid numeric value for {flag}: {error}"))
     })
+}
+
+fn parse_storage_tier(value: &str) -> CoreFsResult<StorageTier> {
+    match value {
+        "hot" => Ok(StorageTier::Hot),
+        "warm" => Ok(StorageTier::Warm),
+        "cold" => Ok(StorageTier::Cold),
+        other => Err(CoreFsError::InvalidInput(format!(
+            "unknown storage tier: {other}"
+        ))),
+    }
+}
+
+fn storage_tier_name(tier: &StorageTier) -> &'static str {
+    match tier {
+        StorageTier::Hot => "hot",
+        StorageTier::Warm => "warm",
+        StorageTier::Cold => "cold",
+    }
 }
 
 #[cfg(test)]

@@ -6,6 +6,17 @@ pub struct RuntimeIntegrationBlueprint {
     pub compatibility_targets: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformAdapterDescriptor {
+    pub name: String,
+    pub runtime: String,
+    pub persistent_volume: bool,
+}
+
+pub trait MountAdapter {
+    fn descriptor(&self) -> PlatformAdapterDescriptor;
+}
+
 impl Default for RuntimeIntegrationBlueprint {
     fn default() -> Self {
         Self {
@@ -50,5 +61,18 @@ mod tests {
                 .iter()
                 .any(|target| target == "fuse-adapter")
         );
+    }
+
+    #[test]
+    fn platform_adapter_descriptor_captures_runtime_contract() {
+        let descriptor = PlatformAdapterDescriptor {
+            name: "linux-fuse".to_string(),
+            runtime: "userspace".to_string(),
+            persistent_volume: true,
+        };
+
+        assert_eq!(descriptor.name, "linux-fuse");
+        assert_eq!(descriptor.runtime, "userspace");
+        assert!(descriptor.persistent_volume);
     }
 }

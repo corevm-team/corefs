@@ -5,6 +5,7 @@ use std::time::SystemTime;
 pub struct Snapshot {
     pub id: u64,
     pub name: String,
+    pub scope_root: String,
     pub created_at: SystemTime,
     pub paths: Vec<String>,
 }

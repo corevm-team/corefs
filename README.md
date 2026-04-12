@@ -18,10 +18,10 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 
 ## Projektstatus
 
-Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout- und Performance-Prototyp im Userspace-Modell.
+Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout-, Linux-FUSE-, Integritäts- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `56/56` Tests erfolgreich
+- Test-Status: `60/60` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -78,8 +78,10 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Formatierung eines CoreFS-Volumes im In-Memory-Modell
 - Speichern und Laden eines vollständigen CoreFS-Zustands in ein JSON-basiertes Persistenzformat
 - Speichern und Laden eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks (`SUPR` und `SUP2`), Generation Countern, Prüfsummen und getrennten Fachsegmenten wie `AINO`, `DINO`, `JOUR`, `VERS`, `SNAP`, `BLKD` und `DATA`
+- binäre Segmentserialisierung innerhalb des Volume-Images ohne JSON-Payloads
 - Dateien, Verzeichnisse und symbolische Links
 - Lesen und Schreiben von Inhalten
+- bytegenaues Lesen, Schreiben und Truncation für POSIX-nahe Adapter
 - Journaling von Operationen
 - Basis-Versionierung
 - Snapshots
@@ -87,6 +89,8 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Checksummenbasierte Integritätsprüfung
 - Scrubbing über vorhandene Datenblöcke
 - `fsck-image` zur strukturellen Prüfung persistierter Volume-Images
+- persistente Volume-Session mit atomischem Image-Flush
+- Linux-FUSE-Adapter zum Mounten eines CoreFS-Images
 - Sync-Status-Verfolgung
 - semantische Inhaltsklassifikation
 - ACL-, Tag- und Metadaten-Grundmodell
@@ -113,6 +117,44 @@ Diese Punkte sind vorgesehen, aber aktuell noch nicht als echte produktionsnahe 
 - Quotas mit Durchsetzung
 - Time-Travel-Zugriff
 - native Kernel-/VFS-Integration
+
+## Linux-Betrieb
+
+CoreFS kann unter Linux über den FUSE-Adapter gegen ein persistentes Image gemountet werden.
+
+Volume-Image formatieren:
+
+```bash
+cargo run -- mkfs-image ./corefs-volume.img --bootstrap
+```
+
+Image-Status anzeigen:
+
+```bash
+cargo run -- status-image ./corefs-volume.img
+```
+
+Image mounten:
+
+```bash
+mkdir -p ./mnt/corefs
+cargo run -- mount-image ./corefs-volume.img ./mnt/corefs --threads 4
+```
+
+Image prüfen:
+
+```bash
+cargo run -- fsck-image ./corefs-volume.img
+```
+
+Hilfsskripte:
+
+```bash
+./scripts/corefs-mkfs.sh ./corefs-volume.img
+./scripts/corefs-mount.sh ./corefs-volume.img ./mnt/corefs
+./scripts/corefs-umount.sh ./mnt/corefs
+./scripts/corefs-benchmark.sh ./corefs-volume.img ./mnt/corefs ./PERFORMANCE_LOG.md
+```
 
 ## Voraussetzungen
 

@@ -36,6 +36,23 @@ impl VersioningService {
         self.versions.get(path).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    pub fn latest_version(&self, path: &str) -> Option<&FileVersion> {
+        self.versions.get(path).and_then(|items| items.last())
+    }
+
+    pub fn version_by_id(&self, path: &str, version_id: u64) -> Option<&FileVersion> {
+        self.list_versions(path)
+            .iter()
+            .find(|version| version.version_id == version_id)
+    }
+
+    pub fn version_at_or_before(&self, path: &str, instant: SystemTime) -> Option<&FileVersion> {
+        self.list_versions(path)
+            .iter()
+            .rev()
+            .find(|version| version.created_at <= instant)
+    }
+
     pub fn prune(&mut self, path: &str, keep_latest: usize) {
         if let Some(items) = self.versions.get_mut(path) {
             if items.len() > keep_latest {
@@ -47,6 +64,21 @@ impl VersioningService {
 
     pub fn all_versions(&self) -> Vec<FileVersion> {
         self.versions.values().flatten().cloned().collect()
+    }
+
+    pub fn remap_prefix(&mut self, old_prefix: &str, new_prefix: &str) {
+        let mut versions = self.all_versions();
+        let prefix = format!("{old_prefix}/");
+
+        for version in &mut versions {
+            if version.path == old_prefix {
+                version.path = new_prefix.to_string();
+            } else if version.path.starts_with(&prefix) {
+                version.path = format!("{new_prefix}/{}", &version.path[prefix.len()..]);
+            }
+        }
+
+        *self = Self::from_versions(versions);
     }
 
     pub fn from_versions(versions: Vec<FileVersion>) -> Self {
@@ -100,5 +132,34 @@ mod tests {
 
         service.prune("/missing", 2);
         assert!(service.list_versions("/missing").is_empty());
+    }
+
+    #[test]
+    fn version_queries_resolve_latest_id_and_timestamp() {
+        let mut service = VersioningService::default();
+        service.store_version("/a.txt", b"one".to_vec());
+        let first = service
+            .latest_version("/a.txt")
+            .expect("first version")
+            .clone();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        service.store_version("/a.txt", b"two".to_vec());
+
+        let latest = service.latest_version("/a.txt").expect("latest version");
+        assert_eq!(latest.bytes, b"two".to_vec());
+        assert_eq!(
+            service
+                .version_by_id("/a.txt", first.version_id)
+                .expect("version by id")
+                .bytes,
+            b"one".to_vec()
+        );
+        assert_eq!(
+            service
+                .version_at_or_before("/a.txt", first.created_at)
+                .expect("version by time")
+                .bytes,
+            b"one".to_vec()
+        );
     }
 }
