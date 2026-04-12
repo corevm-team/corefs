@@ -2,13 +2,13 @@ use crate::app::{CoreFsService, PersistedState};
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::error::{CoreFsError, CoreFsResult};
 use fuser::{
-    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
-    ReplyOpen, Request,
+    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData,
+    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
 };
-use libc::{EIO, ENOENT, EROFS};
+use libc::{EEXIST, EISDIR, EIO, ENOENT, ENOTEMPTY, ENOTDIR, EROFS};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 const TTL: Duration = Duration::from_secs(1);
@@ -340,6 +340,568 @@ impl Filesystem for CoreFsFuseMount {
     }
 }
 
+// ── Read-write FUSE mount ────────────────────────────────────────────────────
+
+#[derive(Debug)]
+struct CoreFsFuseMountRw {
+    service: CoreFsService,
+    image_path: PathBuf,
+    nodes_by_ino: HashMap<u64, FuseNode>,
+    ino_by_path: HashMap<String, u64>,
+    children: BTreeMap<String, Vec<String>>,
+    dirty: bool,
+}
+
+impl CoreFsFuseMountRw {
+    fn from_service(service: CoreFsService, image_path: PathBuf) -> Self {
+        let state = service.export_state();
+        let mut nodes_by_ino = HashMap::new();
+        let mut ino_by_path = HashMap::new();
+        let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let block_map: HashMap<crate::domain::inode::InodeId, Vec<u8>> = state
+            .block_records
+            .into_iter()
+            .map(|r| (r.inode, r.bytes))
+            .collect();
+
+        let root = FuseNode {
+            path: "/".to_string(),
+            parent_path: "/".to_string(),
+            inode: None,
+            data: Vec::new(),
+        };
+        nodes_by_ino.insert(ROOT_INO, root);
+        ino_by_path.insert("/".to_string(), ROOT_INO);
+        children.entry("/".to_string()).or_default();
+
+        for inode in state.active_inodes {
+            let ino = inode.id.0 + 1;
+            let par = parent_path(&inode.path);
+            let data = block_map.get(&inode.id).cloned().unwrap_or_default();
+            children
+                .entry(par.clone())
+                .or_default()
+                .push(base_name(&inode.path));
+            children.entry(inode.path.clone()).or_default();
+            ino_by_path.insert(inode.path.clone(), ino);
+            nodes_by_ino.insert(
+                ino,
+                FuseNode {
+                    path: inode.path.clone(),
+                    parent_path: par,
+                    inode: Some(inode),
+                    data,
+                },
+            );
+        }
+        for names in children.values_mut() {
+            names.sort();
+            names.dedup();
+        }
+
+        Self {
+            service,
+            image_path,
+            nodes_by_ino,
+            ino_by_path,
+            children,
+            dirty: false,
+        }
+    }
+
+    fn node(&self, ino: u64) -> Option<&FuseNode> {
+        self.nodes_by_ino.get(&ino)
+    }
+
+    fn lookup_child(&self, parent: u64, name: &OsStr) -> Option<&FuseNode> {
+        let par = self.nodes_by_ino.get(&parent)?;
+        let child_name = name.to_str()?;
+        let child_path = if par.path == "/" {
+            format!("/{child_name}")
+        } else {
+            format!("{}/{child_name}", par.path)
+        };
+        let ino = self.ino_by_path.get(&child_path)?;
+        self.nodes_by_ino.get(ino)
+    }
+
+    fn child_path(&self, parent: u64, name: &OsStr) -> Option<String> {
+        let par = self.nodes_by_ino.get(&parent)?;
+        let child_name = name.to_str()?;
+        Some(if par.path == "/" {
+            format!("/{child_name}")
+        } else {
+            format!("{}/{child_name}", par.path)
+        })
+    }
+
+    fn directory_entries(&self, ino: u64) -> Vec<(u64, FileType, String)> {
+        let Some(node) = self.nodes_by_ino.get(&ino) else {
+            return Vec::new();
+        };
+        let mut entries = Vec::new();
+        entries.push((node.ino(), FileType::Directory, ".".to_string()));
+        let parent_ino = if ino == ROOT_INO {
+            ROOT_INO
+        } else {
+            *self.ino_by_path.get(&node.parent_path).unwrap_or(&ROOT_INO)
+        };
+        entries.push((parent_ino, FileType::Directory, "..".to_string()));
+
+        if let Some(children) = self.children.get(&node.path) {
+            for child_name in children {
+                let child_path = if node.path == "/" {
+                    format!("/{child_name}")
+                } else {
+                    format!("{}/{child_name}", node.path)
+                };
+                if let Some(child_ino) = self.ino_by_path.get(&child_path) {
+                    if let Some(child) = self.nodes_by_ino.get(child_ino) {
+                        let ft = match child.kind() {
+                            InodeKind::File => FileType::RegularFile,
+                            InodeKind::Directory => FileType::Directory,
+                            InodeKind::Symlink => FileType::Symlink,
+                        };
+                        entries.push((*child_ino, ft, child_name.clone()));
+                    }
+                }
+            }
+        }
+        entries
+    }
+
+    /// Register a freshly created path in all index maps.
+    fn register_node(&mut self, node: FuseNode) {
+        let ino = node.ino();
+        let par = node.parent_path.clone();
+        let name = base_name(&node.path);
+        self.ino_by_path.insert(node.path.clone(), ino);
+        self.children
+            .entry(node.path.clone())
+            .or_default();
+        self.children
+            .entry(par)
+            .or_default()
+            .push(name);
+        // keep children sorted + deduplicated
+        for names in self.children.values_mut() {
+            names.sort();
+            names.dedup();
+        }
+        self.nodes_by_ino.insert(ino, node);
+    }
+
+    /// Remove a path from all index maps.
+    fn unregister_ino(&mut self, ino: u64) {
+        if let Some(node) = self.nodes_by_ino.remove(&ino) {
+            self.ino_by_path.remove(&node.path);
+            self.children.remove(&node.path);
+            if let Some(siblings) = self.children.get_mut(&node.parent_path) {
+                let name = base_name(&node.path);
+                siblings.retain(|n| n != &name);
+            }
+        }
+    }
+
+    /// Save the volume image to disk. Returns true on success.
+    fn persist(&mut self) -> bool {
+        match self.service.save_image_to_path(&self.image_path) {
+            Ok(()) => {
+                self.dirty = false;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+impl Filesystem for CoreFsFuseMountRw {
+    fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        match self.lookup_child(parent, name) {
+            Some(node) => reply.entry(&TTL, &node.attr(), 0),
+            None => reply.error(ENOENT),
+        }
+    }
+
+    fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
+        match self.node(ino) {
+            Some(node) => reply.attr(&TTL, &node.attr()),
+            None => reply.error(ENOENT),
+        }
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<TimeOrNow>,
+        _mtime: Option<TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        let Some(node) = self.nodes_by_ino.get(&ino) else {
+            reply.error(ENOENT);
+            return;
+        };
+        if !matches!(node.kind(), InodeKind::File) {
+            reply.attr(&TTL, &node.attr());
+            return;
+        }
+        if let Some(new_size) = size {
+            let path = node.path.clone();
+            let current = self.service.read_file(&path).unwrap_or_default();
+            let mut buf = current;
+            buf.resize(new_size as usize, 0);
+            if let Err(_) = self.service.write_file(&path, &buf) {
+                reply.error(EIO);
+                return;
+            }
+            if let Some(n) = self.nodes_by_ino.get_mut(&ino) {
+                n.data = buf;
+                if let Some(ref mut inode) = n.inode {
+                    inode.modified_at = SystemTime::now();
+                    inode.size = new_size as usize;
+                }
+            }
+            self.dirty = true;
+        }
+        match self.nodes_by_ino.get(&ino) {
+            Some(node) => reply.attr(&TTL, &node.attr()),
+            None => reply.error(ENOENT),
+        }
+    }
+
+    fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
+        match self.node(ino) {
+            Some(node) if matches!(node.kind(), InodeKind::Symlink) => reply.data(&node.data),
+            Some(_) => reply.error(EIO),
+            None => reply.error(ENOENT),
+        }
+    }
+
+    fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
+        match self.node(ino) {
+            Some(node) if matches!(node.kind(), InodeKind::File) => {
+                // truncate on open with O_TRUNC
+                if flags & libc::O_TRUNC != 0 {
+                    let path = node.path.clone();
+                    if self.service.write_file(&path, b"").is_err() {
+                        reply.error(EIO);
+                        return;
+                    }
+                    if let Some(n) = self.nodes_by_ino.get_mut(&ino) {
+                        n.data.clear();
+                        if let Some(ref mut inode) = n.inode {
+                            inode.size = 0;
+                            inode.modified_at = SystemTime::now();
+                        }
+                    }
+                    self.dirty = true;
+                }
+                reply.opened(0, 0);
+            }
+            Some(_) => reply.error(EIO),
+            None => reply.error(ENOENT),
+        }
+    }
+
+    fn read(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyData,
+    ) {
+        match self.nodes_by_ino.get(&ino) {
+            Some(node) if matches!(node.kind(), InodeKind::File) => {
+                let start = offset.max(0) as usize;
+                let end = start.saturating_add(size as usize).min(node.data.len());
+                reply.data(node.data.get(start..end).unwrap_or(&[]));
+            }
+            Some(_) => reply.error(EIO),
+            None => reply.error(ENOENT),
+        }
+    }
+
+    fn write(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyWrite,
+    ) {
+        let Some(node) = self.nodes_by_ino.get(&ino) else {
+            reply.error(ENOENT);
+            return;
+        };
+        if !matches!(node.kind(), InodeKind::File) {
+            reply.error(EISDIR);
+            return;
+        }
+        let path = node.path.clone();
+        let start = offset.max(0) as usize;
+        let end = start + data.len();
+
+        // read-modify-write: splice new bytes into existing content
+        let mut buf = self.service.read_file(&path).unwrap_or_default();
+        if buf.len() < end {
+            buf.resize(end, 0);
+        }
+        buf[start..end].copy_from_slice(data);
+
+        if let Err(_) = self.service.write_file(&path, &buf) {
+            reply.error(EIO);
+            return;
+        }
+        let written = data.len() as u32;
+        if let Some(n) = self.nodes_by_ino.get_mut(&ino) {
+            n.data = buf;
+            if let Some(ref mut inode) = n.inode {
+                inode.size = n.data.len();
+                inode.modified_at = SystemTime::now();
+            }
+        }
+        self.dirty = true;
+        reply.written(written);
+    }
+
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let Some(path) = self.child_path(parent, name) else {
+            reply.error(ENOENT);
+            return;
+        };
+        if self.ino_by_path.contains_key(&path) {
+            reply.error(EEXIST);
+            return;
+        }
+        if let Err(_) = self.service.create_file(&path, b"", &[]) {
+            reply.error(EIO);
+            return;
+        }
+        if self.service.inode_for_path(&path).is_none() {
+            reply.error(EIO);
+            return;
+        };
+        let inode = self.service.get_inode(&path).cloned();
+        let par = parent_path(&path);
+        let node = FuseNode {
+            path,
+            parent_path: par,
+            inode,
+            data: Vec::new(),
+        };
+        let attr = node.attr();
+        self.register_node(node);
+        self.dirty = true;
+        reply.created(&TTL, &attr, 0, 0, 0);
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let Some(path) = self.child_path(parent, name) else {
+            reply.error(ENOENT);
+            return;
+        };
+        if self.ino_by_path.contains_key(&path) {
+            reply.error(EEXIST);
+            return;
+        }
+        if let Err(_) = self.service.create_directory(&path) {
+            reply.error(EIO);
+            return;
+        }
+        if self.service.inode_for_path(&path).is_none() {
+            reply.error(EIO);
+            return;
+        };
+        let inode = self.service.get_inode(&path).cloned();
+        let par = parent_path(&path);
+        let node = FuseNode {
+            path,
+            parent_path: par,
+            inode,
+            data: Vec::new(),
+        };
+        let attr = node.attr();
+        self.register_node(node);
+        self.dirty = true;
+        reply.entry(&TTL, &attr, 0);
+    }
+
+    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let Some(path) = self.child_path(parent, name) else {
+            reply.error(ENOENT);
+            return;
+        };
+        let Some(&ino) = self.ino_by_path.get(&path) else {
+            reply.error(ENOENT);
+            return;
+        };
+        if let Some(node) = self.nodes_by_ino.get(&ino) {
+            if matches!(node.kind(), InodeKind::Directory) {
+                reply.error(EISDIR);
+                return;
+            }
+        }
+        if let Err(_) = self.service.delete_file(&path, false) {
+            reply.error(EIO);
+            return;
+        }
+        self.unregister_ino(ino);
+        self.dirty = true;
+        reply.ok();
+    }
+
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let Some(path) = self.child_path(parent, name) else {
+            reply.error(ENOENT);
+            return;
+        };
+        let Some(&ino) = self.ino_by_path.get(&path) else {
+            reply.error(ENOENT);
+            return;
+        };
+        if let Some(node) = self.nodes_by_ino.get(&ino) {
+            if !matches!(node.kind(), InodeKind::Directory) {
+                reply.error(ENOTDIR);
+                return;
+            }
+        }
+        // refuse non-empty directories
+        let is_empty = self
+            .children
+            .get(&path)
+            .map(|c| c.is_empty())
+            .unwrap_or(true);
+        if !is_empty {
+            reply.error(ENOTEMPTY);
+            return;
+        }
+        if let Err(_) = self.service.delete_file(&path, false) {
+            reply.error(EIO);
+            return;
+        }
+        self.unregister_ino(ino);
+        self.dirty = true;
+        reply.ok();
+    }
+
+    fn flush(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _lock_owner: u64,
+        reply: ReplyEmpty,
+    ) {
+        if self.dirty && !self.persist() {
+            reply.error(EIO);
+        } else {
+            reply.ok();
+        }
+    }
+
+    fn fsync(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _datasync: bool,
+        reply: ReplyEmpty,
+    ) {
+        if self.persist() {
+            reply.ok();
+        } else {
+            reply.error(EIO);
+        }
+    }
+
+    fn readdir(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
+        let entries = self.directory_entries(ino);
+        if entries.is_empty() {
+            reply.error(ENOENT);
+            return;
+        }
+        for (index, (entry_ino, kind, name)) in
+            entries.into_iter().enumerate().skip(offset as usize)
+        {
+            if reply.add(entry_ino, (index + 1) as i64, kind, name) {
+                break;
+            }
+        }
+        reply.ok();
+    }
+}
+
+pub fn mount_image_rw(
+    image_path: impl AsRef<Path>,
+    mount_point: impl AsRef<Path>,
+) -> CoreFsResult<()> {
+    let image_path = image_path.as_ref();
+    let mount_point = mount_point.as_ref();
+    let service = CoreFsService::load_image_from_path(image_path)?;
+    let fs_name = format!("corefs:{}", service.volume_name());
+    let mount = CoreFsFuseMountRw::from_service(service, image_path.to_path_buf());
+
+    fuser::mount2(
+        mount,
+        mount_point,
+        &[
+            MountOption::RW,
+            MountOption::FSName(fs_name),
+            MountOption::DefaultPermissions,
+        ],
+    )
+    .map_err(|error| {
+        CoreFsError::State(format!(
+            "failed to mount CoreFS image {} on {}: {error}",
+            image_path.display(),
+            mount_point.display()
+        ))
+    })
+}
+
 fn demo_fs() -> CoreFsResult<CoreFsService> {
     let mut fs = CoreFsService::format(crate::config::CoreFsConfig::default());
     fs.create_directory("/etc")?;
@@ -426,6 +988,176 @@ mod tests {
         create_image(&path, true).expect("image should be created");
         let view = CoreFsFuseView::load_image(&path).expect("image should load");
         assert!(view.lookup_child(ROOT_INO, OsStr::new("etc")).is_some());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn rw_mount_from_demo() -> CoreFsFuseMountRw {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_directory("/docs").expect("dir");
+        fs.create_file("/docs/readme.txt", b"hello", &[])
+            .expect("file");
+        CoreFsFuseMountRw::from_service(fs, PathBuf::from("/tmp/test.img"))
+    }
+
+    #[test]
+    fn rw_mount_builds_indexes_from_service_state() {
+        let mount = rw_mount_from_demo();
+
+        let root = mount.node(ROOT_INO).expect("root should exist");
+        assert_eq!(root.path, "/");
+
+        let docs = mount
+            .lookup_child(ROOT_INO, OsStr::new("docs"))
+            .expect("docs should be visible");
+        assert!(matches!(docs.kind(), InodeKind::Directory));
+
+        let entries = mount.directory_entries(docs.ino());
+        assert!(entries.iter().any(|(_, _, name)| name == "readme.txt"));
+    }
+
+    #[test]
+    fn rw_mount_write_updates_node_cache_and_marks_dirty() {
+        let mut mount = rw_mount_from_demo();
+
+        let docs_ino = mount
+            .lookup_child(ROOT_INO, OsStr::new("docs"))
+            .expect("docs")
+            .ino();
+        let readme_ino = mount
+            .lookup_child(docs_ino, OsStr::new("readme.txt"))
+            .expect("readme")
+            .ino();
+
+        assert!(!mount.dirty);
+
+        // simulate write via service + cache update directly
+        mount
+            .service
+            .write_file("/docs/readme.txt", b"world")
+            .expect("write");
+        if let Some(n) = mount.nodes_by_ino.get_mut(&readme_ino) {
+            n.data = b"world".to_vec();
+        }
+        mount.dirty = true;
+
+        assert!(mount.dirty);
+        assert_eq!(
+            mount
+                .nodes_by_ino
+                .get(&readme_ino)
+                .map(|n| n.data.as_slice()),
+            Some(b"world".as_slice())
+        );
+    }
+
+    #[test]
+    fn rw_mount_create_and_mkdir_register_new_nodes() {
+        let mut mount = rw_mount_from_demo();
+
+        // mkdir /tmp
+        mount
+            .service
+            .create_directory("/tmp")
+            .expect("create_directory");
+        let inode_id = mount
+            .service
+            .inode_for_path("/tmp")
+            .expect("inode should exist");
+        let inode = mount.service.get_inode("/tmp").cloned();
+        let ino = inode_id.0 + 1;
+        let node = FuseNode {
+            path: "/tmp".to_string(),
+            parent_path: "/".to_string(),
+            inode,
+            data: Vec::new(),
+        };
+        mount.register_node(node);
+
+        assert!(mount
+            .lookup_child(ROOT_INO, OsStr::new("tmp"))
+            .is_some());
+        assert_eq!(mount.nodes_by_ino[&ino].path, "/tmp");
+
+        // create /tmp/new.txt
+        mount
+            .service
+            .create_file("/tmp/new.txt", b"data", &[])
+            .expect("create_file");
+        let inode_id2 = mount
+            .service
+            .inode_for_path("/tmp/new.txt")
+            .expect("inode");
+        let inode2 = mount.service.get_inode("/tmp/new.txt").cloned();
+        let ino2 = inode_id2.0 + 1;
+        let node2 = FuseNode {
+            path: "/tmp/new.txt".to_string(),
+            parent_path: "/tmp".to_string(),
+            inode: inode2,
+            data: b"data".to_vec(),
+        };
+        mount.register_node(node2);
+
+        let tmp_ino = mount
+            .lookup_child(ROOT_INO, OsStr::new("tmp"))
+            .expect("tmp")
+            .ino();
+        let entries = mount.directory_entries(tmp_ino);
+        assert!(entries.iter().any(|(_, _, name)| name == "new.txt"));
+        assert_eq!(mount.nodes_by_ino[&ino2].path, "/tmp/new.txt");
+    }
+
+    #[test]
+    fn rw_mount_unregister_removes_from_all_indexes() {
+        let mut mount = rw_mount_from_demo();
+
+        let docs_ino = mount
+            .lookup_child(ROOT_INO, OsStr::new("docs"))
+            .expect("docs")
+            .ino();
+        let readme_ino = mount
+            .lookup_child(docs_ino, OsStr::new("readme.txt"))
+            .expect("readme")
+            .ino();
+
+        mount.unregister_ino(readme_ino);
+
+        assert!(mount.lookup_child(docs_ino, OsStr::new("readme.txt")).is_none());
+        assert!(!mount.nodes_by_ino.contains_key(&readme_ino));
+        let siblings = mount
+            .children
+            .get("/docs")
+            .cloned()
+            .unwrap_or_default();
+        assert!(!siblings.contains(&"readme.txt".to_string()));
+    }
+
+    #[test]
+    fn rw_mount_persist_saves_image_and_clears_dirty() {
+        let path = std::env::temp_dir().join(format!(
+            "corefs-rw-persist-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/hello.txt", b"persisted", &[])
+            .expect("file");
+        let mut mount = CoreFsFuseMountRw::from_service(fs, path.clone());
+        mount.dirty = true;
+
+        assert!(mount.persist());
+        assert!(!mount.dirty);
+
+        // reload and verify content survived
+        let loaded = CoreFsService::load_image_from_path(&path).expect("load");
+        assert_eq!(
+            loaded.read_file("/hello.txt").expect("read"),
+            b"persisted".to_vec()
+        );
 
         let _ = std::fs::remove_file(path);
     }

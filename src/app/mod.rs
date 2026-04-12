@@ -359,6 +359,10 @@ impl CoreFsService {
         self.catalog.get(path).map(|inode| inode.id)
     }
 
+    pub fn get_inode(&self, path: &str) -> Option<&Inode> {
+        self.catalog.get(path)
+    }
+
     fn persisted_state(&self) -> PersistedState {
         PersistedState {
             config: self.config.clone(),
