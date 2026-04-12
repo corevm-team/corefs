@@ -200,6 +200,24 @@ where
                 ));
             }
         }
+        "mount-image-rw" => {
+            let image_path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing image path for mount-image-rw".to_string())
+            })?;
+            let mount_point = args.get(3).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing mount point for mount-image-rw".to_string())
+            })?;
+            #[cfg(target_os = "linux")]
+            {
+                linux_fuse::mount_image_rw(image_path, mount_point)?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(CoreFsError::InvalidCommand(
+                    "mount-image-rw is only available on Linux builds".to_string(),
+                ));
+            }
+        }
         "benchmark" => {
             let config = benchmark_config_from_args(&args[2..])?;
             let result = run_benchmark(config)?;
@@ -278,6 +296,7 @@ fn print_usage() {
     println!("  load-image <path>");
     println!("  fsck-image <path> [--repair]");
     println!("  mount-image <image-path> <mount-point>");
+    println!("  mount-image-rw <image-path> <mount-point>");
     println!(
         "  benchmark [--profile <name>] [--files <n>] [--payload <bytes>] [--snapshots <n>] [--saves <n>]"
     );

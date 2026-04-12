@@ -21,7 +21,7 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `66/66` Tests erfolgreich
+- Test-Status: `71/71` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -65,7 +65,11 @@ Anwendungsnahe Funktionsmodule:
 
 ### `src/platform`
 
-Plattformneutrale Runtime- und Tooling-Blueprints.
+Plattformadapter und optionale Integrationspfade:
+
+- `runtime.rs` — plattformneutrales Blueprint-Modell für VFS-Integration
+- `linux_fuse.rs` — Linux-FUSE-Adapter (read-only und read-write) mit `.img`-Dateien als Backend
+- `performance.rs` / `tools.rs` — synthetisches Benchmark-Framework mit konfigurierbaren Profilen
 
 ### `src/cli.rs`
 
@@ -80,7 +84,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Speichern und Laden eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks (`SUPR` und `SUP2`), Generation Countern, Prüfsummen und getrennten Fachsegmenten wie `AINO`, `DINO`, `JOUR`, `VERS`, `SNAP`, `BLKD` und `DATA`
 - Dateien, Verzeichnisse und symbolische Links
 - Lesen und Schreiben von Inhalten
-- Linux-Testadapter über FUSE mit `.img`-Dateien als Mount-Backend
+- Linux-FUSE-Adapter mit `.img`-Dateien als Mount-Backend (read-only und read-write mit Writeback)
 - Journaling von Operationen
 - Basis-Versionierung
 - Snapshots
@@ -245,7 +249,75 @@ Volume-Image prüfen und redundante Superblocks reparieren:
 cargo run -- fsck-image ./corefs-volume.img --repair
 ```
 
-Image unter Linux per FUSE mounten:
+## Linux-FUSE-Mount
+
+Der Linux-FUSE-Adapter ermöglicht es, ein CoreFS-Volume-Image direkt im Dateisystem einzuhängen. Voraussetzung ist ein Linux-System mit installiertem FUSE-Subsystem (`libfuse3` bzw. `fuse`-Kernelmodul).
+
+### Read-only-Mount
+
+Hängt das Image schreibgeschützt ein. Nützlich zur Inspektion, ohne den Image-Inhalt zu verändern.
+
+```bash
+# Image mit Demo-Inhalt erzeugen
+cargo run -- mkfs-image ./corefs-linux.img --demo
+
+# Mountpoint anlegen und Image einbinden
+mkdir -p /tmp/corefs-mnt
+cargo run -- mount-image ./corefs-linux.img /tmp/corefs-mnt
+
+# Inhalt ansehen
+ls /tmp/corefs-mnt
+cat /tmp/corefs-mnt/etc/corefs.conf
+
+# Aushängen
+fusermount -u /tmp/corefs-mnt
+```
+
+Das Dateisystem erscheint unter Linux als `corefs:<volume-name>`, z. B. `corefs:corefs`.
+
+### Read-write-Mount mit Writeback
+
+Hängt das Image beschreibbar ein. Alle Änderungen im gemounteten Verzeichnis werden bei `close` bzw. `sync` automatisch in die `.img`-Datei zurückgeschrieben.
+
+```bash
+# Image erzeugen (falls noch nicht vorhanden)
+cargo run -- mkfs-image ./corefs-linux.img --demo
+
+# Mountpoint anlegen und Image beschreibbar einbinden
+mkdir -p /tmp/corefs-mnt
+cargo run -- mount-image-rw ./corefs-linux.img /tmp/corefs-mnt
+
+# Dateien lesen, schreiben, anlegen, löschen
+cat /tmp/corefs-mnt/etc/corefs.conf
+echo "updated" > /tmp/corefs-mnt/etc/corefs.conf
+mkdir /tmp/corefs-mnt/data
+cp /etc/hostname /tmp/corefs-mnt/data/hostname.txt
+rm /tmp/corefs-mnt/var/readme.txt
+
+# Aushängen – ausstehende Writes werden dabei persistiert
+fusermount -u /tmp/corefs-mnt
+
+# Inhalt nach dem Aushängen prüfen
+cargo run -- load-image ./corefs-linux.img
+cargo run -- read /etc/corefs.conf
+```
+
+### Unterstützte Operationen im RW-Modus
+
+| Operation | Verhalten |
+|---|---|
+| Lesen (`cat`, `cp`, ...) | liest aus dem In-Memory-Cache |
+| Schreiben (`echo >`, `cp`, ...) | Read-modify-write, Writeback bei `flush`/`fsync` |
+| Truncate (`truncate`, `> file`) | wird über `setattr` mit neuer Größe abgebildet |
+| Neue Datei anlegen (`touch`, `cp`) | erzeugt neuen Inode via `create` |
+| Verzeichnis anlegen (`mkdir`) | erzeugt Verzeichnis-Inode via `mkdir` |
+| Datei löschen (`rm`) | Soft-delete, Inode bleibt als gelöscht markiert |
+| Leeres Verzeichnis löschen (`rmdir`) | entfernt Verzeichnis-Inode; nicht-leere Dirs werden abgelehnt |
+| Schreiben bei geschlossenem Handle | persistiert das Image automatisch (`flush`) |
+
+> **Hinweis:** Der FUSE-Adapter ist ein Integrations- und Testpfad, kein produktionsreifes Dateisystem. Er steht nur auf Linux-Builds zur Verfügung.
+
+Image unter Linux per FUSE mounten (Kurzform):
 
 ```bash
 mkdir -p /tmp/corefs-mnt
