@@ -67,6 +67,7 @@ mod tests {
             journal_entries: Vec::new(),
             versions: Vec::new(),
             sync_statuses: Vec::new(),
+            hot_path_records: Vec::new(),
             snapshots: vec![Snapshot {
                 id: 1,
                 name: "baseline".to_string(),

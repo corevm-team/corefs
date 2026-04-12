@@ -1,3 +1,11 @@
+mod pathing;
+mod selectors;
+#[cfg(test)]
+mod tests;
+mod types;
+
+pub use types::{AdminReport, DirectoryEntry, FsStats, MetadataView, PersistedState};
+
 use crate::config::{CoreFsConfig, StorageTier};
 use crate::domain::acl::{AclEntry, Principal};
 use crate::domain::inode::{Inode, InodeId, InodeKind};
@@ -7,6 +15,7 @@ use crate::domain::volume::VolumeDescriptor;
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::platform::runtime::RuntimeIntegrationBlueprint;
 use crate::platform::tools::ToolRegistry;
+use crate::services::hot_paths::{HotPathEntry, HotPathService};
 use crate::services::indexing::IndexingService;
 use crate::services::integrity::{IntegrityReport, IntegrityService};
 use crate::services::journal::JournalService;
@@ -21,56 +30,11 @@ use crate::storage::block_store::BlockStore;
 use crate::storage::catalog::Catalog;
 use crate::storage::persistence;
 use crate::storage::volume_image;
-use serde::{Deserialize, Serialize};
+use pathing::{direct_child_name, is_descendant_path, parent_path, rebase_path, validate_path};
+use selectors::{VersionQuery, parse_version_selector, tier_name};
+use std::cell::RefCell;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FsStats {
-    pub files: usize,
-    pub deleted_files: usize,
-    pub versions: usize,
-    pub snapshots: usize,
-    pub journal_entries: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdminReport {
-    pub volume: VolumeDescriptor,
-    pub runtime: RuntimeIntegrationBlueprint,
-    pub tools: ToolRegistry,
-    pub stats: FsStats,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirectoryEntry {
-    pub name: String,
-    pub path: String,
-    pub inode: InodeId,
-    pub kind: InodeKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataView {
-    pub path: String,
-    pub tags: Vec<String>,
-    pub attributes: Vec<(String, String)>,
-    pub storage_tier: StorageTier,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PersistedState {
-    pub config: CoreFsConfig,
-    pub volume: VolumeDescriptor,
-    pub active_inodes: Vec<Inode>,
-    pub deleted_inodes: Vec<Inode>,
-    pub block_records: Vec<crate::storage::block_store::BlockRecord>,
-    pub journal_entries: Vec<crate::services::journal::JournalEntry>,
-    pub versions: Vec<crate::services::versioning::FileVersion>,
-    pub sync_statuses: Vec<crate::services::sync::SyncStatus>,
-    pub snapshots: Vec<Snapshot>,
-    pub next_snapshot_id: u64,
-}
+use std::time::SystemTime;
 
 #[derive(Debug)]
 pub struct CoreFsService {
@@ -84,7 +48,7 @@ pub struct CoreFsService {
     recovery: RecoveryService,
     integrity: IntegrityService,
     indexing: IndexingService,
-    metadata: MetadataService,
+    hot_paths: RefCell<HotPathService>,
     quota: QuotaService,
     security: SecurityService,
     sync: SyncService,
@@ -109,7 +73,7 @@ impl CoreFsService {
             recovery: RecoveryService::default(),
             integrity: IntegrityService,
             indexing: IndexingService,
-            metadata: MetadataService,
+            hot_paths: RefCell::new(HotPathService::default()),
             quota: QuotaService,
             security: SecurityService,
             sync: SyncService::default(),
@@ -144,6 +108,7 @@ impl CoreFsService {
         }
 
         self.catalog.insert(inode);
+        self.hot_paths.borrow_mut().record_write(path, bytes.len());
         self.journal
             .record("create_file", path, format!("bytes={}", bytes.len()));
         Ok(())
@@ -184,6 +149,7 @@ impl CoreFsService {
         self.ensure_quota_allows(1, target.len() as isize)?;
         inode.size = self.blocks.write(inode_id, target.as_bytes().to_vec());
         self.catalog.insert(inode);
+        self.hot_paths.borrow_mut().record_write(path, target.len());
         self.journal
             .record("create_symlink", path, format!("target={target}"));
         Ok(())
@@ -201,6 +167,23 @@ impl CoreFsService {
         bytes: &[u8],
     ) -> CoreFsResult<usize> {
         let existing = self.read_file(path)?;
+        let current_size = self
+            .catalog
+            .get(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?
+            .size;
+        let mut merged = existing;
+        if merged.len() < offset {
+            merged.resize(offset, 0);
+        }
+        let required_len = offset.saturating_add(bytes.len());
+        if merged.len() < required_len {
+            merged.resize(required_len, 0);
+        }
+        merged[offset..offset + bytes.len()].copy_from_slice(bytes);
+        let byte_delta = merged.len() as isize - current_size as isize;
+        self.ensure_quota_allows(0, byte_delta)?;
+
         let inode = self
             .catalog
             .get_mut(path)
@@ -212,23 +195,12 @@ impl CoreFsService {
             )));
         }
 
-        let mut merged = existing;
-        if merged.len() < offset {
-            merged.resize(offset, 0);
-        }
-        let required_len = offset.saturating_add(bytes.len());
-        if merged.len() < required_len {
-            merged.resize(required_len, 0);
-        }
-        merged[offset..offset + bytes.len()].copy_from_slice(bytes);
-        let byte_delta = merged.len() as isize - inode.size as isize;
-        self.ensure_quota_allows(0, byte_delta)?;
-
         inode.modified_at = SystemTime::now();
         inode.size = self.blocks.write(inode.id, merged.clone());
         self.versioning.store_version(path, merged);
         self.versioning
             .prune(path, self.config.versioning.keep_latest);
+        self.hot_paths.borrow_mut().record_write(path, bytes.len());
         self.journal.record(
             "write_file",
             path,
@@ -251,6 +223,9 @@ impl CoreFsService {
             .blocks
             .read(inode.id)
             .ok_or_else(|| CoreFsError::State(format!("missing data blocks for {path}")))?;
+        self.hot_paths
+            .borrow_mut()
+            .record_read(path, record.bytes.len());
         Ok(record.bytes.clone())
     }
 
@@ -540,6 +515,10 @@ impl CoreFsService {
         Ok(entries)
     }
 
+    pub fn hot_paths(&self, limit: usize) -> Vec<HotPathEntry> {
+        self.hot_paths.borrow().hottest_paths(limit)
+    }
+
     pub fn quota_report(&self) -> QuotaReport {
         self.quota
             .report(&self.config.quotas, &self.catalog.active_entries())
@@ -576,7 +555,9 @@ impl CoreFsService {
         Ok(MetadataView {
             path: path.to_string(),
             tags: inode.metadata.tags.clone(),
-            attributes: inode.metadata.attributes.clone(),
+            attributes: MetadataService::resolve_attributes(inode, |target_path| {
+                self.read_file(target_path)
+            }),
             storage_tier: inode.metadata.storage_tier.clone(),
         })
     }
@@ -586,7 +567,7 @@ impl CoreFsService {
             .catalog
             .get_mut(path)
             .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
-        self.metadata.add_tag(inode, tag);
+        MetadataService::add_tag(inode, tag);
         inode.modified_at = SystemTime::now();
         self.journal.record("tag_add", path, format!("tag={tag}"));
         Ok(())
@@ -597,7 +578,7 @@ impl CoreFsService {
             .catalog
             .get_mut(path)
             .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
-        self.metadata.remove_tag(inode, tag);
+        MetadataService::remove_tag(inode, tag);
         inode.modified_at = SystemTime::now();
         self.journal
             .record("tag_remove", path, format!("tag={tag}"));
@@ -609,10 +590,32 @@ impl CoreFsService {
             .catalog
             .get_mut(path)
             .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
-        self.metadata.set_attribute(inode, key, value);
+        MetadataService::set_attribute(inode, key, value);
         inode.modified_at = SystemTime::now();
         self.journal
             .record("attribute_set", path, format!("key={key} value={value}"));
+        Ok(())
+    }
+
+    pub fn set_content_pointer_attribute(
+        &mut self,
+        path: &str,
+        key: &str,
+        target_path: &str,
+        extractor: &str,
+    ) -> CoreFsResult<()> {
+        validate_path(target_path)?;
+        let inode = self
+            .catalog
+            .get_mut(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+        MetadataService::set_content_pointer(inode, key, target_path, extractor);
+        inode.modified_at = SystemTime::now();
+        self.journal.record(
+            "attribute_pointer_set",
+            path,
+            format!("key={key} target={target_path} extractor={extractor}"),
+        );
         Ok(())
     }
 
@@ -621,7 +624,7 @@ impl CoreFsService {
             .catalog
             .get_mut(path)
             .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
-        self.metadata.set_storage_tier(inode, tier.clone());
+        MetadataService::set_storage_tier(inode, tier.clone());
         inode.modified_at = SystemTime::now();
         self.journal
             .record("storage_tier", path, format!("tier={}", tier_name(&tier)));
@@ -634,6 +637,24 @@ impl CoreFsService {
             .active_entries()
             .into_iter()
             .filter(|inode| inode.metadata.tags.iter().any(|candidate| candidate == tag))
+            .map(|inode| inode.path)
+            .collect::<Vec<_>>();
+        matches.sort();
+        matches
+    }
+
+    pub fn find_by_attribute_term(&self, term: &str) -> Vec<String> {
+        let mut matches = self
+            .catalog
+            .active_entries()
+            .into_iter()
+            .filter(|inode| {
+                MetadataService::resolve_attributes(inode, |target_path| {
+                    self.read_file(target_path)
+                })
+                .into_iter()
+                .any(|(_, value)| value.contains(term))
+            })
             .map(|inode| inode.path)
             .collect::<Vec<_>>();
         matches.sort();
@@ -711,6 +732,7 @@ impl CoreFsService {
             journal_entries: self.journal.entries().to_vec(),
             versions: self.versioning.all_versions(),
             sync_statuses: self.sync.statuses().to_vec(),
+            hot_path_records: self.hot_paths.borrow().records(),
             snapshots: self.snapshots.clone(),
             next_snapshot_id: self.next_snapshot_id,
         }
@@ -741,7 +763,7 @@ impl CoreFsService {
             recovery,
             integrity: IntegrityService,
             indexing: IndexingService,
-            metadata: MetadataService,
+            hot_paths: RefCell::new(HotPathService::from_records(state.hot_path_records)),
             quota: QuotaService,
             security: SecurityService,
             sync: SyncService::from_statuses(state.sync_statuses),
@@ -839,501 +861,5 @@ impl CoreFsService {
             .collect::<Vec<_>>();
         paths.sort();
         paths
-    }
-}
-
-fn validate_path(path: &str) -> CoreFsResult<()> {
-    if path.is_empty() || !path.starts_with('/') {
-        return Err(CoreFsError::InvalidInput(format!(
-            "paths must be absolute and non-empty: {path}"
-        )));
-    }
-    if path.len() > 16_384 {
-        return Err(CoreFsError::InvalidInput(format!(
-            "path exceeds supported limit: {path}"
-        )));
-    }
-    if path != "/" && path.ends_with('/') {
-        return Err(CoreFsError::InvalidInput(format!(
-            "paths must not end with '/': {path}"
-        )));
-    }
-    Ok(())
-}
-
-fn parent_path(path: &str) -> &str {
-    match path.rfind('/') {
-        Some(0) | None => "/",
-        Some(index) => &path[..index],
-    }
-}
-
-fn direct_child_name(parent: &str, path: &str) -> Option<String> {
-    if parent == "/" {
-        let remainder = path.strip_prefix('/')?;
-        if remainder.is_empty() || remainder.contains('/') {
-            return None;
-        }
-        return Some(remainder.to_string());
-    }
-
-    let prefix = format!("{parent}/");
-    let remainder = path.strip_prefix(&prefix)?;
-    if remainder.is_empty() || remainder.contains('/') {
-        return None;
-    }
-    Some(remainder.to_string())
-}
-
-fn is_descendant_path(path: &str, prefix: &str) -> bool {
-    path.len() > prefix.len()
-        && path.starts_with(prefix)
-        && path.as_bytes().get(prefix.len()) == Some(&b'/')
-}
-
-fn rebase_path(path: &str, old_prefix: &str, new_prefix: &str) -> String {
-    if path == old_prefix {
-        new_prefix.to_string()
-    } else {
-        format!("{new_prefix}/{}", &path[old_prefix.len() + 1..])
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum VersionQuery {
-    Latest,
-    VersionId(u64),
-    Timestamp(SystemTime),
-}
-
-fn parse_version_selector(selector: &str) -> CoreFsResult<(&str, VersionQuery)> {
-    let (path, suffix) = selector.rsplit_once('@').ok_or_else(|| {
-        CoreFsError::InvalidInput(format!("version selector must contain '@': {selector}"))
-    })?;
-    validate_path(path)?;
-
-    if suffix == "latest" {
-        return Ok((path, VersionQuery::Latest));
-    }
-    if let Some(raw) = suffix.strip_prefix('v') {
-        let version_id = raw.parse::<u64>().map_err(|error| {
-            CoreFsError::InvalidInput(format!(
-                "invalid version id in selector {selector}: {error}"
-            ))
-        })?;
-        return Ok((path, VersionQuery::VersionId(version_id)));
-    }
-
-    Ok((
-        path,
-        VersionQuery::Timestamp(parse_timestamp_selector(suffix)?),
-    ))
-}
-
-fn parse_timestamp_selector(value: &str) -> CoreFsResult<SystemTime> {
-    let normalized = value.replace('T', "-").replace(':', "-");
-    let parts = normalized
-        .split('-')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.len() != 6 {
-        return Err(CoreFsError::InvalidInput(format!(
-            "invalid timestamp selector: {value}"
-        )));
-    }
-
-    let year = parse_i64(parts[0], "year", value)?;
-    let month = parse_i64(parts[1], "month", value)?;
-    let day = parse_i64(parts[2], "day", value)?;
-    let hour = parse_i64(parts[3], "hour", value)?;
-    let minute = parse_i64(parts[4], "minute", value)?;
-    let second = parse_i64(parts[5], "second", value)?;
-
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || !(0..=23).contains(&hour)
-        || !(0..=59).contains(&minute)
-        || !(0..=59).contains(&second)
-    {
-        return Err(CoreFsError::InvalidInput(format!(
-            "timestamp selector out of range: {value}"
-        )));
-    }
-
-    let days = days_from_civil(year, month, day)?;
-    let total_seconds = days
-        .checked_mul(86_400)
-        .and_then(|base| base.checked_add(hour * 3_600 + minute * 60 + second))
-        .ok_or_else(|| {
-            CoreFsError::InvalidInput(format!("timestamp selector overflow: {value}"))
-        })?;
-
-    if total_seconds < 0 {
-        return Err(CoreFsError::InvalidInput(format!(
-            "timestamp selector predates unix epoch: {value}"
-        )));
-    }
-
-    Ok(UNIX_EPOCH + Duration::from_secs(total_seconds as u64))
-}
-
-fn parse_i64(value: &str, label: &str, original: &str) -> CoreFsResult<i64> {
-    value.parse::<i64>().map_err(|error| {
-        CoreFsError::InvalidInput(format!(
-            "invalid {label} in timestamp selector {original}: {error}"
-        ))
-    })
-}
-
-fn days_from_civil(year: i64, month: i64, day: i64) -> CoreFsResult<i64> {
-    let adjusted_year = year - if month <= 2 { 1 } else { 0 };
-    let era = if adjusted_year >= 0 {
-        adjusted_year
-    } else {
-        adjusted_year - 399
-    } / 400;
-    let yoe = adjusted_year - era * 400;
-    let month_prime = month + if month > 2 { -3 } else { 9 };
-    let doy = (153 * month_prime + 2) / 5 + day - 1;
-    let max_day = match month {
-        4 | 6 | 9 | 11 => 30,
-        2 => {
-            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-            if leap { 29 } else { 28 }
-        }
-        _ => 31,
-    };
-    if day > max_day {
-        return Err(CoreFsError::InvalidInput(format!(
-            "invalid day {day} for month {month} in timestamp selector"
-        )));
-    }
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Ok(era * 146_097 + doe - 719_468)
-}
-
-fn tier_name(tier: &StorageTier) -> &'static str {
-    match tier {
-        StorageTier::Hot => "hot",
-        StorageTier::Warm => "warm",
-        StorageTier::Cold => "cold",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_fs() -> CoreFsService {
-        CoreFsService::format(CoreFsConfig::default())
-    }
-
-    #[test]
-    fn format_initializes_enterprise_services() {
-        let fs = test_fs();
-
-        assert_eq!(fs.volume_name(), "corefs");
-        assert_eq!(fs.journal_entries(), 1);
-        assert_eq!(fs.synced_paths(), 0);
-        assert!(fs.list_paths().is_empty());
-    }
-
-    #[test]
-    fn create_and_read_file_round_trips_content() {
-        let mut fs = test_fs();
-        fs.create_file("/notes.txt", b"hello", &["docs".to_string()])
-            .expect("file creation should succeed");
-
-        assert_eq!(
-            fs.read_file("/notes.txt").expect("file should exist"),
-            b"hello".to_vec()
-        );
-        assert!(fs.inode_for_path("/notes.txt").is_some());
-    }
-
-    #[test]
-    fn duplicate_paths_are_rejected_for_file_directory_and_symlink() {
-        let mut fs = test_fs();
-        fs.create_file("/dup", b"a", &[]).expect("first file");
-        assert!(matches!(
-            fs.create_file("/dup", b"b", &[]),
-            Err(CoreFsError::AlreadyExists(_))
-        ));
-
-        fs.create_directory("/dir").expect("dir");
-        assert!(matches!(
-            fs.create_directory("/dir"),
-            Err(CoreFsError::AlreadyExists(_))
-        ));
-
-        fs.create_symlink("/ln", "/dup").expect("symlink");
-        assert!(matches!(
-            fs.create_symlink("/ln", "/dup"),
-            Err(CoreFsError::AlreadyExists(_))
-        ));
-    }
-
-    #[test]
-    fn write_file_updates_existing_file_and_rejects_non_files() {
-        let mut fs = test_fs();
-        fs.create_file("/file.txt", b"old", &[]).expect("file");
-        fs.write_file("/file.txt", b"new")
-            .expect("write should work");
-        assert_eq!(fs.read_file("/file.txt").expect("file"), b"new".to_vec());
-
-        fs.create_directory("/dir").expect("dir");
-        assert!(matches!(
-            fs.write_file("/dir", b"bad"),
-            Err(CoreFsError::InvalidInput(_))
-        ));
-        assert!(matches!(
-            fs.write_file("/missing", b"bad"),
-            Err(CoreFsError::NotFound(_))
-        ));
-    }
-
-    #[test]
-    fn read_file_returns_errors_for_missing_paths() {
-        let fs = test_fs();
-        assert!(matches!(
-            fs.read_file("/missing"),
-            Err(CoreFsError::NotFound(_))
-        ));
-    }
-
-    #[test]
-    fn delete_restore_and_secure_delete_follow_policies() {
-        let mut fs = test_fs();
-        fs.create_file("/recover.txt", b"data", &[]).expect("file");
-        fs.delete_file("/recover.txt", false).expect("soft delete");
-        assert!(fs.read_file("/recover.txt").is_err());
-        assert_eq!(fs.recoverable_paths(), vec!["/recover.txt".to_string()]);
-        fs.restore_file("/recover.txt").expect("restore");
-        assert_eq!(
-            fs.read_file("/recover.txt").expect("restored"),
-            b"data".to_vec()
-        );
-
-        fs.delete_file("/recover.txt", true).expect("secure delete");
-        assert!(matches!(
-            fs.restore_file("/recover.txt"),
-            Err(CoreFsError::NotFound(_))
-        ));
-        assert!(matches!(
-            fs.delete_file("/recover.txt", true),
-            Err(CoreFsError::NotFound(_))
-        ));
-    }
-
-    #[test]
-    fn snapshot_scrub_sync_and_reporting_are_available() {
-        let mut fs = test_fs();
-        fs.create_directory("/etc").expect("dir");
-        fs.create_file("/etc/config.txt", b"cfg", &["config".to_string()])
-            .expect("file");
-
-        let snapshot = fs.create_snapshot("baseline");
-        assert_eq!(snapshot.id, 1);
-        assert!(snapshot.paths.iter().any(|path| path == "/etc/config.txt"));
-        assert_eq!(fs.snapshot_names(), vec!["baseline".to_string()]);
-
-        let scrub = fs.scrub();
-        assert_eq!(scrub.checked_paths, 1);
-        assert_eq!(scrub.valid_blocks, 1);
-        assert_eq!(scrub.invalid_blocks, 0);
-
-        fs.mark_synced("/etc/config.txt", "node-a").expect("sync");
-        assert_eq!(fs.synced_paths(), 1);
-        assert!(matches!(
-            fs.mark_synced("/missing", "node-a"),
-            Err(CoreFsError::NotFound(_))
-        ));
-
-        let stats = fs.stats();
-        assert_eq!(stats.files, 2);
-        assert_eq!(stats.deleted_files, 0);
-        assert_eq!(stats.versions, 1);
-        assert_eq!(stats.snapshots, 1);
-        assert!(stats.journal_entries >= 5);
-
-        let report = fs.admin_report();
-        assert_eq!(report.volume.name, "corefs");
-        assert!(
-            report
-                .runtime
-                .compatibility_targets
-                .iter()
-                .any(|item| item == "native-os")
-        );
-        assert_eq!(report.tools.mkfs, "corefs mkfs");
-    }
-
-    #[test]
-    fn list_directory_and_rename_support_nested_paths() {
-        let mut fs = test_fs();
-        fs.create_directory("/srv").expect("srv");
-        fs.create_directory("/srv/corefs").expect("corefs");
-        fs.create_file("/srv/corefs/a.txt", b"alpha", &[])
-            .expect("file");
-
-        let entries = fs.list_directory("/srv/corefs").expect("directory listing");
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].name, "a.txt");
-
-        fs.rename_path("/srv/corefs", "/srv/platform")
-            .expect("rename");
-        assert!(fs.get_inode("/srv/platform").is_some());
-        assert!(fs.get_inode("/srv/platform/a.txt").is_some());
-        assert_eq!(
-            fs.read_file("/srv/platform/a.txt").expect("renamed file"),
-            b"alpha".to_vec()
-        );
-    }
-
-    #[test]
-    fn remove_directory_requires_empty_directory() {
-        let mut fs = test_fs();
-        fs.create_directory("/data").expect("data");
-        fs.create_file("/data/file.txt", b"payload", &[])
-            .expect("file");
-        assert!(matches!(
-            fs.remove_directory("/data"),
-            Err(CoreFsError::PolicyViolation(_))
-        ));
-
-        fs.delete_file("/data/file.txt", false).expect("delete");
-        fs.remove_directory("/data").expect("remove");
-        assert!(fs.get_inode("/data").is_none());
-    }
-
-    #[test]
-    fn state_can_be_saved_and_loaded_again() {
-        let path = std::env::temp_dir().join(format!(
-            "corefs-service-{}-{}.json",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after unix epoch")
-                .as_nanos()
-        ));
-
-        let mut fs = test_fs();
-        fs.create_directory("/etc").expect("dir");
-        fs.create_file("/etc/config.txt", b"cfg", &["config".to_string()])
-            .expect("file");
-        fs.create_snapshot("baseline");
-        fs.mark_synced("/etc/config.txt", "node-a").expect("sync");
-        fs.delete_file("/etc/config.txt", false).expect("delete");
-        fs.save_to_path(&path).expect("save should succeed");
-
-        let loaded = CoreFsService::load_from_path(&path).expect("load should succeed");
-
-        assert_eq!(loaded.volume_name(), "corefs");
-        assert!(loaded.list_paths().iter().any(|path| path == "/etc"));
-        assert_eq!(
-            loaded.recoverable_paths(),
-            vec!["/etc/config.txt".to_string()]
-        );
-        assert_eq!(loaded.snapshot_names(), vec!["baseline".to_string()]);
-        assert_eq!(loaded.synced_paths(), 1);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn loading_invalid_state_returns_error() {
-        let path = std::env::temp_dir().join(format!(
-            "corefs-invalid-{}-{}.json",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after unix epoch")
-                .as_nanos()
-        ));
-        std::fs::write(&path, b"not-json").expect("test file should be written");
-
-        let result = CoreFsService::load_from_path(&path);
-        assert!(matches!(result, Err(CoreFsError::State(_))));
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn state_can_be_saved_and_loaded_as_binary_image() {
-        let path = std::env::temp_dir().join(format!(
-            "corefs-image-{}-{}.img",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after unix epoch")
-                .as_nanos()
-        ));
-
-        let mut fs = test_fs();
-        fs.create_directory("/var").expect("dir");
-        fs.create_file("/var/log.bin", b"log", &["logs".to_string()])
-            .expect("file");
-        fs.create_snapshot("binary");
-        fs.save_image_to_path(&path)
-            .expect("image save should succeed");
-
-        let loaded = CoreFsService::load_image_from_path(&path).expect("image load should succeed");
-
-        assert!(
-            loaded
-                .list_paths()
-                .iter()
-                .any(|path| path == "/var/log.bin")
-        );
-        assert_eq!(loaded.snapshot_names(), vec!["binary".to_string()]);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn journal_replay_reconciles_deleted_entries_on_load() {
-        let path = std::env::temp_dir().join(format!(
-            "corefs-journal-replay-{}-{}.img",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after unix epoch")
-                .as_nanos()
-        ));
-
-        let mut fs = test_fs();
-        fs.create_file("/replay.txt", b"data", &[]).expect("file");
-        fs.delete_file("/replay.txt", false).expect("delete");
-        fs.save_image_to_path(&path).expect("save image");
-
-        let loaded = CoreFsService::load_image_from_path(&path).expect("load image");
-
-        assert!(!loaded.list_paths().iter().any(|path| path == "/replay.txt"));
-        assert_eq!(loaded.recoverable_paths(), vec!["/replay.txt".to_string()]);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn validate_path_rejects_invalid_inputs() {
-        assert!(matches!(
-            validate_path(""),
-            Err(CoreFsError::InvalidInput(_))
-        ));
-        assert!(matches!(
-            validate_path("relative"),
-            Err(CoreFsError::InvalidInput(_))
-        ));
-        assert!(validate_path("/valid").is_ok());
-    }
-
-    #[test]
-    fn validate_path_rejects_excessively_long_paths() {
-        let too_long = format!("/{}", "a".repeat(16_384));
-        assert!(matches!(
-            validate_path(&too_long),
-            Err(CoreFsError::InvalidInput(_))
-        ));
     }
 }

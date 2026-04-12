@@ -31,8 +31,14 @@ cleanup() {
 
 trap cleanup EXIT
 
-cargo run --release -- mkfs-image "$IMAGE_PATH" --bootstrap
-cargo run --release -- mount-image "$IMAGE_PATH" "$MOUNT_POINT" --threads "$THREADS" &
+if [[ -x "./dist/bin/corefs" ]]; then
+  COREFS_BIN="./dist/bin/corefs"
+else
+  COREFS_BIN="cargo run --release --"
+fi
+
+eval "${COREFS_BIN} mkfs-image \"$IMAGE_PATH\" --bootstrap"
+eval "${COREFS_BIN} mount-image \"$IMAGE_PATH\" \"$MOUNT_POINT\" --threads \"$THREADS\"" &
 MOUNT_PID=$!
 
 for _ in $(seq 1 50); do

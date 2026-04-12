@@ -7,4 +7,8 @@ MOUNT_POINT="${2:-./mnt/corefs}"
 mkdir -p "$MOUNT_POINT"
 shift $(( $# > 1 ? 2 : $# ))
 
-cargo run --release -- mount-image "$IMAGE_PATH" "$MOUNT_POINT" "$@"
+if [[ -x "./dist/bin/corefs" ]]; then
+  ./dist/bin/corefs mount-image "$IMAGE_PATH" "$MOUNT_POINT" "$@"
+else
+  cargo run --release -- mount-image "$IMAGE_PATH" "$MOUNT_POINT" "$@"
+fi

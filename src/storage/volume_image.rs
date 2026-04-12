@@ -4,6 +4,7 @@ use crate::domain::inode::{Inode, InodeId};
 use crate::domain::snapshot::Snapshot;
 use crate::domain::volume::VolumeDescriptor;
 use crate::error::{CoreFsError, CoreFsResult};
+use crate::services::hot_paths::HotPathRecord;
 use crate::services::journal::JournalEntry;
 use crate::services::sync::SyncStatus;
 use crate::services::versioning::FileVersion;
@@ -56,6 +57,11 @@ struct VersionSegment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SyncSegment {
     sync_statuses: Vec<SyncStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HotPathSegment {
+    hot_path_records: Vec<HotPathRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +166,13 @@ pub fn save_volume_image(path: impl AsRef<Path>, state: &PersistedState) -> Core
             *b"SYNC",
             &SyncSegment {
                 sync_statuses: state.sync_statuses.clone(),
+            },
+            path,
+        )?,
+        serialize_segment(
+            *b"HOTS",
+            &HotPathSegment {
+                hot_path_records: state.hot_path_records.clone(),
             },
             path,
         )?,
@@ -269,6 +282,8 @@ pub fn load_volume_image(path: impl AsRef<Path>) -> CoreFsResult<PersistedState>
     let versions: VersionSegment =
         deserialize_segment(&bytes, find_segment(&entries, b"VERS")?, path)?;
     let sync: SyncSegment = deserialize_segment(&bytes, find_segment(&entries, b"SYNC")?, path)?;
+    let hot_paths: HotPathSegment =
+        deserialize_segment(&bytes, find_segment(&entries, b"HOTS")?, path)?;
     let snapshots: SnapshotSegment =
         deserialize_segment(&bytes, find_segment(&entries, b"SNAP")?, path)?;
     let block_descriptors: BlockDescriptorSegment =
@@ -285,6 +300,7 @@ pub fn load_volume_image(path: impl AsRef<Path>) -> CoreFsResult<PersistedState>
         journal_entries: journal.journal_entries,
         versions: versions.versions,
         sync_statuses: sync.sync_statuses,
+        hot_path_records: hot_paths.hot_path_records,
         snapshots: snapshots.snapshots,
         next_snapshot_id: snapshots.next_snapshot_id,
     })
@@ -589,7 +605,7 @@ fn read_best_superblock(
 fn validate_required_segments(entries: &[SegmentEntry]) -> CoreFsResult<()> {
     for kind in [
         *b"SUPR", *b"SUP2", *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC",
-        *b"SNAP", *b"BLKD", *b"DATA",
+        *b"HOTS", *b"SNAP", *b"BLKD", *b"DATA",
     ] {
         let _ = find_segment(entries, &kind)?;
     }
@@ -662,6 +678,7 @@ mod tests {
             journal_entries: Vec::new(),
             versions: Vec::new(),
             sync_statuses: Vec::new(),
+            hot_path_records: Vec::new(),
             snapshots: vec![Snapshot {
                 id: 1,
                 name: "baseline".to_string(),
@@ -714,7 +731,7 @@ mod tests {
         );
         assert_eq!(
             u32::from_le_bytes(bytes[12..16].try_into().expect("fixed")),
-            12
+            13
         );
         assert_eq!(&bytes[16..20], b"SUPR");
         assert_eq!(&bytes[40..44], b"SUP2");
@@ -754,7 +771,7 @@ mod tests {
         let report = inspect_volume_image(&path).expect("inspection should succeed");
 
         assert_eq!(report.format_version, FORMAT_VERSION);
-        assert_eq!(report.segment_count, 12);
+        assert_eq!(report.segment_count, 13);
         assert_eq!(report.valid_superblocks, 2);
         assert!(report.directory_checksum_valid);
         assert!(report.payload_checksum_valid);
