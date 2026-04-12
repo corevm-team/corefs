@@ -134,10 +134,12 @@ mod tests {
         PersistedState {
             config: CoreFsConfig::default(),
             volume: VolumeDescriptor::from_config(&CoreFsConfig::default()),
+            clean_unmount: true,
             active_inodes: Vec::new(),
             deleted_inodes: Vec::new(),
             block_records: Vec::new(),
             journal_entries: Vec::new(),
+            journal_runtime: crate::services::journal::JournalRuntimeState::default(),
             versions: Vec::new(),
             sync_statuses: Vec::new(),
             snapshots: vec![Snapshot {
@@ -174,7 +176,7 @@ mod tests {
         let report = service.fsck_image(&path).expect("fsck should succeed");
 
         assert_eq!(report.format_version, 4);
-        assert_eq!(report.segment_count, 12);
+        assert_eq!(report.segment_count, 13);
         assert_eq!(report.valid_superblocks, 2);
         assert!(report.directory_checksum_valid);
         assert!(report.payload_checksum_valid);

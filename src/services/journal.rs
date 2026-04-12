@@ -12,9 +12,28 @@ pub struct JournalEntry {
     pub details: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalTransaction {
+    pub id: u64,
+    pub label: String,
+    pub started_at: SystemTime,
+    pub operations: Vec<JournalEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct JournalRuntimeState {
+    pub next_transaction_id: u64,
+    pub last_committed_transaction_id: Option<u64>,
+    pub last_aborted_transaction_id: Option<u64>,
+    pub last_replayed_transaction_id: Option<u64>,
+    pub unclean_shutdown: bool,
+    pub pending_transaction: Option<JournalTransaction>,
+}
+
 #[derive(Debug, Default)]
 pub struct JournalService {
     entries: Vec<JournalEntry>,
+    runtime: JournalRuntimeState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -34,22 +53,140 @@ pub struct JournalRepairSummary {
     pub snapshot_id_adjusted: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct JournalRecoverySummary {
+    pub aborted_pending_transaction: bool,
+    pub cleared_unclean_shutdown: bool,
+    pub replay_recorded: bool,
+}
+
 impl JournalService {
     pub fn record(&mut self, operation: &str, target: &str, details: impl Into<String>) {
-        self.entries.push(JournalEntry {
+        let entry = JournalEntry {
             timestamp: SystemTime::now(),
             operation: operation.to_string(),
             target: target.to_string(),
             details: details.into(),
-        });
+        };
+
+        if let Some(transaction) = self.runtime.pending_transaction.as_mut() {
+            transaction.operations.push(entry);
+        } else {
+            self.entries.push(entry);
+        }
     }
 
     pub fn entries(&self) -> &[JournalEntry] {
         &self.entries
     }
 
+    pub fn runtime_state(&self) -> &JournalRuntimeState {
+        &self.runtime
+    }
+
+    pub fn has_pending_transaction(&self) -> bool {
+        self.runtime.pending_transaction.is_some()
+    }
+
+    pub fn begin_transaction(&mut self, label: impl Into<String>) -> u64 {
+        if let Some(transaction) = self.runtime.pending_transaction.as_ref() {
+            return transaction.id;
+        }
+
+        self.runtime.next_transaction_id += 1;
+        let id = self.runtime.next_transaction_id;
+        self.runtime.pending_transaction = Some(JournalTransaction {
+            id,
+            label: label.into(),
+            started_at: SystemTime::now(),
+            operations: Vec::new(),
+        });
+        id
+    }
+
+    pub fn commit_transaction(&mut self) -> Option<u64> {
+        let transaction = self.runtime.pending_transaction.take()?;
+        let id = transaction.id;
+        let operation_count = transaction.operations.len();
+        self.entries.push(JournalEntry {
+            timestamp: SystemTime::now(),
+            operation: "tx_begin".to_string(),
+            target: transaction.label.clone(),
+            details: format!("id={id} ops={operation_count}"),
+        });
+        self.entries.extend(transaction.operations);
+        self.entries.push(JournalEntry {
+            timestamp: SystemTime::now(),
+            operation: "tx_commit".to_string(),
+            target: transaction.label,
+            details: format!("id={id} ops={operation_count}"),
+        });
+        self.runtime.last_committed_transaction_id = Some(id);
+        Some(id)
+    }
+
+    pub fn abort_transaction(&mut self, reason: &str) -> Option<u64> {
+        let transaction = self.runtime.pending_transaction.take()?;
+        let id = transaction.id;
+        self.entries.push(JournalEntry {
+            timestamp: SystemTime::now(),
+            operation: "tx_abort".to_string(),
+            target: transaction.label,
+            details: format!("id={id} reason={reason}"),
+        });
+        self.runtime.last_aborted_transaction_id = Some(id);
+        Some(id)
+    }
+
+    pub fn mark_unclean_shutdown(&mut self) {
+        self.runtime.unclean_shutdown = true;
+    }
+
+    pub fn mark_clean_shutdown(&mut self) {
+        self.runtime.unclean_shutdown = false;
+    }
+
+    pub fn recover_on_load(&mut self) -> JournalRecoverySummary {
+        let mut summary = JournalRecoverySummary::default();
+
+        if let Some(transaction_id) = self.abort_transaction("recovery_replay") {
+            self.runtime.last_replayed_transaction_id = Some(transaction_id);
+            summary.aborted_pending_transaction = true;
+        }
+
+        if self.runtime.unclean_shutdown {
+            self.runtime.unclean_shutdown = false;
+            summary.cleared_unclean_shutdown = true;
+        }
+
+        if summary.aborted_pending_transaction || summary.cleared_unclean_shutdown {
+            self.entries.push(JournalEntry {
+                timestamp: SystemTime::now(),
+                operation: "recovery_replay".to_string(),
+                target: "/".to_string(),
+                details: format!(
+                    "aborted_pending={} cleared_unclean={}",
+                    summary.aborted_pending_transaction, summary.cleared_unclean_shutdown
+                ),
+            });
+            summary.replay_recorded = true;
+        }
+
+        summary
+    }
+
     pub fn from_entries(entries: Vec<JournalEntry>) -> Self {
-        Self { entries }
+        Self {
+            entries,
+            runtime: JournalRuntimeState::default(),
+        }
+    }
+
+    pub fn from_entries_with_runtime(
+        entries: Vec<JournalEntry>,
+        runtime: JournalRuntimeState,
+    ) -> Self {
+        Self { entries, runtime }
     }
 
     pub fn replay(&self) -> JournalReplayState {
@@ -73,7 +210,8 @@ impl JournalService {
                 "snapshot" => {
                     state.snapshot_count += 1;
                 }
-                "format" | "sync" => {}
+                "format" | "sync" | "rename" | "tx_begin" | "tx_commit" | "tx_abort"
+                | "recovery_replay" => {}
                 _ => {}
             }
         }
@@ -177,6 +315,55 @@ mod tests {
     }
 
     #[test]
+    fn transactions_stage_entries_until_commit() {
+        let mut journal = JournalService::default();
+        let tx_id = journal.begin_transaction("rw-writeback");
+        journal.record("write_file", "/a", "bytes=3");
+
+        assert!(journal.entries().is_empty());
+        assert!(journal.has_pending_transaction());
+
+        let committed = journal.commit_transaction();
+        assert_eq!(committed, Some(tx_id));
+        assert!(!journal.has_pending_transaction());
+        assert_eq!(journal.entries().len(), 3);
+        assert_eq!(journal.entries()[0].operation, "tx_begin");
+        assert_eq!(journal.entries()[1].operation, "write_file");
+        assert_eq!(journal.entries()[2].operation, "tx_commit");
+    }
+
+    #[test]
+    fn recover_on_load_aborts_pending_transaction_and_clears_dirty_marker() {
+        let mut journal = JournalService::default();
+        journal.mark_unclean_shutdown();
+        let tx_id = journal.begin_transaction("rw-writeback");
+        journal.record("write_file", "/a", "bytes=3");
+
+        let summary = journal.recover_on_load();
+
+        assert!(summary.aborted_pending_transaction);
+        assert!(summary.cleared_unclean_shutdown);
+        assert!(summary.replay_recorded);
+        assert_eq!(
+            journal.runtime_state().last_replayed_transaction_id,
+            Some(tx_id)
+        );
+        assert!(!journal.runtime_state().unclean_shutdown);
+        assert!(
+            journal
+                .entries()
+                .iter()
+                .any(|entry| entry.operation == "tx_abort")
+        );
+        assert!(
+            journal
+                .entries()
+                .iter()
+                .any(|entry| entry.operation == "recovery_replay")
+        );
+    }
+
+    #[test]
     fn replay_tracks_active_deleted_and_snapshots() {
         let mut journal = JournalService::default();
         journal.record("create_file", "/a", "");
@@ -202,6 +389,7 @@ mod tests {
         let mut state = PersistedState {
             config: CoreFsConfig::default(),
             volume: VolumeDescriptor::from_config(&CoreFsConfig::default()),
+            clean_unmount: true,
             active_inodes: vec![Inode::new(
                 crate::domain::inode::InodeId(1),
                 InodeKind::File,
@@ -246,6 +434,7 @@ mod tests {
                     details: String::new(),
                 },
             ],
+            journal_runtime: JournalRuntimeState::default(),
             versions: Vec::new(),
             sync_statuses: Vec::new(),
             snapshots: vec![Snapshot {

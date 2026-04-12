@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `66/66` Tests erfolgreich  
+**Test-Status:** `93/93` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -33,12 +33,13 @@
 ### Kernfunktionen im Prototyp
 
 - Formatierung eines CoreFS-Volumes im Userspace-Modell
-- Persistenz eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks, Generation Countern und binären Segment-Frames für Fachsegmente
+- Persistenz eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks, Generation Countern, Clean/Unclean-Markierung und binären Segment-Frames für Fachsegmente
 - spezialisierte Binärlayouts für Inode-, Journal- und Snapshot-Segmente innerhalb des Volume-Images
-- Linux-Testadapter über FUSE zum read-only Mounten von `.img`-Dateien
+- Linux-Testadapter über FUSE zum read-only und read-write Mounten von `.img`-Dateien
 - Erzeugen von Dateien, Verzeichnissen und symbolischen Links
 - Lesen und Schreiben von Dateiinhalten
 - Journaling von Operationen
+- transaktionales Journal mit Pending-Transaktionen, Commit-/Abort-Markern und Recovery-Einträgen
 - automatische Versionierung im Basismodell
 - Snapshot-Erzeugung
 - Recoverable Delete und Secure Delete
@@ -50,6 +51,7 @@
 - semantische Inhaltsklassifikation nach Dateiendung
 - Metadaten-, Tag- und ACL-Grundmodell
 - Journal-Replay zur Zustandsabstimmung geladener Images
+- Recovery eines unclean beendeten RW-Mounts mit automatischem Abbruch offener Pending-Transaktionen beim Laden
 - synthetischer Performance-Benchmark für Datei-, Snapshot- und Persistenzpfade
 - Markdown-Protokollierung von Benchmark-Ergebnissen
 - konfigurierbare Benchmark-Profile für unterschiedliche Lastbilder
@@ -60,7 +62,7 @@
 - optionale Kompatibilitätsziele als Adapter-Konzept
 - Tool-Registry für `mkfs`, `fsck` und Administration
 - Tool-Registry für Benchmarking
-- Linux-FUSE-Mountpfad für Image-basierte Integrationstests
+- Linux-FUSE-Mountpfad für Image-basierte Integrationstests inklusive RW-Writeback und Dirty/Clean-Session-Markierung
 
 ### Qualitätssicherung
 
@@ -68,7 +70,7 @@
 - Regression im Recovery-/Delete-Pfad bereits gefunden und behoben
 - Persistenz-Roundtrip und Ladefehler sind testseitig abgesichert
 - Benchmark-Ausführung und Markdown-Logging sind testseitig abgesichert
-- redundante Superblock-Fallbacks, Generation-Counter-Selektion, `fsck-image`, Image-Reparatur, Header-Directory-Recovery, Rekonstruktion beschädigter Segmentverzeichnisse, Rekonstruktion defekter Blockdeskriptoren, Journal-Replay und Bereinigung verwaister Blockdaten sind testseitig abgesichert
+- redundante Superblock-Fallbacks, Generation-Counter-Selektion, `fsck-image`, Image-Reparatur, Header-Directory-Recovery, Rekonstruktion beschädigter Segmentverzeichnisse, Rekonstruktion defekter Blockdeskriptoren, Journal-Replay, Dirty/Clean-Recovery und Bereinigung verwaister Blockdaten sind testseitig abgesichert
 - `cargo test` aktuell vollständig erfolgreich
 
 ## Noch nicht umgesetzt
@@ -78,7 +80,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - produktionsnahes blockorientiertes On-Disk-Format
 - echter Blockdevice-Zugriff
 - vollständige Copy-on-Write-Implementierung auf Datenträgerebene
-- echtes Journaling mit Replay-Mechanismus
+- vollständiges Write-Ahead-Log mit separat persistierten Pending-Deltas
 - Deduplizierung
 - Self-Healing mit Redundanzquellen
 - Cluster-Synchronisation
@@ -161,7 +163,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 - blockorientiertes On-Disk-Format definieren
 - Metadaten-Layout festlegen
 - die aktuellen binären Segment-Frames schrittweise in ein noch stärker blockorientiertes und spezialisierteres On-Disk-Format überführen
-- Block- und Journal-Speicherung crash-konsistent machen
+- das aktuelle Transaktionsjournal in ein echtes Write-Ahead-Log mit persistierten Pending-Deltas weiterentwickeln
 - Performance-Baseline für zukünftige Persistenzumstellungen fortlaufend protokollieren
 
 ### Phase 2: Systemkern
@@ -172,7 +174,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 
 ### Phase 3: Integrität und Sicherheit
 
-- Replay-fähiges Journal
+- persistentes Write-Ahead-Log und Replay auf Delta-Ebene
 - echte Kompression
 - echte Verschlüsselung
 - Quotas
@@ -189,7 +191,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 ## Wichtige Hinweise
 
 - Das Projekt ist aktuell ein strukturierter, getesteter Kern-, Persistenz- und Volume-Layout-Prototyp und noch kein produktionsreifes Dateisystem.
-- Der Linux-Mountpfad ist derzeit bewusst read-only ausgelegt, damit Images sicher und reproduzierbar getestet werden können.
+- Der Linux-Mountpfad unterstützt inzwischen read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung und transaktionales Journal-Writeback, ist aber noch kein vollständiges WAL-basiertes Produktionsdesign.
 - Performance-Messungen werden jetzt über `benchmark` und `benchmark-log` reproduzierbar ausführbar.
 - Die vorhandene Testsuite ist stark für die aktuelle In-Memory-Implementierung, aber keine Garantie für `100%` messbare Coverage, da in der Umgebung keine Coverage-Tools installiert sind.
 - `.codex` ist inzwischen als projektinterne Vorgabedatei befüllt.

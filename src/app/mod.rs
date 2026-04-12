@@ -9,7 +9,7 @@ use crate::platform::runtime::RuntimeIntegrationBlueprint;
 use crate::platform::tools::ToolRegistry;
 use crate::services::indexing::IndexingService;
 use crate::services::integrity::{IntegrityReport, IntegrityService};
-use crate::services::journal::JournalService;
+use crate::services::journal::{JournalRecoverySummary, JournalRuntimeState, JournalService};
 use crate::services::recovery::RecoveryService;
 use crate::services::security::SecurityService;
 use crate::services::sync::SyncService;
@@ -43,10 +43,12 @@ pub struct AdminReport {
 pub struct PersistedState {
     pub config: CoreFsConfig,
     pub volume: VolumeDescriptor,
+    pub clean_unmount: bool,
     pub active_inodes: Vec<Inode>,
     pub deleted_inodes: Vec<Inode>,
     pub block_records: Vec<crate::storage::block_store::BlockRecord>,
     pub journal_entries: Vec<crate::services::journal::JournalEntry>,
+    pub journal_runtime: JournalRuntimeState,
     pub versions: Vec<crate::services::versioning::FileVersion>,
     pub sync_statuses: Vec<crate::services::sync::SyncStatus>,
     pub snapshots: Vec<Snapshot>,
@@ -67,6 +69,7 @@ pub struct CoreFsService {
     indexing: IndexingService,
     security: SecurityService,
     sync: SyncService,
+    clean_unmount: bool,
     snapshots: Vec<Snapshot>,
     next_snapshot_id: u64,
 }
@@ -90,6 +93,7 @@ impl CoreFsService {
             indexing: IndexingService,
             security: SecurityService,
             sync: SyncService::default(),
+            clean_unmount: true,
             snapshots: Vec::new(),
             next_snapshot_id: 0,
         }
@@ -304,6 +308,40 @@ impl CoreFsService {
         self.persisted_state()
     }
 
+    pub fn begin_write_transaction(&mut self, label: &str) {
+        self.journal.begin_transaction(label);
+    }
+
+    pub fn has_pending_transaction(&self) -> bool {
+        self.journal.has_pending_transaction()
+    }
+
+    pub fn commit_write_transaction(&mut self) -> bool {
+        self.journal.commit_transaction().is_some()
+    }
+
+    pub fn mark_unclean_shutdown(&mut self) {
+        self.clean_unmount = false;
+        self.journal.mark_unclean_shutdown();
+    }
+
+    pub fn mark_clean_shutdown(&mut self) {
+        self.clean_unmount = true;
+        self.journal.mark_clean_shutdown();
+    }
+
+    pub fn recover_runtime_state(&mut self) -> JournalRecoverySummary {
+        let summary = self.journal.recover_on_load();
+        if summary.cleared_unclean_shutdown || summary.aborted_pending_transaction {
+            self.clean_unmount = true;
+        }
+        summary
+    }
+
+    pub fn had_unclean_shutdown(&self) -> bool {
+        !self.clean_unmount
+    }
+
     pub fn stats(&self) -> FsStats {
         let versions = self
             .catalog
@@ -400,10 +438,12 @@ impl CoreFsService {
         PersistedState {
             config: self.config.clone(),
             volume: self.volume.clone(),
+            clean_unmount: self.clean_unmount,
             active_inodes: self.catalog.active_entries(),
             deleted_inodes: self.catalog.deleted_entries(),
             block_records: self.blocks.records(),
             journal_entries: self.journal.entries().to_vec(),
+            journal_runtime: self.journal.runtime_state().clone(),
             versions: self.versioning.all_versions(),
             sync_statuses: self.sync.statuses().to_vec(),
             snapshots: self.snapshots.clone(),
@@ -431,16 +471,21 @@ impl CoreFsService {
             allocator: InodeAllocator::with_next_inode(next_inode),
             catalog: Catalog::from_parts(state.active_inodes, state.deleted_inodes),
             blocks: BlockStore::from_records(state.block_records),
-            journal: JournalService::from_entries(state.journal_entries),
+            journal: JournalService::from_entries_with_runtime(
+                state.journal_entries,
+                state.journal_runtime,
+            ),
             versioning: VersioningService::from_versions(state.versions),
             recovery,
             integrity: IntegrityService,
             indexing: IndexingService,
             security: SecurityService,
             sync: SyncService::from_statuses(state.sync_statuses),
+            clean_unmount: state.clean_unmount,
             snapshots: state.snapshots,
             next_snapshot_id: state.next_snapshot_id,
         };
+        service.recover_runtime_state();
         service.reconcile_from_journal();
         service
     }
@@ -494,6 +539,7 @@ fn validate_path(path: &str) -> CoreFsResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::journal::{JournalRuntimeState, JournalTransaction};
 
     fn test_fs() -> CoreFsService {
         CoreFsService::format(CoreFsConfig::default())
@@ -691,6 +737,52 @@ mod tests {
 
         assert!(!loaded.list_paths().iter().any(|path| path == "/replay.txt"));
         assert_eq!(loaded.recoverable_paths(), vec!["/replay.txt".to_string()]);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_image_recovers_unclean_runtime_state_and_aborts_pending_transaction() {
+        let path = std::env::temp_dir().join(format!(
+            "corefs-journal-runtime-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+
+        let mut fs = test_fs();
+        fs.create_file("/runtime.txt", b"stable", &[])
+            .expect("file");
+        let mut state = fs.export_state();
+        state.clean_unmount = false;
+        state.journal_runtime = JournalRuntimeState {
+            next_transaction_id: 1,
+            unclean_shutdown: true,
+            pending_transaction: Some(JournalTransaction {
+                id: 1,
+                label: "rw-writeback".to_string(),
+                started_at: SystemTime::now(),
+                operations: vec![crate::services::journal::JournalEntry {
+                    timestamp: SystemTime::now(),
+                    operation: "write_file".to_string(),
+                    target: "/runtime.txt".to_string(),
+                    details: "bytes=7".to_string(),
+                }],
+            }),
+            ..JournalRuntimeState::default()
+        };
+        volume_image::save_volume_image(&path, &state).expect("save image");
+
+        let loaded = CoreFsService::load_image_from_path(&path).expect("load image");
+
+        assert!(!loaded.had_unclean_shutdown());
+        assert_eq!(
+            loaded.read_file("/runtime.txt").expect("file"),
+            b"stable".to_vec()
+        );
+        assert!(loaded.journal_entries() >= 4);
 
         let _ = std::fs::remove_file(path);
     }

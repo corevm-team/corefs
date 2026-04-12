@@ -7,6 +7,7 @@ use crate::domain::snapshot::Snapshot;
 use crate::domain::volume::VolumeDescriptor;
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::services::journal::JournalEntry;
+use crate::services::journal::JournalRuntimeState;
 use crate::services::journal::{JournalRepairSummary, reconcile_persisted_state};
 use crate::services::sync::SyncStatus;
 use crate::services::versioning::FileVersion;
@@ -21,11 +22,11 @@ const FORMAT_VERSION: u32 = 4;
 const SEGMENT_ALIGNMENT: usize = 64;
 const SEGMENT_ENTRY_SIZE: usize = 24;
 const HEADER_SIZE: usize = 16;
-const SUPERBLOCK_SIZE: usize = 52;
+const SUPERBLOCK_SIZE: usize = 56;
 const SEGMENT_FRAME_SIZE: usize = 24;
-const EXPECTED_SEGMENT_KINDS: [[u8; 4]; 12] = [
+const EXPECTED_SEGMENT_KINDS: [[u8; 4]; 13] = [
     *b"SUPR", *b"SUP2", *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC",
-    *b"SNAP", *b"BLKD", *b"DATA",
+    *b"SNAP", *b"TXNJ", *b"BLKD", *b"DATA",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +64,12 @@ struct SnapshotSegment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct JournalRuntimeSegment {
+    clean_unmount: bool,
+    runtime: JournalRuntimeState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BlockDescriptorSegment {
     descriptors: Vec<BlockDescriptor>,
 }
@@ -79,6 +86,7 @@ struct Superblock {
     format_version: u32,
     alignment: u32,
     segment_count: u32,
+    clean_unmount: u32,
     generation: u64,
     directory_offset: u64,
     directory_length: u64,
@@ -169,6 +177,14 @@ pub fn save_volume_image(path: impl AsRef<Path>, state: &PersistedState) -> Core
             },
             path,
         )?,
+        serialize_segment(
+            *b"TXNJ",
+            &JournalRuntimeSegment {
+                clean_unmount: state.clean_unmount,
+                runtime: state.journal_runtime.clone(),
+            },
+            path,
+        )?,
         serialize_segment(*b"BLKD", &BlockDescriptorSegment { descriptors }, path)?,
         serialize_bytes_segment(*b"DATA", &block_data, path)?,
     ];
@@ -194,6 +210,7 @@ pub fn save_volume_image(path: impl AsRef<Path>, state: &PersistedState) -> Core
         format_version: FORMAT_VERSION,
         alignment: SEGMENT_ALIGNMENT as u32,
         segment_count: segment_count as u32,
+        clean_unmount: u32::from(state.clean_unmount),
         generation: current_generation(),
         directory_offset: directory_offset as u64,
         directory_length: directory_length as u64,
@@ -957,6 +974,7 @@ fn encode_superblock(superblock: &Superblock) -> Vec<u8> {
     bytes.extend_from_slice(&superblock.format_version.to_le_bytes());
     bytes.extend_from_slice(&superblock.alignment.to_le_bytes());
     bytes.extend_from_slice(&superblock.segment_count.to_le_bytes());
+    bytes.extend_from_slice(&superblock.clean_unmount.to_le_bytes());
     bytes.extend_from_slice(&superblock.generation.to_le_bytes());
     bytes.extend_from_slice(&superblock.directory_offset.to_le_bytes());
     bytes.extend_from_slice(&superblock.directory_length.to_le_bytes());
@@ -1039,11 +1057,12 @@ fn decode_superblock(bytes: &[u8]) -> CoreFsResult<Superblock> {
         format_version: u32::from_le_bytes(bytes[0..4].try_into().expect("fixed slice")),
         alignment: u32::from_le_bytes(bytes[4..8].try_into().expect("fixed slice")),
         segment_count: u32::from_le_bytes(bytes[8..12].try_into().expect("fixed slice")),
-        generation: u64::from_le_bytes(bytes[12..20].try_into().expect("fixed slice")),
-        directory_offset: u64::from_le_bytes(bytes[20..28].try_into().expect("fixed slice")),
-        directory_length: u64::from_le_bytes(bytes[28..36].try_into().expect("fixed slice")),
-        directory_checksum: u64::from_le_bytes(bytes[36..44].try_into().expect("fixed slice")),
-        payload_checksum: u64::from_le_bytes(bytes[44..52].try_into().expect("fixed slice")),
+        clean_unmount: u32::from_le_bytes(bytes[12..16].try_into().expect("fixed slice")),
+        generation: u64::from_le_bytes(bytes[16..24].try_into().expect("fixed slice")),
+        directory_offset: u64::from_le_bytes(bytes[24..32].try_into().expect("fixed slice")),
+        directory_length: u64::from_le_bytes(bytes[32..40].try_into().expect("fixed slice")),
+        directory_checksum: u64::from_le_bytes(bytes[40..48].try_into().expect("fixed slice")),
+        payload_checksum: u64::from_le_bytes(bytes[48..56].try_into().expect("fixed slice")),
     })
 }
 
@@ -1153,6 +1172,12 @@ fn persisted_state_from_entries(
             next_snapshot_id: 0,
         },
     };
+    let journal_runtime =
+        deserialize_optional_segment::<JournalRuntimeSegment>(bytes, entries, b"TXNJ", path)?
+            .unwrap_or(JournalRuntimeSegment {
+                clean_unmount: true,
+                runtime: JournalRuntimeState::default(),
+            });
 
     let block_records = match (
         deserialize_optional_segment::<BlockDescriptorSegment>(bytes, entries, b"BLKD", path)?,
@@ -1168,10 +1193,12 @@ fn persisted_state_from_entries(
     Ok(PersistedState {
         config,
         volume,
+        clean_unmount: journal_runtime.clean_unmount && superblock_clean(entries, bytes, path)?,
         active_inodes: active,
         deleted_inodes: deleted,
         block_records,
         journal_entries: journal,
+        journal_runtime: journal_runtime.runtime,
         versions,
         sync_statuses: sync,
         snapshots: snapshots.snapshots,
@@ -1236,14 +1263,22 @@ fn persisted_state_without_blocks(
             next_snapshot_id: 0,
         },
     };
+    let journal_runtime =
+        deserialize_optional_segment::<JournalRuntimeSegment>(bytes, entries, b"TXNJ", path)?
+            .unwrap_or(JournalRuntimeSegment {
+                clean_unmount: true,
+                runtime: JournalRuntimeState::default(),
+            });
 
     Ok(PersistedState {
         config,
         volume,
+        clean_unmount: journal_runtime.clean_unmount,
         active_inodes: active,
         deleted_inodes: deleted,
         block_records: Vec::new(),
         journal_entries: journal,
+        journal_runtime: journal_runtime.runtime,
         versions,
         sync_statuses: sync,
         snapshots: snapshots.snapshots,
@@ -1341,7 +1376,7 @@ fn reconstruct_directory_from_payloads(
     offset = align_up(offset + SUPERBLOCK_SIZE, SEGMENT_ALIGNMENT);
 
     for kind in [
-        *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC", *b"SNAP",
+        *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC", *b"SNAP", *b"TXNJ",
     ] {
         let length = detect_framed_segment_length(bytes, offset, &kind, path)?;
         entries.push(SegmentEntry {
@@ -1567,10 +1602,36 @@ fn is_valid_superblock(
         && superblock.segment_count as usize == expected_segment_count
 }
 
+fn superblock_clean(entries: &[SegmentEntry], bytes: &[u8], path: &Path) -> CoreFsResult<bool> {
+    let directory_offset = HEADER_SIZE;
+    let directory_length = entries.len() * SEGMENT_ENTRY_SIZE;
+    let directory = bytes
+        .get(directory_offset..directory_offset + directory_length)
+        .ok_or_else(|| {
+            CoreFsError::State(format!(
+                "truncated CoreFS volume image segment directory in {}",
+                path.display()
+            ))
+        })?;
+    let expected_directory_checksum = checksum(directory);
+    let expected_payload_checksum =
+        checksum_of_segment_data(bytes, entries, &[*b"SUPR", *b"SUP2"], path)?;
+    let (superblock, _) = read_best_superblock(
+        bytes,
+        find_segment(entries, b"SUPR")?,
+        find_segment(entries, b"SUP2")?,
+        expected_directory_checksum,
+        expected_payload_checksum,
+        entries.len(),
+        path,
+    )?;
+    Ok(superblock.clean_unmount != 0)
+}
+
 fn validate_required_segments(entries: &[SegmentEntry]) -> CoreFsResult<()> {
     for kind in [
         *b"SUPR", *b"SUP2", *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC",
-        *b"SNAP", *b"BLKD", *b"DATA",
+        *b"SNAP", *b"TXNJ", *b"BLKD", *b"DATA",
     ] {
         let _ = find_segment(entries, &kind)?;
     }
@@ -1632,7 +1693,7 @@ mod tests {
     use crate::domain::metadata::FileMetadata;
     use crate::domain::snapshot::Snapshot;
     use crate::domain::volume::VolumeDescriptor;
-    use crate::services::journal::JournalEntry;
+    use crate::services::journal::{JournalEntry, JournalRuntimeState};
     use crate::storage::block_store::BlockRecord;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1651,10 +1712,12 @@ mod tests {
         PersistedState {
             config: CoreFsConfig::default(),
             volume: VolumeDescriptor::from_config(&CoreFsConfig::default()),
+            clean_unmount: true,
             active_inodes: Vec::new(),
             deleted_inodes: Vec::new(),
             block_records: Vec::new(),
             journal_entries: Vec::new(),
+            journal_runtime: JournalRuntimeState::default(),
             versions: Vec::new(),
             sync_statuses: Vec::new(),
             snapshots: vec![Snapshot {
@@ -1709,7 +1772,7 @@ mod tests {
         );
         assert_eq!(
             u32::from_le_bytes(bytes[12..16].try_into().expect("fixed")),
-            12
+            13
         );
         assert_eq!(&bytes[16..20], b"SUPR");
         assert_eq!(&bytes[40..44], b"SUP2");
@@ -1749,7 +1812,7 @@ mod tests {
         let report = inspect_volume_image(&path).expect("inspection should succeed");
 
         assert_eq!(report.format_version, FORMAT_VERSION);
-        assert_eq!(report.segment_count, 12);
+        assert_eq!(report.segment_count, 13);
         assert_eq!(report.valid_superblocks, 2);
         assert!(report.directory_checksum_valid);
         assert!(report.payload_checksum_valid);
@@ -1765,10 +1828,10 @@ mod tests {
 
         save_volume_image(&path, &state).expect("volume image should be written");
         let mut bytes = fs::read(&path).expect("image should exist");
-        let entries = parse_directory(&bytes[HEADER_SIZE..HEADER_SIZE + (12 * SEGMENT_ENTRY_SIZE)])
+        let entries = parse_directory(&bytes[HEADER_SIZE..HEADER_SIZE + (13 * SEGMENT_ENTRY_SIZE)])
             .expect("directory should parse");
         let secondary = find_segment(&entries, b"SUP2").expect("secondary superblock should exist");
-        let generation_offset = secondary.offset as usize + 12;
+        let generation_offset = secondary.offset as usize + 16;
         let old_generation = u64::from_le_bytes(
             bytes[generation_offset..generation_offset + 8]
                 .try_into()
@@ -1826,6 +1889,7 @@ mod tests {
         let state = PersistedState {
             config: CoreFsConfig::default(),
             volume: VolumeDescriptor::from_config(&CoreFsConfig::default()),
+            clean_unmount: true,
             active_inodes: vec![active_inode],
             deleted_inodes: vec![deleted_inode],
             block_records: vec![
@@ -1854,6 +1918,7 @@ mod tests {
                     details: String::new(),
                 },
             ],
+            journal_runtime: JournalRuntimeState::default(),
             versions: Vec::new(),
             sync_statuses: Vec::new(),
             snapshots: Vec::new(),
@@ -1897,7 +1962,7 @@ mod tests {
 
         assert!(repaired.recovered_without_valid_superblock);
         assert!(!repaired.reconstructed_segment_directory);
-        assert!(!repaired.reconstructed_block_descriptors);
+        assert!(repaired.reconstructed_block_descriptors);
         assert_eq!(repaired.resulting_valid_superblocks, 2);
 
         let report = inspect_volume_image(&path).expect("repaired image should inspect");
@@ -1943,6 +2008,7 @@ mod tests {
         let state = PersistedState {
             config: CoreFsConfig::default(),
             volume: VolumeDescriptor::from_config(&CoreFsConfig::default()),
+            clean_unmount: true,
             active_inodes: vec![inode],
             deleted_inodes: Vec::new(),
             block_records: vec![BlockRecord {
@@ -1951,6 +2017,7 @@ mod tests {
                 checksum: checksum(b"hello"),
             }],
             journal_entries: Vec::new(),
+            journal_runtime: JournalRuntimeState::default(),
             versions: Vec::new(),
             sync_statuses: Vec::new(),
             snapshots: Vec::new(),
@@ -1959,7 +2026,11 @@ mod tests {
 
         save_volume_image(&path, &state).expect("volume image should be written");
         let mut bytes = fs::read(&path).expect("image should exist");
-        let blkd_offset = u64::from_le_bytes(bytes[264..272].try_into().expect("fixed")) as usize;
+        let entries = parse_directory(&bytes[HEADER_SIZE..HEADER_SIZE + (13 * SEGMENT_ENTRY_SIZE)])
+            .expect("directory should parse");
+        let blkd_offset = find_segment(&entries, b"BLKD")
+            .expect("blkd segment should exist")
+            .offset as usize;
         if let Some(byte) = bytes.get_mut(blkd_offset) {
             *byte ^= 0xFF;
         }

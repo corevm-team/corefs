@@ -21,7 +21,7 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `71/71` Tests erfolgreich
+- Test-Status: `93/93` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -80,12 +80,13 @@ Einfacher Einstieg für Demo- und Verwaltungsoperationen.
 Der Prototyp deckt bereits folgende Bereiche ab:
 
 - Formatierung eines CoreFS-Volumes im In-Memory-Modell
-- Speichern und Laden eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks (`SUPR` und `SUP2`), Generation Countern, Prüfsummen und binären Segment-Frames für Fachsegmente wie `AINO`, `DINO`, `JOUR`, `VERS`, `SNAP`, `BLKD` und `DATA`
+- Speichern und Laden eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks (`SUPR` und `SUP2`), Generation Countern, Prüfsummen, Clean/Unclean-Markierung und binären Segment-Frames für Fachsegmente wie `AINO`, `DINO`, `JOUR`, `TXNJ`, `VERS`, `SNAP`, `BLKD` und `DATA`
 - spezialisierte Binärlayouts für Inode-, Journal- und Snapshot-Segmente statt allgemeiner Serde-Serialisierung
 - Dateien, Verzeichnisse und symbolische Links
 - Lesen und Schreiben von Inhalten
 - Linux-FUSE-Adapter mit `.img`-Dateien als Mount-Backend (read-only und read-write mit Writeback)
 - Journaling von Operationen
+- transaktionales Journal mit `tx_begin`/`tx_commit`/`tx_abort`, Pending-Transaktionen und Recovery-Markern
 - Basis-Versionierung
 - Snapshots
 - Recoverable Delete und Secure Delete
@@ -97,6 +98,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - semantische Inhaltsklassifikation
 - ACL-, Tag- und Metadaten-Grundmodell
 - Journal-Replay zur Zustandsabstimmung beim Laden persistierter Images
+- Recovery eines unclean beendeten RW-Mounts mit Abbruch offener Pending-Transaktionen beim Laden
 - Auswahl der besten gültigen Superblock-Kopie über Generation Counter
 - Journal-basierte Kanonisierung aktiver und gelöschter Inodes beim Image-Repair
 - best-effort-Recovery über Header und Segmenttabelle, auch wenn keine gültige Superblock-Kopie mehr vorhanden ist
@@ -114,7 +116,7 @@ Diese Punkte sind vorgesehen, aber aktuell noch nicht als echte produktionsnahe 
 - vollständig produktionsnahes On-Disk-Format
 - echter Blockdevice-Zugriff
 - vollständiges Copy-on-Write auf Datenträgerebene
-- vollständig operationsbasiertes replay-fähiges Journal
+- vollständiges Write-Ahead-Log mit separat persistierten Pending-Deltas
 - Deduplizierung
 - Self-Healing mit Redundanzquellen
 - Clusterfähigkeit
@@ -303,7 +305,7 @@ Das Dateisystem erscheint unter Linux als `corefs:<volume-name>`, z. B. `corefs:
 
 ### Read-write-Mount mit Writeback
 
-Hängt das Image beschreibbar ein. Alle Änderungen im gemounteten Verzeichnis werden bei `close` bzw. `sync` automatisch in die `.img`-Datei zurückgeschrieben.
+Hängt das Image beschreibbar ein. Alle Änderungen im gemounteten Verzeichnis werden bei `close` bzw. `sync` automatisch in die `.img`-Datei zurückgeschrieben. Der RW-Pfad markiert das Image beim Öffnen bewusst als `unclean`, bündelt Änderungen in Journal-Transaktionen und setzt den Zustand erst nach erfolgreichem Persist wieder auf `clean`.
 
 ```bash
 # Image erzeugen (falls noch nicht vorhanden)
@@ -356,7 +358,7 @@ cargo run -- read /etc/corefs.conf
 Die nächste sinnvolle Ausbaufolge ist:
 
 1. Das aktuelle segmentierte Binärformat weiter in Richtung eines echten blockorientierten On-Disk-Layouts mit stärker spezialisierter Segmentcodierung weiterentwickeln.
-2. Journal und Metadaten dauerhaft und crash-konsistent speichern.
+2. Das aktuelle Transaktionsjournal zu einem echten Write-Ahead-Log mit persistierten Pending-Deltas ausbauen.
 3. VFS- und Kernel-Integrationsschnittstelle für das eigene Betriebssystem entwerfen.
 4. Sicherheits-, Integritäts- und Recovery-Funktionen auf reale Laufzeitmechanismen anheben.
 5. Erweiterte Features wie Cluster, Deduplizierung und semantische Tiefenanalyse ergänzen.

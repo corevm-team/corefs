@@ -384,6 +384,12 @@ impl CoreFsFuseMountRw {
         mount
     }
 
+    fn open_session(mut service: CoreFsService, image_path: PathBuf) -> CoreFsResult<Self> {
+        service.mark_unclean_shutdown();
+        service.save_image_to_path(&image_path)?;
+        Ok(Self::from_service(service, image_path))
+    }
+
     /// Rebuild all FUSE index maps from the current service state.
     /// Called after `from_service` and after any operation that changes paths (rename).
     fn rebuild_indexes(&mut self) {
@@ -531,13 +537,29 @@ impl CoreFsFuseMountRw {
 
     /// Save the volume image to disk. Returns true on success.
     fn persist(&mut self) -> bool {
+        self.service.commit_write_transaction();
+        self.service.mark_clean_shutdown();
         match self.service.save_image_to_path(&self.image_path) {
             Ok(()) => {
                 self.dirty = false;
                 true
             }
-            Err(_) => false,
+            Err(_) => {
+                self.service.mark_unclean_shutdown();
+                false
+            }
         }
+    }
+
+    fn ensure_mutation_session(&mut self, label: &str) -> CoreFsResult<()> {
+        if !self.service.had_unclean_shutdown() {
+            self.service.mark_unclean_shutdown();
+            self.service.save_image_to_path(&self.image_path)?;
+        }
+        if !self.service.has_pending_transaction() {
+            self.service.begin_write_transaction(label);
+        }
+        Ok(())
     }
 }
 
@@ -584,6 +606,10 @@ impl Filesystem for CoreFsFuseMountRw {
         }
         if let Some(new_size) = size {
             let path = node.path.clone();
+            if self.ensure_mutation_session("setattr").is_err() {
+                reply.error(EIO);
+                return;
+            }
             let current = self.service.read_file(&path).unwrap_or_default();
             let mut buf = current;
             buf.resize(new_size as usize, 0);
@@ -615,11 +641,21 @@ impl Filesystem for CoreFsFuseMountRw {
     }
 
     fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
-        match self.node(ino) {
-            Some(node) if matches!(node.kind(), InodeKind::File) => {
+        let file_path = self.node(ino).and_then(|node| {
+            if matches!(node.kind(), InodeKind::File) {
+                Some(node.path.clone())
+            } else {
+                None
+            }
+        });
+        match file_path {
+            Some(path) => {
                 // truncate on open with O_TRUNC
                 if flags & libc::O_TRUNC != 0 {
-                    let path = node.path.clone();
+                    if self.ensure_mutation_session("truncate").is_err() {
+                        reply.error(EIO);
+                        return;
+                    }
                     if self.service.write_file(&path, b"").is_err() {
                         reply.error(EIO);
                         return;
@@ -635,7 +671,7 @@ impl Filesystem for CoreFsFuseMountRw {
                 }
                 reply.opened(0, 0);
             }
-            Some(_) => reply.error(EIO),
+            None if self.node(ino).is_some() => reply.error(EIO),
             None => reply.error(ENOENT),
         }
     }
@@ -687,6 +723,10 @@ impl Filesystem for CoreFsFuseMountRw {
         let end = start + data.len();
 
         // read-modify-write: splice new bytes into existing content
+        if self.ensure_mutation_session("write").is_err() {
+            reply.error(EIO);
+            return;
+        }
         let mut buf = self.service.read_file(&path).unwrap_or_default();
         if buf.len() < end {
             buf.resize(end, 0);
@@ -725,6 +765,10 @@ impl Filesystem for CoreFsFuseMountRw {
         };
         if self.ino_by_path.contains_key(&path) {
             reply.error(EEXIST);
+            return;
+        }
+        if self.ensure_mutation_session("create").is_err() {
+            reply.error(EIO);
             return;
         }
         if let Err(_) = self.service.create_file(&path, b"", &[]) {
@@ -766,6 +810,10 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EEXIST);
             return;
         }
+        if self.ensure_mutation_session("mkdir").is_err() {
+            reply.error(EIO);
+            return;
+        }
         if let Err(_) = self.service.create_directory(&path) {
             reply.error(EIO);
             return;
@@ -803,6 +851,10 @@ impl Filesystem for CoreFsFuseMountRw {
                 return;
             }
         }
+        if self.ensure_mutation_session("unlink").is_err() {
+            reply.error(EIO);
+            return;
+        }
         if let Err(_) = self.service.delete_file(&path, false) {
             reply.error(EIO);
             return;
@@ -835,6 +887,10 @@ impl Filesystem for CoreFsFuseMountRw {
             .unwrap_or(true);
         if !is_empty {
             reply.error(ENOTEMPTY);
+            return;
+        }
+        if self.ensure_mutation_session("rmdir").is_err() {
+            reply.error(EIO);
             return;
         }
         if let Err(_) = self.service.delete_file(&path, false) {
@@ -912,6 +968,10 @@ impl Filesystem for CoreFsFuseMountRw {
             }
         }
 
+        if self.ensure_mutation_session("rename").is_err() {
+            reply.error(EIO);
+            return;
+        }
         if self.service.rename_entry(&src_path, &dst_path).is_err() {
             reply.error(EIO);
             return;
@@ -942,7 +1002,7 @@ impl Filesystem for CoreFsFuseMountRw {
         _lock_owner: u64,
         reply: ReplyEmpty,
     ) {
-        if self.dirty && !self.persist() {
+        if (self.dirty || self.service.had_unclean_shutdown()) && !self.persist() {
             reply.error(EIO);
         } else {
             reply.ok();
@@ -961,6 +1021,12 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.ok();
         } else {
             reply.error(EIO);
+        }
+    }
+
+    fn destroy(&mut self) {
+        if self.dirty || self.service.had_unclean_shutdown() {
+            let _ = self.persist();
         }
     }
 
@@ -996,7 +1062,7 @@ pub fn mount_image_rw(
     let mount_point = mount_point.as_ref();
     let service = CoreFsService::load_image_from_path(image_path)?;
     let fs_name = format!("corefs:{}", service.volume_name());
-    let mount = CoreFsFuseMountRw::from_service(service, image_path.to_path_buf());
+    let mount = CoreFsFuseMountRw::open_session(service, image_path.to_path_buf())?;
 
     fuser::mount2(
         mount,
@@ -1378,6 +1444,37 @@ mod tests {
             loaded.read_file("/hello.txt").expect("read"),
             b"persisted".to_vec()
         );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rw_mount_open_session_persists_dirty_marker_until_flush() {
+        let path = std::env::temp_dir().join(format!(
+            "corefs-rw-session-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/hello.txt", b"persisted", &[])
+            .expect("file");
+        fs.save_image_to_path(&path).expect("initial image");
+
+        let service = CoreFsService::load_image_from_path(&path).expect("load");
+        let mut mount = CoreFsFuseMountRw::open_session(service, path.clone()).expect("session");
+        let dirty_loaded = CoreFsService::load_image_from_path(&path).expect("dirty reload");
+        assert!(
+            !dirty_loaded.had_unclean_shutdown(),
+            "load recovers runtime state"
+        );
+
+        assert!(mount.persist());
+        let clean_loaded = CoreFsService::load_image_from_path(&path).expect("clean reload");
+        assert!(!clean_loaded.had_unclean_shutdown());
 
         let _ = std::fs::remove_file(path);
     }
