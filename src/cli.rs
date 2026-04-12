@@ -2,7 +2,11 @@ use crate::app::CoreFsService;
 use crate::config::CoreFsConfig;
 use crate::error::{CoreFsError, CoreFsResult};
 #[cfg(target_os = "linux")]
+use crate::platform::diagnostics;
+#[cfg(target_os = "linux")]
 use crate::platform::linux_fuse;
+#[cfg(target_os = "linux")]
+use crate::platform::linux_fuse::LinuxMountOptions;
 use crate::platform::performance::{
     BenchmarkConfig, BenchmarkProfile, append_benchmark_markdown, run_benchmark,
 };
@@ -200,6 +204,29 @@ where
                 ));
             }
         }
+        "diagnose-mount" => {
+            let image_path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing image path for diagnose-mount".to_string())
+            })?;
+            let mount_point = args.get(3).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing mount point for diagnose-mount".to_string())
+            })?;
+            #[cfg(target_os = "linux")]
+            {
+                let options = linux_mount_options_from_args(&args[4..]);
+                let report = diagnostics::diagnose_mount(image_path, mount_point, &options);
+                for line in diagnostics::render_mount_diagnosis(&report) {
+                    println!("{line}");
+                }
+                diagnostics::ensure_mount_ready(&report)?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(CoreFsError::InvalidCommand(
+                    "diagnose-mount is only available on Linux builds".to_string(),
+                ));
+            }
+        }
         "benchmark" => {
             let config = benchmark_config_from_args(&args[2..])?;
             let result = run_benchmark(config)?;
@@ -277,6 +304,7 @@ fn print_usage() {
     println!("  fsck-image <path> [--repair]");
     println!("  mount-image <image-path> <mount-point>");
     println!("  mount-image-rw <image-path> <mount-point>");
+    println!("  diagnose-mount <image-path> <mount-point> [--create]");
     println!(
         "  benchmark [--profile <name>] [--files <n>] [--payload <bytes>] [--snapshots <n>] [--saves <n>]"
     );
@@ -328,6 +356,19 @@ fn benchmark_config_from_args(args: &[String]) -> CoreFsResult<BenchmarkConfig> 
     Ok(config)
 }
 
+#[cfg(target_os = "linux")]
+fn linux_mount_options_from_args(args: &[String]) -> LinuxMountOptions {
+    let mut options = LinuxMountOptions::default();
+
+    for arg in args {
+        if arg == "--create" {
+            options.create_if_missing = true;
+        }
+    }
+
+    options
+}
+
 fn parse_usize_flag(args: &[String], index: usize, flag: &str) -> CoreFsResult<usize> {
     let value = args
         .get(index + 1)
@@ -368,11 +409,13 @@ mod tests {
     fn cli_supports_successful_commands() {
         let fsck_image_path = temp_path("fsck", "img");
         let repair_image_path = temp_path("fsck-repair", "img");
+        let diagnose_mountpoint = temp_path("diagnose-mount", "dir");
         let fs = bootstrap_demo_fs().expect("bootstrap should succeed");
         fs.save_image_to_path(&fsck_image_path)
             .expect("image should be saved");
         fs.save_image_to_path(&repair_image_path)
             .expect("repair image should be saved");
+        fs::create_dir_all(&diagnose_mountpoint).expect("mountpoint should be created");
         let mut repair_bytes = fs::read(&repair_image_path).expect("repair image should exist");
         let primary_offset =
             u64::from_le_bytes(repair_bytes[24..32].try_into().expect("fixed")) as usize;
@@ -422,6 +465,21 @@ mod tests {
                 repair_image_path.clone(),
                 "--repair".to_string(),
             ],
+            vec![
+                "corefs".to_string(),
+                "diagnose-mount".to_string(),
+                fsck_image_path.clone(),
+                diagnose_mountpoint.clone(),
+            ],
+            vec![
+                "corefs".to_string(),
+                "diagnose-mount".to_string(),
+                temp_path("diagnose-create", "img"),
+                diagnose_mountpoint.clone(),
+                "--create".to_string(),
+                "--threads".to_string(),
+                "4".to_string(),
+            ],
             vec!["corefs".to_string(), "benchmark".to_string()],
             vec![
                 "corefs".to_string(),
@@ -466,6 +524,7 @@ mod tests {
 
         let _ = fs::remove_file(fsck_image_path);
         let _ = fs::remove_file(repair_image_path);
+        let _ = fs::remove_dir_all(diagnose_mountpoint);
     }
 
     #[test]
@@ -506,6 +565,12 @@ mod tests {
 
         let mount_image = run(vec!["corefs".to_string(), "mount-image".to_string()]);
         assert!(matches!(mount_image, Err(CoreFsError::InvalidCommand(_))));
+
+        let diagnose_mount = run(vec!["corefs".to_string(), "diagnose-mount".to_string()]);
+        assert!(matches!(
+            diagnose_mount,
+            Err(CoreFsError::InvalidCommand(_))
+        ));
 
         let benchmark_log = run(vec!["corefs".to_string(), "benchmark-log".to_string()]);
         assert!(matches!(benchmark_log, Err(CoreFsError::InvalidCommand(_))));

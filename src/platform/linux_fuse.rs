@@ -14,6 +14,11 @@ use std::time::{Duration, SystemTime};
 const TTL: Duration = Duration::from_secs(1);
 const ROOT_INO: u64 = 1;
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LinuxMountOptions {
+    pub create_if_missing: bool,
+}
+
 #[derive(Debug, Clone)]
 struct FuseNode {
     path: String,
