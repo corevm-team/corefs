@@ -3,3 +3,4 @@
 **/*.profdata
 Cargo.lock
 *.img
+mnt/
