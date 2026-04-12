@@ -237,6 +237,14 @@ Benchmark protokollieren:
 cargo run -- benchmark-log ./PERFORMANCE_LOG.md
 ```
 
+Verfuegbare Profile:
+
+- `balanced`
+- `small-files`
+- `metadata-heavy`
+- `snapshot-heavy`
+- `persist-heavy`
+
 Volume-Image prüfen:
 
 ```bash
@@ -249,9 +257,39 @@ Volume-Image prüfen und redundante Superblocks reparieren:
 cargo run -- fsck-image ./corefs-volume.img --repair
 ```
 
+Image schreibgeschützt mounten:
+
+```bash
+cargo run -- mount-image ./corefs-linux.img /tmp/corefs-mnt
+```
+
+Image beschreibbar mounten (Writeback in .img):
+
+```bash
+cargo run -- mount-image-rw ./corefs-linux.img /tmp/corefs-mnt
+```
+
+Datei schreiben:
+
+```bash
+cargo run -- write /etc/corefs.conf updated
+```
+
+Datei löschen:
+
+```bash
+cargo run -- delete /var/readme.txt
+```
+
+Sicher löschen:
+
+```bash
+cargo run -- delete /var/readme.txt --secure
+```
+
 ## Linux-FUSE-Mount
 
-Der Linux-FUSE-Adapter ermöglicht es, ein CoreFS-Volume-Image direkt im Dateisystem einzuhängen. Voraussetzung ist ein Linux-System mit installiertem FUSE-Subsystem (`libfuse3` bzw. `fuse`-Kernelmodul).
+Der Linux-FUSE-Adapter ermöglicht es, ein CoreFS-Volume-Image direkt als Dateisystem einzuhängen. Voraussetzung ist ein Linux-System mit installiertem FUSE-Subsystem (`libfuse3` bzw. `fuse`-Kernelmodul).
 
 ### Read-only-Mount
 
@@ -294,7 +332,7 @@ mkdir /tmp/corefs-mnt/data
 cp /etc/hostname /tmp/corefs-mnt/data/hostname.txt
 rm /tmp/corefs-mnt/var/readme.txt
 
-# Aushängen – ausstehende Writes werden dabei persistiert
+# Aushängen — ausstehende Writes werden dabei persistiert
 fusermount -u /tmp/corefs-mnt
 
 # Inhalt nach dem Aushängen prüfen
@@ -316,39 +354,6 @@ cargo run -- read /etc/corefs.conf
 | Schreiben bei geschlossenem Handle | persistiert das Image automatisch (`flush`) |
 
 > **Hinweis:** Der FUSE-Adapter ist ein Integrations- und Testpfad, kein produktionsreifes Dateisystem. Er steht nur auf Linux-Builds zur Verfügung.
-
-Image unter Linux per FUSE mounten (Kurzform):
-
-```bash
-mkdir -p /tmp/corefs-mnt
-cargo run -- mount-image ./corefs-linux.img /tmp/corefs-mnt
-```
-
-Verfuegbare Profile:
-
-- `balanced`
-- `small-files`
-- `metadata-heavy`
-- `snapshot-heavy`
-- `persist-heavy`
-
-Datei schreiben:
-
-```bash
-cargo run -- write /etc/corefs.conf updated
-```
-
-Datei löschen:
-
-```bash
-cargo run -- delete /var/readme.txt
-```
-
-Sicher löschen:
-
-```bash
-cargo run -- delete /var/readme.txt --secure
-```
 
 ## Dokumentationsquellen im Repository
 
