@@ -17,7 +17,6 @@ use crate::services::versioning::VersioningService;
 use crate::storage::allocator::InodeAllocator;
 use crate::storage::block_store::BlockStore;
 use crate::storage::catalog::Catalog;
-use crate::storage::persistence;
 use crate::storage::volume_image;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -258,16 +257,6 @@ impl CoreFsService {
         snapshot
     }
 
-    pub fn save_to_path(&self, path: impl AsRef<Path>) -> CoreFsResult<()> {
-        let state = self.persisted_state();
-        persistence::save_state(path, &state)
-    }
-
-    pub fn load_from_path(path: impl AsRef<Path>) -> CoreFsResult<Self> {
-        let state = persistence::load_state(path)?;
-        Ok(Self::from_persisted_state(state))
-    }
-
     pub fn save_image_to_path(&self, path: impl AsRef<Path>) -> CoreFsResult<()> {
         let path = path.as_ref();
         let state = self.persisted_state();
@@ -281,9 +270,7 @@ impl CoreFsService {
         volume_image::save_volume_image(&tmp_path, &state)?;
         std::fs::rename(&tmp_path, path).map_err(|error| {
             let _ = std::fs::remove_file(&tmp_path);
-            CoreFsError::State(format!(
-                "atomic rename of image failed: {error}"
-            ))
+            CoreFsError::State(format!("atomic rename of image failed: {error}"))
         })
     }
 
@@ -652,58 +639,6 @@ mod tests {
     }
 
     #[test]
-    fn state_can_be_saved_and_loaded_again() {
-        let path = std::env::temp_dir().join(format!(
-            "corefs-service-{}-{}.json",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after unix epoch")
-                .as_nanos()
-        ));
-
-        let mut fs = test_fs();
-        fs.create_directory("/etc").expect("dir");
-        fs.create_file("/etc/config.txt", b"cfg", &["config".to_string()])
-            .expect("file");
-        fs.create_snapshot("baseline");
-        fs.mark_synced("/etc/config.txt", "node-a").expect("sync");
-        fs.delete_file("/etc/config.txt", false).expect("delete");
-        fs.save_to_path(&path).expect("save should succeed");
-
-        let loaded = CoreFsService::load_from_path(&path).expect("load should succeed");
-
-        assert_eq!(loaded.volume_name(), "corefs");
-        assert!(loaded.list_paths().iter().any(|path| path == "/etc"));
-        assert_eq!(
-            loaded.recoverable_paths(),
-            vec!["/etc/config.txt".to_string()]
-        );
-        assert_eq!(loaded.snapshot_names(), vec!["baseline".to_string()]);
-        assert_eq!(loaded.synced_paths(), 1);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn loading_invalid_state_returns_error() {
-        let path = std::env::temp_dir().join(format!(
-            "corefs-invalid-{}-{}.json",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after unix epoch")
-                .as_nanos()
-        ));
-        std::fs::write(&path, b"not-json").expect("test file should be written");
-
-        let result = CoreFsService::load_from_path(&path);
-        assert!(matches!(result, Err(CoreFsError::State(_))));
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
     fn state_can_be_saved_and_loaded_as_binary_image() {
         let path = std::env::temp_dir().join(format!(
             "corefs-image-{}-{}.img",
@@ -837,10 +772,7 @@ mod tests {
         fs.rename_entry("/a.txt", "/b.txt").expect("rename over");
 
         assert!(fs.read_file("/a.txt").is_err());
-        assert_eq!(
-            fs.read_file("/b.txt").expect("b.txt"),
-            b"aaa".to_vec()
-        );
+        assert_eq!(fs.read_file("/b.txt").expect("b.txt"), b"aaa".to_vec());
         // overwritten entry is soft-deleted and recoverable
         assert!(fs.recoverable_paths().contains(&"/b.txt".to_string()));
     }

@@ -1,6 +1,6 @@
 # CoreFS
 
-`CoreFS` ist ein in Rust entwickeltes, plattformneutrales Dateisystemprojekt mit dem Ziel, als natives Standard-Dateisystem eines eigenen Betriebssystems eingesetzt zu werden. Das Repository enthält aktuell einen strukturierten, getesteten Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp mit klarer Modultrennung, CLI-Einstiegspunkt und einer dokumentierten Zielarchitektur.
+`CoreFS` ist ein in Rust entwickeltes, plattformneutrales Dateisystemprojekt mit dem Ziel, als natives Standard-Dateisystem eines eigenen Betriebssystems eingesetzt zu werden. Das Repository enthält aktuell einen strukturierten, getesteten Kern-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp mit klarer Modultrennung, CLI-Einstiegspunkt und einer dokumentierten Zielarchitektur.
 
 ## Ziel
 
@@ -80,7 +80,6 @@ Einfacher Einstieg für Demo- und Verwaltungsoperationen.
 Der Prototyp deckt bereits folgende Bereiche ab:
 
 - Formatierung eines CoreFS-Volumes im In-Memory-Modell
-- Speichern und Laden eines vollständigen CoreFS-Zustands in ein JSON-basiertes Persistenzformat
 - Speichern und Laden eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks (`SUPR` und `SUP2`), Generation Countern, Prüfsummen und getrennten Fachsegmenten wie `AINO`, `DINO`, `JOUR`, `VERS`, `SNAP`, `BLKD` und `DATA`
 - Dateien, Verzeichnisse und symbolische Links
 - Lesen und Schreiben von Inhalten
@@ -187,18 +186,6 @@ Datei lesen:
 
 ```bash
 cargo run -- read /etc/corefs.conf
-```
-
-Zustand speichern:
-
-```bash
-cargo run -- save ./corefs-state.json
-```
-
-Zustand laden:
-
-```bash
-cargo run -- load ./corefs-state.json
 ```
 
 Volume-Image speichern:
@@ -367,7 +354,7 @@ cargo run -- read /etc/corefs.conf
 
 Die nächste sinnvolle Ausbaufolge ist:
 
-1. Das aktuelle JSON-Zwischenformat in ein echtes blockorientiertes On-Disk-Format überführen.
+1. Die noch JSON-basierten Segment-Payloads im Volume-Image schrittweise durch ein echtes blockorientiertes Binärformat ersetzen.
 2. Journal und Metadaten dauerhaft und crash-konsistent speichern.
 3. VFS- und Kernel-Integrationsschnittstelle für das eigene Betriebssystem entwerfen.
 4. Sicherheits-, Integritäts- und Recovery-Funktionen auf reale Laufzeitmechanismen anheben.

@@ -2,10 +2,10 @@ use crate::app::{CoreFsService, PersistedState};
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::error::{CoreFsError, CoreFsResult};
 use fuser::{
-    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
+    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
-use libc::{EEXIST, EINVAL, EISDIR, EIO, ENOENT, ENOTEMPTY, ENOTDIR, EROFS};
+use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EROFS};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -502,13 +502,8 @@ impl CoreFsFuseMountRw {
         let par = node.parent_path.clone();
         let name = base_name(&node.path);
         self.ino_by_path.insert(node.path.clone(), ino);
-        self.children
-            .entry(node.path.clone())
-            .or_default();
-        self.children
-            .entry(par)
-            .or_default()
-            .push(name);
+        self.children.entry(node.path.clone()).or_default();
+        self.children.entry(par).or_default().push(name);
         // keep children sorted + deduplicated
         for names in self.children.values_mut() {
             names.sort();
@@ -1211,9 +1206,7 @@ mod tests {
         };
         mount.register_node(node);
 
-        assert!(mount
-            .lookup_child(ROOT_INO, OsStr::new("tmp"))
-            .is_some());
+        assert!(mount.lookup_child(ROOT_INO, OsStr::new("tmp")).is_some());
         assert_eq!(mount.nodes_by_ino[&ino].path, "/tmp");
 
         // create /tmp/new.txt
@@ -1221,10 +1214,7 @@ mod tests {
             .service
             .create_file("/tmp/new.txt", b"data", &[])
             .expect("create_file");
-        let inode_id2 = mount
-            .service
-            .inode_for_path("/tmp/new.txt")
-            .expect("inode");
+        let inode_id2 = mount.service.inode_for_path("/tmp/new.txt").expect("inode");
         let inode2 = mount.service.get_inode("/tmp/new.txt").cloned();
         let ino2 = inode_id2.0 + 1;
         let node2 = FuseNode {
@@ -1259,13 +1249,13 @@ mod tests {
 
         mount.unregister_ino(readme_ino);
 
-        assert!(mount.lookup_child(docs_ino, OsStr::new("readme.txt")).is_none());
+        assert!(
+            mount
+                .lookup_child(docs_ino, OsStr::new("readme.txt"))
+                .is_none()
+        );
         assert!(!mount.nodes_by_ino.contains_key(&readme_ino));
-        let siblings = mount
-            .children
-            .get("/docs")
-            .cloned()
-            .unwrap_or_default();
+        let siblings = mount.children.get("/docs").cloned().unwrap_or_default();
         assert!(!siblings.contains(&"readme.txt".to_string()));
     }
 
@@ -1345,11 +1335,7 @@ mod tests {
             .lookup_child(ROOT_INO, OsStr::new("lib"))
             .expect("lib dir after rename")
             .ino();
-        assert!(
-            mount
-                .lookup_child(lib_ino, OsStr::new("main.rs"))
-                .is_some()
-        );
+        assert!(mount.lookup_child(lib_ino, OsStr::new("main.rs")).is_some());
         let utils_ino = mount
             .lookup_child(lib_ino, OsStr::new("utils"))
             .expect("utils")

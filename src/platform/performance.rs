@@ -177,14 +177,14 @@ pub fn run_benchmark(config: BenchmarkConfig) -> CoreFsResult<BenchmarkResult> {
     let snapshot_ms = snapshot_start.elapsed().as_millis();
 
     let state_path = std::env::temp_dir().join(format!(
-        "corefs-benchmark-{}-{}.json",
+        "corefs-benchmark-{}-{}.img",
         std::process::id(),
         now_unix_ms()
     ));
 
     let save_start = Instant::now();
     for _ in 0..config.persist_runs {
-        fs.save_to_path(&state_path)?;
+        fs.save_image_to_path(&state_path)?;
     }
     let save_ms = save_start.elapsed().as_millis();
 

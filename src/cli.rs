@@ -86,13 +86,6 @@ where
             let bytes = fs.read_file(path)?;
             println!("{}", String::from_utf8_lossy(&bytes));
         }
-        "save" => {
-            let path = args
-                .get(2)
-                .ok_or_else(|| CoreFsError::InvalidCommand("missing path for save".to_string()))?;
-            fs.save_to_path(path)?;
-            println!("saved state to {path}");
-        }
         "save-image" => {
             let path = args.get(2).ok_or_else(|| {
                 CoreFsError::InvalidCommand("missing path for save-image".to_string())
@@ -117,17 +110,6 @@ where
                 ));
             }
             println!("created CoreFS image at {path}");
-        }
-        "load" => {
-            let path = args
-                .get(2)
-                .ok_or_else(|| CoreFsError::InvalidCommand("missing path for load".to_string()))?;
-            let loaded = CoreFsService::load_from_path(path)?;
-            let report = loaded.admin_report();
-            println!("loaded volume: {}", report.volume.name);
-            println!("files: {}", report.stats.files);
-            println!("snapshots: {}", report.stats.snapshots);
-            println!("journal_entries: {}", report.stats.journal_entries);
         }
         "load-image" => {
             let path = args.get(2).ok_or_else(|| {
@@ -289,10 +271,8 @@ fn print_usage() {
     println!("  restore <path>");
     println!("  write <path> <payload>");
     println!("  read <path>");
-    println!("  save <path>");
     println!("  save-image <path>");
     println!("  mkfs-image <path> [--demo]");
-    println!("  load <path>");
     println!("  load-image <path>");
     println!("  fsck-image <path> [--repair]");
     println!("  mount-image <image-path> <mount-point>");
@@ -422,14 +402,6 @@ mod tests {
             ],
             vec![
                 "corefs".to_string(),
-                "save".to_string(),
-                std::env::temp_dir()
-                    .join("corefs-cli-save.json")
-                    .display()
-                    .to_string(),
-            ],
-            vec![
-                "corefs".to_string(),
                 "save-image".to_string(),
                 temp_path("save", "img"),
             ],
@@ -519,12 +491,6 @@ mod tests {
 
         let read = run(vec!["corefs".to_string(), "read".to_string()]);
         assert!(matches!(read, Err(CoreFsError::InvalidCommand(_))));
-
-        let save = run(vec!["corefs".to_string(), "save".to_string()]);
-        assert!(matches!(save, Err(CoreFsError::InvalidCommand(_))));
-
-        let load = run(vec!["corefs".to_string(), "load".to_string()]);
-        assert!(matches!(load, Err(CoreFsError::InvalidCommand(_))));
 
         let save_image = run(vec!["corefs".to_string(), "save-image".to_string()]);
         assert!(matches!(save_image, Err(CoreFsError::InvalidCommand(_))));

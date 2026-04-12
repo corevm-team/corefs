@@ -2,7 +2,7 @@
 
 ## Überblick
 
-`CoreFS` ist ein in Rust entwickeltes, plattformneutrales Dateisystemprojekt mit Fokus auf den nativen Einsatz als Standard-Dateisystem des eigenen Betriebssystems. Das Repository enthält aktuell ein strukturiertes, kompilierbares Grundsystem mit klarer Modultrennung, CLI-Einstiegspunkt, Service-Schichten, Persistenzpfad, Integritätswerkzeugen, Linux-FUSE-Testadapter, Performance-Tooling und einer breiten Testsuite.
+`CoreFS` ist ein in Rust entwickeltes, plattformneutrales Dateisystemprojekt mit Fokus auf den nativen Einsatz als Standard-Dateisystem des eigenen Betriebssystems. Das Repository enthält aktuell ein strukturiertes, kompilierbares Grundsystem mit klarer Modultrennung, CLI-Einstiegspunkt, Service-Schichten, Volume-Persistenzpfad, Integritätswerkzeugen, Linux-FUSE-Testadapter, Performance-Tooling und einer breiten Testsuite.
 
 ## Aktueller Status
 
@@ -33,7 +33,6 @@
 ### Kernfunktionen im Prototyp
 
 - Formatierung eines CoreFS-Volumes im Userspace-Modell
-- Persistenz eines kompletten CoreFS-Zustands als JSON-basiertes Zwischenformat
 - Persistenz eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks, Generation Countern und getrennten Fachsegmenten
 - Linux-Testadapter über FUSE zum read-only Mounten von `.img`-Dateien
 - Erzeugen von Dateien, Verzeichnissen und symbolischen Links
@@ -107,7 +106,6 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - Inode-Allokation
 - Blockspeicher im In-Memory-Modell
 - Katalog für aktive und gelöschte Einträge
-- JSON-basierte Zustandspersistenz
 - mehrsegmentiges binäres Volume-Image-Format mit Segmenttabelle, Alignment-Regeln, redundanten Superblocks, Generation Countern und Prüflogik als weiterer Persistenzpfad
 
 ### `src/services`
@@ -161,7 +159,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 
 - blockorientiertes On-Disk-Format definieren
 - Metadaten-Layout festlegen
-- JSON-Zwischenformat in ein produktionsnahes Volume-Format überführen
+- die noch JSON-basierten Segment-Payloads im Volume-Image schrittweise in ein produktionsnahes Binärformat überführen
 - Block- und Journal-Speicherung crash-konsistent machen
 - Performance-Baseline für zukünftige Persistenzumstellungen fortlaufend protokollieren
 
