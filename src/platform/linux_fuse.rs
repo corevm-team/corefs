@@ -34,7 +34,7 @@ impl Default for LinuxMountOptions {
             create_if_missing: false,
             read_only: false,
             auto_unmount: false,
-            threads: 4,
+            threads: 1,
         }
     }
 }
@@ -639,7 +639,9 @@ pub fn mount_volume(
         config.acl = SessionACL::RootAndOwner;
     }
     config.n_threads = Some(options.threads.max(1));
-    config.clone_fd = true;
+    // Conservative default for rootless mounts: avoid kernel FD cloning until
+    // the basic mount handshake is proven stable on the current host.
+    config.clone_fd = false;
 
     fuser::mount2(filesystem, mountpoint, &config).map_err(|error| {
         if error.kind() == ErrorKind::PermissionDenied {
