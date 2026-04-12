@@ -2,6 +2,7 @@ use crate::app::DirectoryEntry;
 use crate::config::CoreFsConfig;
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::error::{CoreFsError, CoreFsResult};
+use crate::platform::diagnostics::{diagnose_mount, ensure_mount_ready};
 use crate::platform::runtime::{MountAdapter, PlatformAdapterDescriptor};
 use crate::storage::volume_session::VolumeSession;
 use fuser::{
@@ -616,6 +617,9 @@ pub fn mount_volume(
     mountpoint: impl AsRef<Path>,
     options: LinuxMountOptions,
 ) -> CoreFsResult<()> {
+    let diagnosis = diagnose_mount(&image_path, &mountpoint, &options);
+    ensure_mount_ready(&diagnosis)?;
+
     let filesystem = CoreFsFuseFilesystem::open(image_path, options.create_if_missing)?;
     let mut config = Config::default();
     config
@@ -640,11 +644,11 @@ pub fn mount_volume(
     fuser::mount2(filesystem, mountpoint, &config).map_err(|error| {
         if error.kind() == ErrorKind::PermissionDenied {
             CoreFsError::State(format!(
-                "failed to mount CoreFS volume through FUSE: {error}. This usually means the current environment does not permit FUSE mounts for this process. Try a normal Linux host session with FUSE enabled, or mount with elevated privileges."
+                "failed to mount CoreFS volume through FUSE: {error}. This usually means the current environment does not permit FUSE mounts for this process. Try `corefs diagnose-mount <image> <mountpoint>`, then mount on a normal Linux host session with FUSE enabled or with elevated privileges."
             ))
         } else {
             CoreFsError::State(format!(
-                "failed to mount CoreFS volume through FUSE: {error}"
+                "failed to mount CoreFS volume through FUSE: {error}. Run `corefs diagnose-mount <image> <mountpoint>` for a detailed preflight."
             ))
         }
     })

@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Linux-FUSE-, Replay-, Integritäts- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `60/60` Tests erfolgreich  
+**Test-Status:** `70/70` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -51,6 +51,7 @@
 - persistente Volume-Session mit atomischem Flush auf Image-Dateien
 - Linux-FUSE-Adapter mit `lookup`, `getattr`, `readdir`, `read`, `write`, `mkdir`, `create`, `unlink`, `rmdir`, `symlink`, `rename`, `truncate`, `fsync` und `statfs`
 - Linux-Skripte für `mkfs`, Mount, Unmount und gemountete Benchmarks
+- Mount-Diagnose für Image-, Mountpoint-, Kernel-, `/dev/fuse`- und Tooling-Preflight
 - Sync-Status-Verfolgung
 - semantische Inhaltsklassifikation nach Dateiendung
 - Metadaten-, Tag- und ACL-Grundmodell

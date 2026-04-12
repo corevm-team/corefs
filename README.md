@@ -21,7 +21,7 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout-, Linux-FUSE-, Integritäts- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `60/60` Tests erfolgreich
+- Test-Status: `70/70` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -141,6 +141,12 @@ mkdir -p ./mnt/corefs
 cargo run -- mount-image ./corefs-volume.img ./mnt/corefs --threads 4
 ```
 
+Mount-Diagnose ausführen:
+
+```bash
+cargo run -- diagnose-mount ./corefs-volume.img ./mnt/corefs --threads 4
+```
+
 Image prüfen:
 
 ```bash
@@ -151,6 +157,7 @@ Hilfsskripte:
 
 ```bash
 ./scripts/corefs-mkfs.sh ./corefs-volume.img
+./scripts/corefs-doctor.sh ./corefs-volume.img ./mnt/corefs
 ./scripts/corefs-mount.sh ./corefs-volume.img ./mnt/corefs
 ./scripts/corefs-umount.sh ./mnt/corefs
 ./scripts/corefs-benchmark.sh ./corefs-volume.img ./mnt/corefs ./PERFORMANCE_LOG.md

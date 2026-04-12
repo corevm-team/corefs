@@ -1,6 +1,7 @@
 use crate::app::CoreFsService;
 use crate::config::{CoreFsConfig, StorageTier};
 use crate::error::{CoreFsError, CoreFsResult};
+use crate::platform::diagnostics::{diagnose_mount, render_mount_diagnosis};
 use crate::platform::linux_fuse::{LinuxMountOptions, mount_volume};
 use crate::platform::performance::{
     BenchmarkConfig, BenchmarkProfile, append_benchmark_markdown, run_benchmark,
@@ -60,6 +61,24 @@ where
             })?;
             let options = mount_options_from_args(&args[4..])?;
             mount_volume(image, mountpoint, options)?;
+        }
+        "diagnose-mount" => {
+            let image = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing image for diagnose-mount".to_string())
+            })?;
+            let mountpoint = args.get(3).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing mountpoint for diagnose-mount".to_string())
+            })?;
+            let options = mount_options_from_args(&args[4..])?;
+            let report = diagnose_mount(image, mountpoint, &options);
+            for line in render_mount_diagnosis(&report) {
+                println!("{line}");
+            }
+            if report.has_failures() {
+                return Err(CoreFsError::State(
+                    "mount diagnosis reported blocking failures".to_string(),
+                ));
+            }
         }
         "status" => {
             let report = fs.admin_report();
@@ -420,6 +439,9 @@ fn print_usage() {
     println!("  mkfs-image <path> [--bootstrap] [--volume-name <name>] [--block-size <bytes>]");
     println!("  status-image <path>");
     println!(
+        "  diagnose-mount <image> <mountpoint> [--create] [--read-only] [--auto-unmount] [--threads <n>]"
+    );
+    println!(
         "  mount-image <image> <mountpoint> [--create] [--read-only] [--auto-unmount] [--threads <n>]"
     );
     println!("  status");
@@ -682,6 +704,15 @@ mod tests {
                 "corefs".to_string(),
                 "fsck-image".to_string(),
                 fsck_image_path.clone(),
+            ],
+            vec![
+                "corefs".to_string(),
+                "diagnose-mount".to_string(),
+                fsck_image_path.clone(),
+                std::env::temp_dir()
+                    .join("corefs-cli-mountpoint")
+                    .display()
+                    .to_string(),
             ],
             vec!["corefs".to_string(), "benchmark".to_string()],
             vec![

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE_PATH="${1:-./corefs-volume.img}"
-MOUNT_POINT="${2:-./mnt/corefs}"
-LOG_PATH="${3:-./PERFORMANCE_LOG.md}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+IMAGE_PATH="${1:-${SCRIPT_DIR}/corefs-volume.img}"
+MOUNT_POINT="${2:-${SCRIPT_DIR}/mnt/corefs}"
+LOG_PATH="${3:-${SCRIPT_DIR}/PERFORMANCE_LOG.md}"
 
 FILES="${COREFS_BENCH_FILES:-1000}"
 PAYLOAD_BYTES="${COREFS_BENCH_PAYLOAD:-4096}"
@@ -31,13 +33,17 @@ cleanup() {
 
 trap cleanup EXIT
 
-if [[ -x "./dist/bin/corefs" ]]; then
-  COREFS_BIN="./dist/bin/corefs"
+if [[ -x "${REPO_ROOT}/dist/bin/corefs" ]]; then
+  COREFS_BIN="${REPO_ROOT}/dist/bin/corefs"
+elif [[ -x "${REPO_ROOT}/target/release/corefs" ]]; then
+  COREFS_BIN="${REPO_ROOT}/target/release/corefs"
 else
+  cd "${REPO_ROOT}"
   COREFS_BIN="cargo run --release --"
 fi
 
 eval "${COREFS_BIN} mkfs-image \"$IMAGE_PATH\" --bootstrap"
+eval "${COREFS_BIN} diagnose-mount \"$IMAGE_PATH\" \"$MOUNT_POINT\" --threads \"$THREADS\""
 eval "${COREFS_BIN} mount-image \"$IMAGE_PATH\" \"$MOUNT_POINT\" --threads \"$THREADS\"" &
 MOUNT_PID=$!
 
