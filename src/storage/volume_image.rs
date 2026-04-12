@@ -12,6 +12,7 @@ use crate::services::journal::{JournalRepairSummary, reconcile_persisted_state};
 use crate::services::sync::SyncStatus;
 use crate::services::versioning::FileVersion;
 use crate::storage::block_store::BlockRecord;
+use crate::storage::volume_wal::VolumeWal;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -67,6 +68,7 @@ struct SnapshotSegment {
 struct JournalRuntimeSegment {
     clean_unmount: bool,
     runtime: JournalRuntimeState,
+    pending_wal: Option<VolumeWal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +184,7 @@ pub fn save_volume_image(path: impl AsRef<Path>, state: &PersistedState) -> Core
             &JournalRuntimeSegment {
                 clean_unmount: state.clean_unmount,
                 runtime: state.journal_runtime.clone(),
+                pending_wal: state.pending_wal.clone(),
             },
             path,
         )?,
@@ -1177,6 +1180,7 @@ fn persisted_state_from_entries(
             .unwrap_or(JournalRuntimeSegment {
                 clean_unmount: true,
                 runtime: JournalRuntimeState::default(),
+                pending_wal: None,
             });
 
     let block_records = match (
@@ -1194,6 +1198,7 @@ fn persisted_state_from_entries(
         config,
         volume,
         clean_unmount: journal_runtime.clean_unmount && superblock_clean(entries, bytes, path)?,
+        pending_wal: journal_runtime.pending_wal,
         active_inodes: active,
         deleted_inodes: deleted,
         block_records,
@@ -1268,12 +1273,14 @@ fn persisted_state_without_blocks(
             .unwrap_or(JournalRuntimeSegment {
                 clean_unmount: true,
                 runtime: JournalRuntimeState::default(),
+                pending_wal: None,
             });
 
     Ok(PersistedState {
         config,
         volume,
         clean_unmount: journal_runtime.clean_unmount,
+        pending_wal: journal_runtime.pending_wal,
         active_inodes: active,
         deleted_inodes: deleted,
         block_records: Vec::new(),
@@ -1713,6 +1720,7 @@ mod tests {
             config: CoreFsConfig::default(),
             volume: VolumeDescriptor::from_config(&CoreFsConfig::default()),
             clean_unmount: true,
+            pending_wal: None,
             active_inodes: Vec::new(),
             deleted_inodes: Vec::new(),
             block_records: Vec::new(),
@@ -1890,6 +1898,7 @@ mod tests {
             config: CoreFsConfig::default(),
             volume: VolumeDescriptor::from_config(&CoreFsConfig::default()),
             clean_unmount: true,
+            pending_wal: None,
             active_inodes: vec![active_inode],
             deleted_inodes: vec![deleted_inode],
             block_records: vec![
@@ -2009,6 +2018,7 @@ mod tests {
             config: CoreFsConfig::default(),
             volume: VolumeDescriptor::from_config(&CoreFsConfig::default()),
             clean_unmount: true,
+            pending_wal: None,
             active_inodes: vec![inode],
             deleted_inodes: Vec::new(),
             block_records: vec![BlockRecord {

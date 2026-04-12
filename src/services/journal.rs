@@ -390,6 +390,7 @@ mod tests {
             config: CoreFsConfig::default(),
             volume: VolumeDescriptor::from_config(&CoreFsConfig::default()),
             clean_unmount: true,
+            pending_wal: None,
             active_inodes: vec![Inode::new(
                 crate::domain::inode::InodeId(1),
                 InodeKind::File,

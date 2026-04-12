@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `97/97` Tests erfolgreich  
+**Test-Status:** `96/96` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -40,7 +40,7 @@
 - Lesen und Schreiben von Dateiinhalten
 - Journaling von Operationen
 - transaktionales Journal mit Pending-Transaktionen, Commit-/Abort-Markern und Recovery-Einträgen
-- separates WAL-Sidecar mit persistierten Pending-Operationen fuer RW-Sessions
+- integriertes Pending-WAL im Volume-Image fuer RW-Sessions
 - automatische Versionierung im Basismodell
 - Snapshot-Erzeugung
 - Recoverable Delete und Secure Delete
@@ -53,7 +53,7 @@
 - Metadaten-, Tag- und ACL-Grundmodell
 - Journal-Replay zur Zustandsabstimmung geladener Images
 - Recovery eines unclean beendeten RW-Mounts mit automatischem Abbruch offener Pending-Transaktionen beim Laden
-- WAL-Recovery vor FUSE-Mount und `VolumeSession::open`, damit persistierte Pending-Operationen ins Haupt-Image zurueckgespielt werden
+- WAL-Recovery vor FUSE-Mount und `VolumeSession::open`, damit persistierte Pending-Operationen direkt aus dem Volume-Image ins Haupt-Image zurueckgespielt werden
 - synthetischer Performance-Benchmark für Datei-, Snapshot- und Persistenzpfade
 - Markdown-Protokollierung von Benchmark-Ergebnissen
 - konfigurierbare Benchmark-Profile für unterschiedliche Lastbilder
@@ -82,7 +82,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - produktionsnahes blockorientiertes On-Disk-Format
 - echter Blockdevice-Zugriff
 - vollständige Copy-on-Write-Implementierung auf Datenträgerebene
-- direkt im Volume integriertes Write-Ahead-Log statt Sidecar-basierter Pending-Operationen
+- blocknahes Write-Ahead-Log direkt im Volume statt des aktuellen segmentbasierten Pending-WAL
 - Deduplizierung
 - Self-Healing mit Redundanzquellen
 - Cluster-Synchronisation
@@ -165,7 +165,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 - blockorientiertes On-Disk-Format definieren
 - Metadaten-Layout festlegen
 - die aktuellen binären Segment-Frames schrittweise in ein noch stärker blockorientiertes und spezialisierteres On-Disk-Format überführen
-- das aktuelle Sidecar-WAL in ein direkt im Volume integriertes, blocknahes Write-Ahead-Log weiterentwickeln
+- das aktuelle segmentbasierte In-Volume-WAL in ein blocknahes Write-Ahead-Log mit direkter Delta-Speicherung weiterentwickeln
 - Performance-Baseline für zukünftige Persistenzumstellungen fortlaufend protokollieren
 
 ### Phase 2: Systemkern
@@ -176,7 +176,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 
 ### Phase 3: Integrität und Sicherheit
 
-- direkt im Volume integriertes Write-Ahead-Log und Replay auf Delta-Ebene
+- blocknahes Write-Ahead-Log und Replay auf Delta-Ebene direkt im Volume
 - echte Kompression
 - echte Verschlüsselung
 - Quotas
@@ -193,7 +193,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 ## Wichtige Hinweise
 
 - Das Projekt ist aktuell ein strukturierter, getesteter Kern-, Persistenz- und Volume-Layout-Prototyp und noch kein produktionsreifes Dateisystem.
-- Der Linux-Mountpfad unterstützt inzwischen read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung, transaktionales Journal-Writeback und ein separates WAL-Sidecar, ist aber noch kein vollständig im Volume integriertes Produktions-WAL.
+- Der Linux-Mountpfad unterstützt inzwischen read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung, transaktionales Journal-Writeback und ein integriertes Pending-WAL im Volume, ist aber noch kein blocknahes Produktions-WAL.
 - Performance-Messungen werden jetzt über `benchmark` und `benchmark-log` reproduzierbar ausführbar.
 - Die vorhandene Testsuite ist stark für die aktuelle In-Memory-Implementierung, aber keine Garantie für `100%` messbare Coverage, da in der Umgebung keine Coverage-Tools installiert sind.
 - `.codex` ist inzwischen als projektinterne Vorgabedatei befüllt.

@@ -1,7 +1,6 @@
 use crate::app::CoreFsService;
 use crate::config::CoreFsConfig;
 use crate::error::{CoreFsError, CoreFsResult};
-use crate::storage::volume_wal;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,7 +32,6 @@ impl VolumeSession {
             )));
         }
 
-        volume_wal::recover_wal_into_image(&image_path)?;
         let service = CoreFsService::load_image_from_path(&image_path)?;
         Ok(Self {
             image_path,
@@ -102,7 +100,7 @@ fn temporary_image_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::volume_wal::{self, VolumeWal, WalOperation};
+    use crate::storage::volume_wal::{VolumeWal, WalOperation};
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -143,10 +141,8 @@ mod tests {
     #[test]
     fn reopen_recovers_pending_wal_before_loading_service() {
         let path = temp_path("wal-recover");
-        let fs = CoreFsService::format(CoreFsConfig::default());
-        fs.save_image_to_path(&path).expect("image should save");
-
-        let wal = VolumeWal {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.set_pending_wal(VolumeWal {
             transaction_id: 1,
             label: "rw-writeback".to_string(),
             created_at: SystemTime::now(),
@@ -159,8 +155,9 @@ mod tests {
                     bytes: b"hello".to_vec(),
                 },
             ],
-        };
-        volume_wal::save_wal(&path, &wal).expect("wal should save");
+        });
+        fs.mark_unclean_shutdown();
+        fs.save_image_to_path(&path).expect("image should save");
 
         let reopened = VolumeSession::open(&path).expect("reopen succeeds");
         assert_eq!(
@@ -170,7 +167,7 @@ mod tests {
                 .expect("file exists"),
             b"hello".to_vec()
         );
-        assert!(!volume_wal::wal_path(&path).exists());
+        assert!(!reopened.service().has_pending_wal());
 
         let _ = fs::remove_file(path);
     }

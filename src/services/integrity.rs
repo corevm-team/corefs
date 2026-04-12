@@ -135,6 +135,7 @@ mod tests {
             config: CoreFsConfig::default(),
             volume: VolumeDescriptor::from_config(&CoreFsConfig::default()),
             clean_unmount: true,
+            pending_wal: None,
             active_inodes: Vec::new(),
             deleted_inodes: Vec::new(),
             block_records: Vec::new(),

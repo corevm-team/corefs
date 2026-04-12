@@ -1,7 +1,7 @@
 use crate::app::{CoreFsService, PersistedState};
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::error::{CoreFsError, CoreFsResult};
-use crate::storage::volume_wal::{self, VolumeWal, WalOperation};
+use crate::storage::volume_wal::{VolumeWal, WalOperation};
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
@@ -388,7 +388,6 @@ impl CoreFsFuseMountRw {
     }
 
     fn open_session(_service: CoreFsService, image_path: PathBuf) -> CoreFsResult<Self> {
-        volume_wal::recover_wal_into_image(&image_path)?;
         let mut service = CoreFsService::load_image_from_path(&image_path)?;
         service.mark_unclean_shutdown();
         service.save_image_to_path(&image_path)?;
@@ -546,7 +545,6 @@ impl CoreFsFuseMountRw {
         self.service.mark_clean_shutdown();
         match self.service.save_image_to_path(&self.image_path) {
             Ok(()) => {
-                let _ = volume_wal::remove_wal(&self.image_path);
                 self.pending_wal = None;
                 self.dirty = false;
                 true
@@ -565,18 +563,23 @@ impl CoreFsFuseMountRw {
         }
         if !self.service.has_pending_transaction() {
             let transaction_id = self.service.begin_write_transaction(label);
-            self.pending_wal = Some(VolumeWal::new(transaction_id, label));
+            let wal = VolumeWal::new(transaction_id, label);
+            self.service.set_pending_wal(wal.clone());
+            self.pending_wal = Some(wal);
+            self.service.save_image_to_path(&self.image_path)?;
         }
         Ok(())
     }
 
     fn record_wal_operation(&mut self, operation: WalOperation) -> CoreFsResult<()> {
-        let wal = self
-            .pending_wal
-            .as_mut()
-            .ok_or_else(|| CoreFsError::State("missing pending WAL transaction".to_string()))?;
-        wal.push(operation);
-        volume_wal::save_wal(&self.image_path, wal)
+        self.service.update_pending_wal(|wal| {
+            wal.push(operation.clone());
+            Ok(())
+        })?;
+        if let Some(wal) = self.pending_wal.as_mut() {
+            wal.push(operation);
+        }
+        self.service.save_image_to_path(&self.image_path)
     }
 }
 
@@ -1234,8 +1237,6 @@ fn current_gid() -> u32 {
 mod tests {
     use super::*;
     use crate::config::CoreFsConfig;
-    use crate::storage::volume_wal;
-
     fn sample_view() -> CoreFsFuseView {
         let mut fs = CoreFsService::format(CoreFsConfig::default());
         fs.create_directory("/etc").expect("directory should exist");
@@ -1566,7 +1567,7 @@ mod tests {
     }
 
     #[test]
-    fn rw_mount_writes_pending_wal_sidecar_before_flush() {
+    fn rw_mount_persists_pending_wal_inside_image_before_flush() {
         let path = std::env::temp_dir().join(format!(
             "corefs-rw-wal-{}-{}.img",
             std::process::id(),
@@ -1594,11 +1595,13 @@ mod tests {
             })
             .expect("wal");
 
-        let wal = volume_wal::load_wal(&path).expect("wal should load");
-        assert!(wal.is_some());
-        assert_eq!(wal.expect("wal").operations.len(), 1);
+        let loaded = CoreFsService::load_image_from_path(&path).expect("image should load");
+        assert!(!loaded.has_pending_wal(), "load should replay pending WAL");
+        assert_eq!(
+            loaded.read_file("/hello.txt").expect("file should exist"),
+            b"updated".to_vec()
+        );
 
-        let _ = volume_wal::remove_wal(&path);
         let _ = std::fs::remove_file(path);
     }
 }

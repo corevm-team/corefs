@@ -18,6 +18,7 @@ use crate::storage::allocator::InodeAllocator;
 use crate::storage::block_store::BlockStore;
 use crate::storage::catalog::Catalog;
 use crate::storage::volume_image;
+use crate::storage::volume_wal::{self, VolumeWal};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::SystemTime;
@@ -44,6 +45,7 @@ pub struct PersistedState {
     pub config: CoreFsConfig,
     pub volume: VolumeDescriptor,
     pub clean_unmount: bool,
+    pub pending_wal: Option<VolumeWal>,
     pub active_inodes: Vec<Inode>,
     pub deleted_inodes: Vec<Inode>,
     pub block_records: Vec<crate::storage::block_store::BlockRecord>,
@@ -70,6 +72,7 @@ pub struct CoreFsService {
     security: SecurityService,
     sync: SyncService,
     clean_unmount: bool,
+    pending_wal: Option<VolumeWal>,
     snapshots: Vec<Snapshot>,
     next_snapshot_id: u64,
 }
@@ -94,6 +97,7 @@ impl CoreFsService {
             security: SecurityService,
             sync: SyncService::default(),
             clean_unmount: true,
+            pending_wal: None,
             snapshots: Vec::new(),
             next_snapshot_id: 0,
         }
@@ -280,8 +284,14 @@ impl CoreFsService {
     }
 
     pub fn load_image_from_path(path: impl AsRef<Path>) -> CoreFsResult<Self> {
+        let path = path.as_ref();
         let state = volume_image::load_volume_image(path)?;
-        Ok(Self::from_persisted_state(state))
+        let mut service = Self::from_persisted_state(state);
+        if service.has_pending_wal() {
+            service.recover_pending_wal()?;
+            service.save_image_to_path(path)?;
+        }
+        Ok(service)
     }
 
     pub fn scrub(&self) -> IntegrityReport {
@@ -340,6 +350,47 @@ impl CoreFsService {
 
     pub fn had_unclean_shutdown(&self) -> bool {
         !self.clean_unmount
+    }
+
+    pub fn pending_wal(&self) -> Option<&VolumeWal> {
+        self.pending_wal.as_ref()
+    }
+
+    pub fn has_pending_wal(&self) -> bool {
+        self.pending_wal.is_some()
+    }
+
+    pub fn set_pending_wal(&mut self, wal: VolumeWal) {
+        self.pending_wal = Some(wal);
+    }
+
+    pub fn update_pending_wal(
+        &mut self,
+        mutator: impl FnOnce(&mut VolumeWal) -> CoreFsResult<()>,
+    ) -> CoreFsResult<()> {
+        let wal = self
+            .pending_wal
+            .as_mut()
+            .ok_or_else(|| CoreFsError::State("missing pending WAL".to_string()))?;
+        mutator(wal)
+    }
+
+    pub fn clear_pending_wal(&mut self) {
+        self.pending_wal = None;
+    }
+
+    pub fn recover_pending_wal(&mut self) -> CoreFsResult<()> {
+        let Some(wal) = self.pending_wal.clone() else {
+            return Ok(());
+        };
+        self.begin_write_transaction(&wal.label);
+        for operation in &wal.operations {
+            volume_wal::apply_operation(self, operation)?;
+        }
+        self.commit_write_transaction();
+        self.clear_pending_wal();
+        self.mark_clean_shutdown();
+        Ok(())
     }
 
     pub fn stats(&self) -> FsStats {
@@ -439,6 +490,7 @@ impl CoreFsService {
             config: self.config.clone(),
             volume: self.volume.clone(),
             clean_unmount: self.clean_unmount,
+            pending_wal: self.pending_wal.clone(),
             active_inodes: self.catalog.active_entries(),
             deleted_inodes: self.catalog.deleted_entries(),
             block_records: self.blocks.records(),
@@ -482,6 +534,7 @@ impl CoreFsService {
             security: SecurityService,
             sync: SyncService::from_statuses(state.sync_statuses),
             clean_unmount: state.clean_unmount,
+            pending_wal: state.pending_wal,
             snapshots: state.snapshots,
             next_snapshot_id: state.next_snapshot_id,
         };
