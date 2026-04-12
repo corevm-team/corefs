@@ -21,7 +21,7 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `93/93` Tests erfolgreich
+- Test-Status: `97/97` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -87,6 +87,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Linux-FUSE-Adapter mit `.img`-Dateien als Mount-Backend (read-only und read-write mit Writeback)
 - Journaling von Operationen
 - transaktionales Journal mit `tx_begin`/`tx_commit`/`tx_abort`, Pending-Transaktionen und Recovery-Markern
+- separates WAL-Sidecar mit persistierten Pending-Operationen fuer den RW-Mount
 - Basis-Versionierung
 - Snapshots
 - Recoverable Delete und Secure Delete
@@ -99,6 +100,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - ACL-, Tag- und Metadaten-Grundmodell
 - Journal-Replay zur Zustandsabstimmung beim Laden persistierter Images
 - Recovery eines unclean beendeten RW-Mounts mit Abbruch offener Pending-Transaktionen beim Laden
+- WAL-Recovery, das persistierte Pending-Operationen vor dem naechsten Mount oder Session-Open ins Haupt-Image zurueckspielt
 - Auswahl der besten gültigen Superblock-Kopie über Generation Counter
 - Journal-basierte Kanonisierung aktiver und gelöschter Inodes beim Image-Repair
 - best-effort-Recovery über Header und Segmenttabelle, auch wenn keine gültige Superblock-Kopie mehr vorhanden ist
@@ -116,7 +118,7 @@ Diese Punkte sind vorgesehen, aber aktuell noch nicht als echte produktionsnahe 
 - vollständig produktionsnahes On-Disk-Format
 - echter Blockdevice-Zugriff
 - vollständiges Copy-on-Write auf Datenträgerebene
-- vollständiges Write-Ahead-Log mit separat persistierten Pending-Deltas
+- blocknahes Write-Ahead-Log direkt im Volume statt Sidecar-basierter Pending-Operationen
 - Deduplizierung
 - Self-Healing mit Redundanzquellen
 - Clusterfähigkeit
@@ -305,7 +307,7 @@ Das Dateisystem erscheint unter Linux als `corefs:<volume-name>`, z. B. `corefs:
 
 ### Read-write-Mount mit Writeback
 
-Hängt das Image beschreibbar ein. Alle Änderungen im gemounteten Verzeichnis werden bei `close` bzw. `sync` automatisch in die `.img`-Datei zurückgeschrieben. Der RW-Pfad markiert das Image beim Öffnen bewusst als `unclean`, bündelt Änderungen in Journal-Transaktionen und setzt den Zustand erst nach erfolgreichem Persist wieder auf `clean`.
+Hängt das Image beschreibbar ein. Alle Änderungen im gemounteten Verzeichnis werden bei `close` bzw. `sync` automatisch in die `.img`-Datei zurückgeschrieben. Der RW-Pfad markiert das Image beim Öffnen bewusst als `unclean`, bündelt Änderungen in Journal-Transaktionen, persistiert Pending-Operationen in einem separaten WAL-Sidecar und setzt den Zustand erst nach erfolgreichem Persist wieder auf `clean`.
 
 ```bash
 # Image erzeugen (falls noch nicht vorhanden)
@@ -358,7 +360,7 @@ cargo run -- read /etc/corefs.conf
 Die nächste sinnvolle Ausbaufolge ist:
 
 1. Das aktuelle segmentierte Binärformat weiter in Richtung eines echten blockorientierten On-Disk-Layouts mit stärker spezialisierter Segmentcodierung weiterentwickeln.
-2. Das aktuelle Transaktionsjournal zu einem echten Write-Ahead-Log mit persistierten Pending-Deltas ausbauen.
+2. Das aktuelle Sidecar-WAL in ein direkt im Volume integriertes, blocknahes Write-Ahead-Log weiterentwickeln.
 3. VFS- und Kernel-Integrationsschnittstelle für das eigene Betriebssystem entwerfen.
 4. Sicherheits-, Integritäts- und Recovery-Funktionen auf reale Laufzeitmechanismen anheben.
 5. Erweiterte Features wie Cluster, Deduplizierung und semantische Tiefenanalyse ergänzen.

@@ -308,8 +308,8 @@ impl CoreFsService {
         self.persisted_state()
     }
 
-    pub fn begin_write_transaction(&mut self, label: &str) {
-        self.journal.begin_transaction(label);
+    pub fn begin_write_transaction(&mut self, label: &str) -> u64 {
+        self.journal.begin_transaction(label)
     }
 
     pub fn has_pending_transaction(&self) -> bool {

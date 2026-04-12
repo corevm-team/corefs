@@ -1,6 +1,7 @@
 use crate::app::{CoreFsService, PersistedState};
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::error::{CoreFsError, CoreFsResult};
+use crate::storage::volume_wal::{self, VolumeWal, WalOperation};
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
@@ -364,6 +365,7 @@ impl Filesystem for CoreFsFuseMount {
 struct CoreFsFuseMountRw {
     service: CoreFsService,
     image_path: PathBuf,
+    pending_wal: Option<VolumeWal>,
     nodes_by_ino: HashMap<u64, FuseNode>,
     ino_by_path: HashMap<String, u64>,
     children: BTreeMap<String, Vec<String>>,
@@ -375,6 +377,7 @@ impl CoreFsFuseMountRw {
         let mut mount = Self {
             service,
             image_path,
+            pending_wal: None,
             nodes_by_ino: HashMap::new(),
             ino_by_path: HashMap::new(),
             children: BTreeMap::new(),
@@ -384,7 +387,9 @@ impl CoreFsFuseMountRw {
         mount
     }
 
-    fn open_session(mut service: CoreFsService, image_path: PathBuf) -> CoreFsResult<Self> {
+    fn open_session(_service: CoreFsService, image_path: PathBuf) -> CoreFsResult<Self> {
+        volume_wal::recover_wal_into_image(&image_path)?;
+        let mut service = CoreFsService::load_image_from_path(&image_path)?;
         service.mark_unclean_shutdown();
         service.save_image_to_path(&image_path)?;
         Ok(Self::from_service(service, image_path))
@@ -541,6 +546,8 @@ impl CoreFsFuseMountRw {
         self.service.mark_clean_shutdown();
         match self.service.save_image_to_path(&self.image_path) {
             Ok(()) => {
+                let _ = volume_wal::remove_wal(&self.image_path);
+                self.pending_wal = None;
                 self.dirty = false;
                 true
             }
@@ -557,9 +564,19 @@ impl CoreFsFuseMountRw {
             self.service.save_image_to_path(&self.image_path)?;
         }
         if !self.service.has_pending_transaction() {
-            self.service.begin_write_transaction(label);
+            let transaction_id = self.service.begin_write_transaction(label);
+            self.pending_wal = Some(VolumeWal::new(transaction_id, label));
         }
         Ok(())
+    }
+
+    fn record_wal_operation(&mut self, operation: WalOperation) -> CoreFsResult<()> {
+        let wal = self
+            .pending_wal
+            .as_mut()
+            .ok_or_else(|| CoreFsError::State("missing pending WAL transaction".to_string()))?;
+        wal.push(operation);
+        volume_wal::save_wal(&self.image_path, wal)
     }
 }
 
@@ -617,6 +634,16 @@ impl Filesystem for CoreFsFuseMountRw {
                 reply.error(EIO);
                 return;
             }
+            if self
+                .record_wal_operation(WalOperation::WriteFile {
+                    path: path.clone(),
+                    bytes: buf.clone(),
+                })
+                .is_err()
+            {
+                reply.error(EIO);
+                return;
+            }
             if let Some(n) = self.nodes_by_ino.get_mut(&ino) {
                 n.data = buf;
                 if let Some(ref mut inode) = n.inode {
@@ -657,6 +684,16 @@ impl Filesystem for CoreFsFuseMountRw {
                         return;
                     }
                     if self.service.write_file(&path, b"").is_err() {
+                        reply.error(EIO);
+                        return;
+                    }
+                    if self
+                        .record_wal_operation(WalOperation::WriteFile {
+                            path: path.clone(),
+                            bytes: Vec::new(),
+                        })
+                        .is_err()
+                    {
                         reply.error(EIO);
                         return;
                     }
@@ -737,6 +774,16 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EIO);
             return;
         }
+        if self
+            .record_wal_operation(WalOperation::WriteFile {
+                path: path.clone(),
+                bytes: buf.clone(),
+            })
+            .is_err()
+        {
+            reply.error(EIO);
+            return;
+        }
         let written = data.len() as u32;
         if let Some(n) = self.nodes_by_ino.get_mut(&ino) {
             n.data = buf;
@@ -772,6 +819,13 @@ impl Filesystem for CoreFsFuseMountRw {
             return;
         }
         if let Err(_) = self.service.create_file(&path, b"", &[]) {
+            reply.error(EIO);
+            return;
+        }
+        if self
+            .record_wal_operation(WalOperation::CreateFile { path: path.clone() })
+            .is_err()
+        {
             reply.error(EIO);
             return;
         }
@@ -818,6 +872,13 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EIO);
             return;
         }
+        if self
+            .record_wal_operation(WalOperation::CreateDirectory { path: path.clone() })
+            .is_err()
+        {
+            reply.error(EIO);
+            return;
+        }
         if self.service.inode_for_path(&path).is_none() {
             reply.error(EIO);
             return;
@@ -859,6 +920,13 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EIO);
             return;
         }
+        if self
+            .record_wal_operation(WalOperation::DeletePath { path: path.clone() })
+            .is_err()
+        {
+            reply.error(EIO);
+            return;
+        }
         self.unregister_ino(ino);
         self.dirty = true;
         reply.ok();
@@ -894,6 +962,13 @@ impl Filesystem for CoreFsFuseMountRw {
             return;
         }
         if let Err(_) = self.service.delete_file(&path, false) {
+            reply.error(EIO);
+            return;
+        }
+        if self
+            .record_wal_operation(WalOperation::DeletePath { path: path.clone() })
+            .is_err()
+        {
             reply.error(EIO);
             return;
         }
@@ -973,6 +1048,16 @@ impl Filesystem for CoreFsFuseMountRw {
             return;
         }
         if self.service.rename_entry(&src_path, &dst_path).is_err() {
+            reply.error(EIO);
+            return;
+        }
+        if self
+            .record_wal_operation(WalOperation::RenamePath {
+                from: src_path.clone(),
+                to: dst_path.clone(),
+            })
+            .is_err()
+        {
             reply.error(EIO);
             return;
         }
@@ -1149,6 +1234,7 @@ fn current_gid() -> u32 {
 mod tests {
     use super::*;
     use crate::config::CoreFsConfig;
+    use crate::storage::volume_wal;
 
     fn sample_view() -> CoreFsFuseView {
         let mut fs = CoreFsService::format(CoreFsConfig::default());
@@ -1476,6 +1562,43 @@ mod tests {
         let clean_loaded = CoreFsService::load_image_from_path(&path).expect("clean reload");
         assert!(!clean_loaded.had_unclean_shutdown());
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rw_mount_writes_pending_wal_sidecar_before_flush() {
+        let path = std::env::temp_dir().join(format!(
+            "corefs-rw-wal-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/hello.txt", b"hello", &[]).expect("file");
+        fs.save_image_to_path(&path).expect("initial image");
+
+        let service = CoreFsService::load_image_from_path(&path).expect("load");
+        let mut mount = CoreFsFuseMountRw::open_session(service, path.clone()).expect("session");
+        mount.ensure_mutation_session("write").expect("tx");
+        mount
+            .service
+            .write_file("/hello.txt", b"updated")
+            .expect("write");
+        mount
+            .record_wal_operation(WalOperation::WriteFile {
+                path: "/hello.txt".to_string(),
+                bytes: b"updated".to_vec(),
+            })
+            .expect("wal");
+
+        let wal = volume_wal::load_wal(&path).expect("wal should load");
+        assert!(wal.is_some());
+        assert_eq!(wal.expect("wal").operations.len(), 1);
+
+        let _ = volume_wal::remove_wal(&path);
         let _ = std::fs::remove_file(path);
     }
 }
