@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Linux-FUSE-, Replay-, Integritäts- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `70/70` Tests erfolgreich  
+**Test-Status:** `73/73` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt

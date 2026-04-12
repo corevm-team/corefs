@@ -22,13 +22,16 @@ for arg in "$@"; do
   fi
 done
 
-if [[ -x "${COREFS_BIN}" ]]; then
+if command -v cargo >/dev/null 2>&1; then
+  cd "${REPO_ROOT}"
+  BIN_CMD=( cargo run --release -- )
+elif [[ -x "${COREFS_BIN}" ]]; then
   BIN_CMD=( "${COREFS_BIN}" )
 elif [[ -x "${TARGET_BIN}" ]]; then
   BIN_CMD=( "${TARGET_BIN}" )
 else
-  cd "${REPO_ROOT}"
-  BIN_CMD=( cargo run --release -- )
+  echo "No CoreFS binary available. Run ./scripts/build.sh first or install cargo." >&2
+  exit 1
 fi
 
 if [[ ${SKIP_DOCTOR} -ne 1 ]]; then

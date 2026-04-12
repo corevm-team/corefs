@@ -33,13 +33,16 @@ cleanup() {
 
 trap cleanup EXIT
 
-if [[ -x "${REPO_ROOT}/dist/bin/corefs" ]]; then
+if command -v cargo >/dev/null 2>&1; then
+  cd "${REPO_ROOT}"
+  COREFS_BIN="cargo run --release --"
+elif [[ -x "${REPO_ROOT}/dist/bin/corefs" ]]; then
   COREFS_BIN="${REPO_ROOT}/dist/bin/corefs"
 elif [[ -x "${REPO_ROOT}/target/release/corefs" ]]; then
   COREFS_BIN="${REPO_ROOT}/target/release/corefs"
 else
-  cd "${REPO_ROOT}"
-  COREFS_BIN="cargo run --release --"
+  echo "No CoreFS binary available. Run ./scripts/build.sh first or install cargo." >&2
+  exit 1
 fi
 
 eval "${COREFS_BIN} mkfs-image \"$IMAGE_PATH\" --bootstrap"
