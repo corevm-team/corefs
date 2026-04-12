@@ -638,9 +638,9 @@ impl Filesystem for CoreFsFuseMountRw {
                 return;
             }
             if self
-                .record_wal_operation(WalOperation::WriteFile {
+                .record_wal_operation(WalOperation::TruncateFile {
                     path: path.clone(),
-                    bytes: buf.clone(),
+                    size: new_size as usize,
                 })
                 .is_err()
             {
@@ -691,9 +691,9 @@ impl Filesystem for CoreFsFuseMountRw {
                         return;
                     }
                     if self
-                        .record_wal_operation(WalOperation::WriteFile {
+                        .record_wal_operation(WalOperation::TruncateFile {
                             path: path.clone(),
-                            bytes: Vec::new(),
+                            size: 0,
                         })
                         .is_err()
                     {
@@ -778,9 +778,11 @@ impl Filesystem for CoreFsFuseMountRw {
             return;
         }
         if self
-            .record_wal_operation(WalOperation::WriteFile {
+            .record_wal_operation(WalOperation::PatchFile {
                 path: path.clone(),
-                bytes: buf.clone(),
+                offset: start,
+                bytes: data.to_vec(),
+                final_len: buf.len(),
             })
             .is_err()
         {
@@ -1589,9 +1591,11 @@ mod tests {
             .write_file("/hello.txt", b"updated")
             .expect("write");
         mount
-            .record_wal_operation(WalOperation::WriteFile {
+            .record_wal_operation(WalOperation::PatchFile {
                 path: "/hello.txt".to_string(),
+                offset: 0,
                 bytes: b"updated".to_vec(),
+                final_len: 7,
             })
             .expect("wal");
 

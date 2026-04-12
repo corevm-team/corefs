@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `96/96` Tests erfolgreich  
+**Test-Status:** `97/97` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -41,6 +41,7 @@
 - Journaling von Operationen
 - transaktionales Journal mit Pending-Transaktionen, Commit-/Abort-Markern und Recovery-Einträgen
 - integriertes Pending-WAL im Volume-Image fuer RW-Sessions
+- delta-orientierte WAL-Records fuer partielle File-Patches und Truncates
 - automatische Versionierung im Basismodell
 - Snapshot-Erzeugung
 - Recoverable Delete und Secure Delete
@@ -82,7 +83,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - produktionsnahes blockorientiertes On-Disk-Format
 - echter Blockdevice-Zugriff
 - vollständige Copy-on-Write-Implementierung auf Datenträgerebene
-- blocknahes Write-Ahead-Log direkt im Volume statt des aktuellen segmentbasierten Pending-WAL
+- physisch blockadressiertes Write-Ahead-Log direkt im Volume statt des aktuellen delta-orientierten Segment-WAL
 - Deduplizierung
 - Self-Healing mit Redundanzquellen
 - Cluster-Synchronisation
@@ -165,7 +166,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 - blockorientiertes On-Disk-Format definieren
 - Metadaten-Layout festlegen
 - die aktuellen binären Segment-Frames schrittweise in ein noch stärker blockorientiertes und spezialisierteres On-Disk-Format überführen
-- das aktuelle segmentbasierte In-Volume-WAL in ein blocknahes Write-Ahead-Log mit direkter Delta-Speicherung weiterentwickeln
+- die aktuellen delta-orientierten Segment-Records in echte blocknahe Write-Ahead-Records mit physischer Blockadressierung weiterentwickeln
 - Performance-Baseline für zukünftige Persistenzumstellungen fortlaufend protokollieren
 
 ### Phase 2: Systemkern
@@ -193,7 +194,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 ## Wichtige Hinweise
 
 - Das Projekt ist aktuell ein strukturierter, getesteter Kern-, Persistenz- und Volume-Layout-Prototyp und noch kein produktionsreifes Dateisystem.
-- Der Linux-Mountpfad unterstützt inzwischen read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung, transaktionales Journal-Writeback und ein integriertes Pending-WAL im Volume, ist aber noch kein blocknahes Produktions-WAL.
+- Der Linux-Mountpfad unterstützt inzwischen read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung, transaktionales Journal-Writeback und ein integriertes delta-orientiertes Pending-WAL im Volume, ist aber noch kein physisch blocknahes Produktions-WAL.
 - Performance-Messungen werden jetzt über `benchmark` und `benchmark-log` reproduzierbar ausführbar.
 - Die vorhandene Testsuite ist stark für die aktuelle In-Memory-Implementierung, aber keine Garantie für `100%` messbare Coverage, da in der Umgebung keine Coverage-Tools installiert sind.
 - `.codex` ist inzwischen als projektinterne Vorgabedatei befüllt.

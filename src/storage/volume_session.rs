@@ -150,9 +150,11 @@ mod tests {
                 WalOperation::CreateDirectory {
                     path: "/data".to_string(),
                 },
-                WalOperation::WriteFile {
+                WalOperation::PatchFile {
                     path: "/data/file.txt".to_string(),
+                    offset: 0,
                     bytes: b"hello".to_vec(),
+                    final_len: 5,
                 },
             ],
         });

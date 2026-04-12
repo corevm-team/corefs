@@ -21,7 +21,7 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `96/96` Tests erfolgreich
+- Test-Status: `97/97` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -88,6 +88,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Journaling von Operationen
 - transaktionales Journal mit `tx_begin`/`tx_commit`/`tx_abort`, Pending-Transaktionen und Recovery-Markern
 - integriertes Pending-WAL im Volume-Image fuer den RW-Mount
+- delta-orientierte WAL-Records fuer partielle File-Patches und Truncates statt nur grober Vollwrites
 - Basis-Versionierung
 - Snapshots
 - Recoverable Delete und Secure Delete
@@ -307,7 +308,7 @@ Das Dateisystem erscheint unter Linux als `corefs:<volume-name>`, z. B. `corefs:
 
 ### Read-write-Mount mit Writeback
 
-Hängt das Image beschreibbar ein. Alle Änderungen im gemounteten Verzeichnis werden bei `close` bzw. `sync` automatisch in die `.img`-Datei zurückgeschrieben. Der RW-Pfad markiert das Image beim Öffnen bewusst als `unclean`, bündelt Änderungen in Journal-Transaktionen, persistiert Pending-Operationen direkt im `TXNJ`-Segment des Volume-Images und setzt den Zustand erst nach erfolgreichem Persist wieder auf `clean`.
+Hängt das Image beschreibbar ein. Alle Änderungen im gemounteten Verzeichnis werden bei `close` bzw. `sync` automatisch in die `.img`-Datei zurückgeschrieben. Der RW-Pfad markiert das Image beim Öffnen bewusst als `unclean`, bündelt Änderungen in Journal-Transaktionen, persistiert Pending-Operationen direkt im `TXNJ`-Segment des Volume-Images und nutzt dabei delta-orientierte Records für File-Patches und Truncates, bevor der Zustand nach erfolgreichem Persist wieder auf `clean` gesetzt wird.
 
 ```bash
 # Image erzeugen (falls noch nicht vorhanden)
@@ -360,7 +361,7 @@ cargo run -- read /etc/corefs.conf
 Die nächste sinnvolle Ausbaufolge ist:
 
 1. Das aktuelle segmentierte Binärformat weiter in Richtung eines echten blockorientierten On-Disk-Layouts mit stärker spezialisierter Segmentcodierung weiterentwickeln.
-2. Das aktuelle segmentbasierte In-Volume-WAL in ein blocknahes Write-Ahead-Log mit direkter Delta-Speicherung weiterentwickeln.
+2. Die aktuellen delta-orientierten Segment-Records in echte blocknahe Write-Ahead-Records mit physischer Blockadressierung weiterentwickeln.
 3. VFS- und Kernel-Integrationsschnittstelle für das eigene Betriebssystem entwerfen.
 4. Sicherheits-, Integritäts- und Recovery-Funktionen auf reale Laufzeitmechanismen anheben.
 5. Erweiterte Features wie Cluster, Deduplizierung und semantische Tiefenanalyse ergänzen.
