@@ -12,3 +12,4 @@ CoreFS workspace directives
 - Performance-Tool weiter ausbauen mit mehreren vordefinierten Suites wie dev, ci, regression und storage-heavy.
 - Performance-Tool soll Benchmark-Ergebnisse kuenftig automatisch mit frueheren Messungen vergleichen koennen.
 - nach änderungen und anschliessenden alle erfolgreichen Tests soll immer ein commit gemacht werden 
+- nach jedem inhaltlichen Feature-Commit soll die Version in Cargo.toml um 0.0.1 erhoeht werden

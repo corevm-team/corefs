@@ -34,6 +34,7 @@
 
 - Formatierung eines CoreFS-Volumes im Userspace-Modell
 - Persistenz eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks, Generation Countern und binären Segment-Frames für Fachsegmente
+- spezialisierte Binärlayouts für Inode-, Journal- und Snapshot-Segmente innerhalb des Volume-Images
 - Linux-Testadapter über FUSE zum read-only Mounten von `.img`-Dateien
 - Erzeugen von Dateien, Verzeichnissen und symbolischen Links
 - Lesen und Schreiben von Dateiinhalten

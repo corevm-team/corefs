@@ -81,6 +81,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 
 - Formatierung eines CoreFS-Volumes im In-Memory-Modell
 - Speichern und Laden eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks (`SUPR` und `SUP2`), Generation Countern, Prüfsummen und binären Segment-Frames für Fachsegmente wie `AINO`, `DINO`, `JOUR`, `VERS`, `SNAP`, `BLKD` und `DATA`
+- spezialisierte Binärlayouts für Inode-, Journal- und Snapshot-Segmente statt allgemeiner Serde-Serialisierung
 - Dateien, Verzeichnisse und symbolische Links
 - Lesen und Schreiben von Inhalten
 - Linux-FUSE-Adapter mit `.img`-Dateien als Mount-Backend (read-only und read-write mit Writeback)

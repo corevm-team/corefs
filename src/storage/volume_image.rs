@@ -1,6 +1,8 @@
 use crate::app::PersistedState;
-use crate::config::CoreFsConfig;
-use crate::domain::inode::{Inode, InodeId};
+use crate::config::{CoreFsConfig, StorageTier};
+use crate::domain::acl::{AclEntry, Principal};
+use crate::domain::inode::{Inode, InodeId, InodeKind};
+use crate::domain::metadata::{ContentClass, FileMetadata};
 use crate::domain::snapshot::Snapshot;
 use crate::domain::volume::VolumeDescriptor;
 use crate::error::{CoreFsError, CoreFsResult};
@@ -42,16 +44,6 @@ struct ConfigSegment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct VolumeSegment {
     volume: VolumeDescriptor,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct InodeSegment {
-    inodes: Vec<Inode>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct JournalSegment {
-    journal_entries: Vec<JournalEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,27 +144,9 @@ pub fn save_volume_image(path: impl AsRef<Path>, state: &PersistedState) -> Core
             },
             path,
         )?,
-        serialize_segment(
-            *b"AINO",
-            &InodeSegment {
-                inodes: state.active_inodes.clone(),
-            },
-            path,
-        )?,
-        serialize_segment(
-            *b"DINO",
-            &InodeSegment {
-                inodes: state.deleted_inodes.clone(),
-            },
-            path,
-        )?,
-        serialize_segment(
-            *b"JOUR",
-            &JournalSegment {
-                journal_entries: state.journal_entries.clone(),
-            },
-            path,
-        )?,
+        serialize_inode_segment(*b"AINO", &state.active_inodes, path)?,
+        serialize_inode_segment(*b"DINO", &state.deleted_inodes, path)?,
+        serialize_journal_segment(*b"JOUR", &state.journal_entries, path)?,
         serialize_segment(
             *b"VERS",
             &VersionSegment {
@@ -187,7 +161,7 @@ pub fn save_volume_image(path: impl AsRef<Path>, state: &PersistedState) -> Core
             },
             path,
         )?,
-        serialize_segment(
+        serialize_snapshot_segment(
             *b"SNAP",
             &SnapshotSegment {
                 snapshots: state.snapshots.clone(),
@@ -371,6 +345,60 @@ fn serialize_segment<T: Serialize>(
     })
 }
 
+fn serialize_inode_segment(
+    kind: [u8; 4],
+    inodes: &[Inode],
+    path: &Path,
+) -> CoreFsResult<SegmentPayload> {
+    let payload = encode_inodes_payload(inodes).map_err(|error| {
+        CoreFsError::State(format!(
+            "failed to serialize CoreFS volume image segment {} for {}: {error}",
+            String::from_utf8_lossy(&kind),
+            path.display()
+        ))
+    })?;
+    Ok(SegmentPayload {
+        kind,
+        payload: encode_segment_frame(kind, &payload),
+    })
+}
+
+fn serialize_journal_segment(
+    kind: [u8; 4],
+    entries: &[JournalEntry],
+    path: &Path,
+) -> CoreFsResult<SegmentPayload> {
+    let payload = encode_journal_payload(entries).map_err(|error| {
+        CoreFsError::State(format!(
+            "failed to serialize CoreFS volume image segment {} for {}: {error}",
+            String::from_utf8_lossy(&kind),
+            path.display()
+        ))
+    })?;
+    Ok(SegmentPayload {
+        kind,
+        payload: encode_segment_frame(kind, &payload),
+    })
+}
+
+fn serialize_snapshot_segment(
+    kind: [u8; 4],
+    snapshot_segment: &SnapshotSegment,
+    path: &Path,
+) -> CoreFsResult<SegmentPayload> {
+    let payload = encode_snapshot_payload(snapshot_segment).map_err(|error| {
+        CoreFsError::State(format!(
+            "failed to serialize CoreFS volume image segment {} for {}: {error}",
+            String::from_utf8_lossy(&kind),
+            path.display()
+        ))
+    })?;
+    Ok(SegmentPayload {
+        kind,
+        payload: encode_segment_frame(kind, &payload),
+    })
+}
+
 fn serialize_bytes_segment(
     kind: [u8; 4],
     payload: &[u8],
@@ -407,6 +435,51 @@ fn deserialize_optional_segment<T: for<'de> Deserialize<'de>>(
         Ok(entry) => deserialize_segment(bytes, entry, path).map(Some),
         Err(_) => Ok(None),
     }
+}
+
+fn deserialize_inode_segment(
+    bytes: &[u8],
+    entry: &SegmentEntry,
+    path: &Path,
+) -> CoreFsResult<Vec<Inode>> {
+    let payload = segment_bytes(bytes, entry, path)?;
+    decode_inodes_payload(payload).map_err(|error| {
+        CoreFsError::State(format!(
+            "failed to deserialize CoreFS volume image segment {} from {}: {error}",
+            String::from_utf8_lossy(&entry.kind),
+            path.display()
+        ))
+    })
+}
+
+fn deserialize_journal_segment(
+    bytes: &[u8],
+    entry: &SegmentEntry,
+    path: &Path,
+) -> CoreFsResult<Vec<JournalEntry>> {
+    let payload = segment_bytes(bytes, entry, path)?;
+    decode_journal_payload(payload).map_err(|error| {
+        CoreFsError::State(format!(
+            "failed to deserialize CoreFS volume image segment {} from {}: {error}",
+            String::from_utf8_lossy(&entry.kind),
+            path.display()
+        ))
+    })
+}
+
+fn deserialize_snapshot_segment(
+    bytes: &[u8],
+    entry: &SegmentEntry,
+    path: &Path,
+) -> CoreFsResult<SnapshotSegment> {
+    let payload = segment_bytes(bytes, entry, path)?;
+    decode_snapshot_payload(payload).map_err(|error| {
+        CoreFsError::State(format!(
+            "failed to deserialize CoreFS volume image segment {} from {}: {error}",
+            String::from_utf8_lossy(&entry.kind),
+            path.display()
+        ))
+    })
 }
 
 fn segment_bytes<'a>(bytes: &'a [u8], entry: &SegmentEntry, path: &Path) -> CoreFsResult<&'a [u8]> {
@@ -521,6 +594,359 @@ fn parse_directory(bytes: &[u8]) -> CoreFsResult<Vec<SegmentEntry>> {
         });
     }
     Ok(entries)
+}
+
+fn encode_inodes_payload(inodes: &[Inode]) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    push_u32(&mut bytes, inodes.len() as u32);
+    for inode in inodes {
+        push_u64(&mut bytes, inode.id.0);
+        push_u8(&mut bytes, encode_inode_kind(inode.kind));
+        push_string(&mut bytes, &inode.path)?;
+        push_u64(&mut bytes, inode.size as u64);
+        push_system_time(&mut bytes, inode.created_at)?;
+        push_system_time(&mut bytes, inode.modified_at)?;
+        push_metadata(&mut bytes, &inode.metadata)?;
+    }
+    Ok(bytes)
+}
+
+fn decode_inodes_payload(bytes: &[u8]) -> Result<Vec<Inode>, String> {
+    let mut cursor = 0usize;
+    let count = read_u32(bytes, &mut cursor)? as usize;
+    let mut inodes = Vec::with_capacity(count);
+    for _ in 0..count {
+        let id = InodeId(read_u64(bytes, &mut cursor)?);
+        let kind = decode_inode_kind(read_u8(bytes, &mut cursor)?)?;
+        let path = read_string(bytes, &mut cursor)?;
+        let size = read_u64(bytes, &mut cursor)? as usize;
+        let created_at = read_system_time(bytes, &mut cursor)?;
+        let modified_at = read_system_time(bytes, &mut cursor)?;
+        let metadata = read_metadata(bytes, &mut cursor)?;
+        inodes.push(Inode {
+            id,
+            kind,
+            path,
+            size,
+            created_at,
+            modified_at,
+            metadata,
+        });
+    }
+    ensure_consumed(bytes, cursor)?;
+    Ok(inodes)
+}
+
+fn encode_journal_payload(entries: &[JournalEntry]) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    push_u32(&mut bytes, entries.len() as u32);
+    for entry in entries {
+        push_system_time(&mut bytes, entry.timestamp)?;
+        push_string(&mut bytes, &entry.operation)?;
+        push_string(&mut bytes, &entry.target)?;
+        push_string(&mut bytes, &entry.details)?;
+    }
+    Ok(bytes)
+}
+
+fn decode_journal_payload(bytes: &[u8]) -> Result<Vec<JournalEntry>, String> {
+    let mut cursor = 0usize;
+    let count = read_u32(bytes, &mut cursor)? as usize;
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        entries.push(JournalEntry {
+            timestamp: read_system_time(bytes, &mut cursor)?,
+            operation: read_string(bytes, &mut cursor)?,
+            target: read_string(bytes, &mut cursor)?,
+            details: read_string(bytes, &mut cursor)?,
+        });
+    }
+    ensure_consumed(bytes, cursor)?;
+    Ok(entries)
+}
+
+fn encode_snapshot_payload(segment: &SnapshotSegment) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    push_u64(&mut bytes, segment.next_snapshot_id);
+    push_u32(&mut bytes, segment.snapshots.len() as u32);
+    for snapshot in &segment.snapshots {
+        push_u64(&mut bytes, snapshot.id);
+        push_string(&mut bytes, &snapshot.name)?;
+        push_system_time(&mut bytes, snapshot.created_at)?;
+        push_u32(&mut bytes, snapshot.paths.len() as u32);
+        for path in &snapshot.paths {
+            push_string(&mut bytes, path)?;
+        }
+    }
+    Ok(bytes)
+}
+
+fn decode_snapshot_payload(bytes: &[u8]) -> Result<SnapshotSegment, String> {
+    let mut cursor = 0usize;
+    let next_snapshot_id = read_u64(bytes, &mut cursor)?;
+    let count = read_u32(bytes, &mut cursor)? as usize;
+    let mut snapshots = Vec::with_capacity(count);
+    for _ in 0..count {
+        let id = read_u64(bytes, &mut cursor)?;
+        let name = read_string(bytes, &mut cursor)?;
+        let created_at = read_system_time(bytes, &mut cursor)?;
+        let path_count = read_u32(bytes, &mut cursor)? as usize;
+        let mut paths = Vec::with_capacity(path_count);
+        for _ in 0..path_count {
+            paths.push(read_string(bytes, &mut cursor)?);
+        }
+        snapshots.push(Snapshot {
+            id,
+            name,
+            created_at,
+            paths,
+        });
+    }
+    ensure_consumed(bytes, cursor)?;
+    Ok(SnapshotSegment {
+        snapshots,
+        next_snapshot_id,
+    })
+}
+
+fn push_metadata(bytes: &mut Vec<u8>, metadata: &FileMetadata) -> Result<(), String> {
+    push_u32(bytes, metadata.tags.len() as u32);
+    for tag in &metadata.tags {
+        push_string(bytes, tag)?;
+    }
+    push_u32(bytes, metadata.attributes.len() as u32);
+    for (key, value) in &metadata.attributes {
+        push_string(bytes, key)?;
+        push_string(bytes, value)?;
+    }
+    push_u8(bytes, encode_content_class(&metadata.content_class));
+    push_u8(bytes, encode_storage_tier(&metadata.storage_tier));
+    push_u32(bytes, metadata.acl.len() as u32);
+    for entry in &metadata.acl {
+        push_acl_entry(bytes, entry)?;
+    }
+    push_bool(bytes, metadata.encrypted);
+    push_bool(bytes, metadata.compressed);
+    Ok(())
+}
+
+fn read_metadata(bytes: &[u8], cursor: &mut usize) -> Result<FileMetadata, String> {
+    let tag_count = read_u32(bytes, cursor)? as usize;
+    let mut tags = Vec::with_capacity(tag_count);
+    for _ in 0..tag_count {
+        tags.push(read_string(bytes, cursor)?);
+    }
+
+    let attr_count = read_u32(bytes, cursor)? as usize;
+    let mut attributes = Vec::with_capacity(attr_count);
+    for _ in 0..attr_count {
+        attributes.push((read_string(bytes, cursor)?, read_string(bytes, cursor)?));
+    }
+
+    let content_class = decode_content_class(read_u8(bytes, cursor)?)?;
+    let storage_tier = decode_storage_tier(read_u8(bytes, cursor)?)?;
+    let acl_count = read_u32(bytes, cursor)? as usize;
+    let mut acl = Vec::with_capacity(acl_count);
+    for _ in 0..acl_count {
+        acl.push(read_acl_entry(bytes, cursor)?);
+    }
+
+    Ok(FileMetadata {
+        tags,
+        attributes,
+        content_class,
+        storage_tier,
+        acl,
+        encrypted: read_bool(bytes, cursor)?,
+        compressed: read_bool(bytes, cursor)?,
+    })
+}
+
+fn push_acl_entry(bytes: &mut Vec<u8>, entry: &AclEntry) -> Result<(), String> {
+    push_principal(bytes, &entry.principal)?;
+    push_bool(bytes, entry.can_read);
+    push_bool(bytes, entry.can_write);
+    push_bool(bytes, entry.can_execute);
+    Ok(())
+}
+
+fn read_acl_entry(bytes: &[u8], cursor: &mut usize) -> Result<AclEntry, String> {
+    Ok(AclEntry {
+        principal: read_principal(bytes, cursor)?,
+        can_read: read_bool(bytes, cursor)?,
+        can_write: read_bool(bytes, cursor)?,
+        can_execute: read_bool(bytes, cursor)?,
+    })
+}
+
+fn push_principal(bytes: &mut Vec<u8>, principal: &Principal) -> Result<(), String> {
+    match principal {
+        Principal::User(value) => {
+            push_u8(bytes, 1);
+            push_string(bytes, value)?;
+        }
+        Principal::Group(value) => {
+            push_u8(bytes, 2);
+            push_string(bytes, value)?;
+        }
+        Principal::Role(value) => {
+            push_u8(bytes, 3);
+            push_string(bytes, value)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_principal(bytes: &[u8], cursor: &mut usize) -> Result<Principal, String> {
+    match read_u8(bytes, cursor)? {
+        1 => Ok(Principal::User(read_string(bytes, cursor)?)),
+        2 => Ok(Principal::Group(read_string(bytes, cursor)?)),
+        3 => Ok(Principal::Role(read_string(bytes, cursor)?)),
+        other => Err(format!("unknown principal kind {other}")),
+    }
+}
+
+fn encode_inode_kind(kind: InodeKind) -> u8 {
+    match kind {
+        InodeKind::File => 1,
+        InodeKind::Directory => 2,
+        InodeKind::Symlink => 3,
+    }
+}
+
+fn decode_inode_kind(value: u8) -> Result<InodeKind, String> {
+    match value {
+        1 => Ok(InodeKind::File),
+        2 => Ok(InodeKind::Directory),
+        3 => Ok(InodeKind::Symlink),
+        other => Err(format!("unknown inode kind {other}")),
+    }
+}
+
+fn encode_content_class(value: &ContentClass) -> u8 {
+    match value {
+        ContentClass::Text => 1,
+        ContentClass::Binary => 2,
+        ContentClass::Image => 3,
+        ContentClass::SourceCode => 4,
+        ContentClass::Archive => 5,
+        ContentClass::Unknown => 6,
+    }
+}
+
+fn decode_content_class(value: u8) -> Result<ContentClass, String> {
+    match value {
+        1 => Ok(ContentClass::Text),
+        2 => Ok(ContentClass::Binary),
+        3 => Ok(ContentClass::Image),
+        4 => Ok(ContentClass::SourceCode),
+        5 => Ok(ContentClass::Archive),
+        6 => Ok(ContentClass::Unknown),
+        other => Err(format!("unknown content class {other}")),
+    }
+}
+
+fn encode_storage_tier(value: &StorageTier) -> u8 {
+    match value {
+        StorageTier::Hot => 1,
+        StorageTier::Warm => 2,
+        StorageTier::Cold => 3,
+    }
+}
+
+fn decode_storage_tier(value: u8) -> Result<StorageTier, String> {
+    match value {
+        1 => Ok(StorageTier::Hot),
+        2 => Ok(StorageTier::Warm),
+        3 => Ok(StorageTier::Cold),
+        other => Err(format!("unknown storage tier {other}")),
+    }
+}
+
+fn push_system_time(bytes: &mut Vec<u8>, time: SystemTime) -> Result<(), String> {
+    let duration = time
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system time before unix epoch is unsupported".to_string())?;
+    push_u64(bytes, duration.as_secs());
+    push_u32(bytes, duration.subsec_nanos());
+    Ok(())
+}
+
+fn read_system_time(bytes: &[u8], cursor: &mut usize) -> Result<SystemTime, String> {
+    let secs = read_u64(bytes, cursor)?;
+    let nanos = read_u32(bytes, cursor)?;
+    Ok(UNIX_EPOCH + std::time::Duration::new(secs, nanos))
+}
+
+fn push_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), String> {
+    let len = u32::try_from(value.len()).map_err(|_| "string too large".to_string())?;
+    push_u32(bytes, len);
+    bytes.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn read_string(bytes: &[u8], cursor: &mut usize) -> Result<String, String> {
+    let len = read_u32(bytes, cursor)? as usize;
+    let raw = read_exact(bytes, cursor, len)?;
+    String::from_utf8(raw.to_vec()).map_err(|error| format!("invalid utf8 string: {error}"))
+}
+
+fn push_bool(bytes: &mut Vec<u8>, value: bool) {
+    push_u8(bytes, u8::from(value));
+}
+
+fn read_bool(bytes: &[u8], cursor: &mut usize) -> Result<bool, String> {
+    match read_u8(bytes, cursor)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        other => Err(format!("invalid bool value {other}")),
+    }
+}
+
+fn push_u8(bytes: &mut Vec<u8>, value: u8) {
+    bytes.push(value);
+}
+
+fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn read_u8(bytes: &[u8], cursor: &mut usize) -> Result<u8, String> {
+    let raw = read_exact(bytes, cursor, 1)?;
+    Ok(raw[0])
+}
+
+fn read_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, String> {
+    let raw = read_exact(bytes, cursor, 4)?;
+    Ok(u32::from_le_bytes(raw.try_into().expect("fixed slice")))
+}
+
+fn read_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64, String> {
+    let raw = read_exact(bytes, cursor, 8)?;
+    Ok(u64::from_le_bytes(raw.try_into().expect("fixed slice")))
+}
+
+fn read_exact<'a>(bytes: &'a [u8], cursor: &mut usize, len: usize) -> Result<&'a [u8], String> {
+    let end = cursor
+        .checked_add(len)
+        .ok_or_else(|| "binary cursor overflow".to_string())?;
+    let slice = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| "truncated binary payload".to_string())?;
+    *cursor = end;
+    Ok(slice)
+}
+
+fn ensure_consumed(bytes: &[u8], cursor: usize) -> Result<(), String> {
+    if cursor == bytes.len() {
+        Ok(())
+    } else {
+        Err("binary payload has trailing bytes".to_string())
+    }
 }
 
 fn encode_superblock(superblock: &Superblock) -> Vec<u8> {
@@ -699,26 +1125,31 @@ fn persisted_state_from_entries(
     let volume = deserialize_optional_segment::<VolumeSegment>(bytes, entries, b"VOLM", path)?
         .map(|segment| segment.volume)
         .unwrap_or_else(|| VolumeDescriptor::from_config(&config));
-    let active = deserialize_optional_segment::<InodeSegment>(bytes, entries, b"AINO", path)?
-        .map(|segment| segment.inodes)
-        .unwrap_or_default();
-    let deleted = deserialize_optional_segment::<InodeSegment>(bytes, entries, b"DINO", path)?
-        .map(|segment| segment.inodes)
-        .unwrap_or_default();
-    let journal = deserialize_optional_segment::<JournalSegment>(bytes, entries, b"JOUR", path)?
-        .map(|segment| segment.journal_entries)
-        .unwrap_or_default();
+    let active = match find_segment(entries, b"AINO") {
+        Ok(entry) => deserialize_inode_segment(bytes, entry, path)?,
+        Err(_) => Vec::new(),
+    };
+    let deleted = match find_segment(entries, b"DINO") {
+        Ok(entry) => deserialize_inode_segment(bytes, entry, path)?,
+        Err(_) => Vec::new(),
+    };
+    let journal = match find_segment(entries, b"JOUR") {
+        Ok(entry) => deserialize_journal_segment(bytes, entry, path)?,
+        Err(_) => Vec::new(),
+    };
     let versions = deserialize_optional_segment::<VersionSegment>(bytes, entries, b"VERS", path)?
         .map(|segment| segment.versions)
         .unwrap_or_default();
     let sync = deserialize_optional_segment::<SyncSegment>(bytes, entries, b"SYNC", path)?
         .map(|segment| segment.sync_statuses)
         .unwrap_or_default();
-    let snapshots = deserialize_optional_segment::<SnapshotSegment>(bytes, entries, b"SNAP", path)?
-        .unwrap_or(SnapshotSegment {
+    let snapshots = match find_segment(entries, b"SNAP") {
+        Ok(entry) => deserialize_snapshot_segment(bytes, entry, path)?,
+        Err(_) => SnapshotSegment {
             snapshots: Vec::new(),
             next_snapshot_id: 0,
-        });
+        },
+    };
 
     let block_records = match (
         deserialize_optional_segment::<BlockDescriptorSegment>(bytes, entries, b"BLKD", path)?,
@@ -777,26 +1208,31 @@ fn persisted_state_without_blocks(
     let volume = deserialize_optional_segment::<VolumeSegment>(bytes, entries, b"VOLM", path)?
         .map(|segment| segment.volume)
         .unwrap_or_else(|| VolumeDescriptor::from_config(&config));
-    let active = deserialize_optional_segment::<InodeSegment>(bytes, entries, b"AINO", path)?
-        .map(|segment| segment.inodes)
-        .unwrap_or_default();
-    let deleted = deserialize_optional_segment::<InodeSegment>(bytes, entries, b"DINO", path)?
-        .map(|segment| segment.inodes)
-        .unwrap_or_default();
-    let journal = deserialize_optional_segment::<JournalSegment>(bytes, entries, b"JOUR", path)?
-        .map(|segment| segment.journal_entries)
-        .unwrap_or_default();
+    let active = match find_segment(entries, b"AINO") {
+        Ok(entry) => deserialize_inode_segment(bytes, entry, path)?,
+        Err(_) => Vec::new(),
+    };
+    let deleted = match find_segment(entries, b"DINO") {
+        Ok(entry) => deserialize_inode_segment(bytes, entry, path)?,
+        Err(_) => Vec::new(),
+    };
+    let journal = match find_segment(entries, b"JOUR") {
+        Ok(entry) => deserialize_journal_segment(bytes, entry, path)?,
+        Err(_) => Vec::new(),
+    };
     let versions = deserialize_optional_segment::<VersionSegment>(bytes, entries, b"VERS", path)?
         .map(|segment| segment.versions)
         .unwrap_or_default();
     let sync = deserialize_optional_segment::<SyncSegment>(bytes, entries, b"SYNC", path)?
         .map(|segment| segment.sync_statuses)
         .unwrap_or_default();
-    let snapshots = deserialize_optional_segment::<SnapshotSegment>(bytes, entries, b"SNAP", path)?
-        .unwrap_or(SnapshotSegment {
+    let snapshots = match find_segment(entries, b"SNAP") {
+        Ok(entry) => deserialize_snapshot_segment(bytes, entry, path)?,
+        Err(_) => SnapshotSegment {
             snapshots: Vec::new(),
             next_snapshot_id: 0,
-        });
+        },
+    };
 
     Ok(PersistedState {
         config,
