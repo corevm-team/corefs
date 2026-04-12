@@ -81,6 +81,7 @@ pub fn diagnose_mount(
     checks.push(diagnose_fuse_configuration());
     checks.push(diagnose_namespace_context());
     checks.push(diagnose_lsm_context());
+    checks.push(diagnose_recent_fuse_denials());
 
     MountDiagnosisReport {
         image_path,
@@ -582,6 +583,53 @@ fn diagnose_lsm_context() -> DiagnosticCheck {
     }
 }
 
+fn diagnose_recent_fuse_denials() -> DiagnosticCheck {
+    let recent_logs = recent_kernel_log_excerpt().or_else(recent_journal_excerpt);
+
+    let Some(logs) = recent_logs else {
+        return DiagnosticCheck {
+            name: "recent-denials".to_string(),
+            status: DiagnosticStatus::Warn,
+            detail: "keine Kernel-/Journal-Logs lesbar; FUSE- oder AppArmor-Denials konnten nicht automatisch geprueft werden".to_string(),
+        };
+    };
+
+    let mut matches = logs
+        .lines()
+        .filter(|line| {
+            let lowered = line.to_ascii_lowercase();
+            lowered.contains("fusermount3")
+                || lowered.contains("fuse")
+                || lowered.contains("apparmor=\"denied\"")
+        })
+        .collect::<Vec<_>>();
+
+    if matches.is_empty() {
+        return DiagnosticCheck {
+            name: "recent-denials".to_string(),
+            status: DiagnosticStatus::Pass,
+            detail: "keine offensichtlichen juengsten FUSE-/AppArmor-Denials in den verfuegbaren Kernel-Logs gefunden".to_string(),
+        };
+    }
+
+    matches.truncate(3);
+    let excerpt = matches.join(" | ");
+    let status = if excerpt.contains("apparmor=\"DENIED\"")
+        || excerpt.contains("apparmor=\"denied\"")
+        || excerpt.contains("Operation not permitted")
+    {
+        DiagnosticStatus::Warn
+    } else {
+        DiagnosticStatus::Pass
+    };
+
+    DiagnosticCheck {
+        name: "recent-denials".to_string(),
+        status,
+        detail: excerpt,
+    }
+}
+
 fn writable_parent_for(path: &Path) -> CoreFsResult<PathBuf> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     if !parent.exists() {
@@ -660,6 +708,14 @@ fn command_output<const N: usize>(program: &str, args: [&str; N]) -> Option<Stri
     } else {
         Some(stderr)
     }
+}
+
+fn recent_kernel_log_excerpt() -> Option<String> {
+    command_output("dmesg", ["--color=never"])
+}
+
+fn recent_journal_excerpt() -> Option<String> {
+    command_output("journalctl", ["-k", "-n", "200", "--no-pager"])
 }
 
 #[cfg(test)]

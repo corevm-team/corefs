@@ -158,6 +158,7 @@ Hilfsskripte:
 ```bash
 ./scripts/corefs-mkfs.sh ./corefs-volume.img
 ./scripts/corefs-doctor.sh ./corefs-volume.img ./mnt/corefs
+./scripts/corefs-trace-mount.sh ./corefs-volume.img ./mnt/corefs ./corefs-mount-trace.log
 ./scripts/corefs-mount.sh ./corefs-volume.img ./mnt/corefs
 ./scripts/corefs-umount.sh ./mnt/corefs
 ./scripts/corefs-benchmark.sh ./corefs-volume.img ./mnt/corefs ./PERFORMANCE_LOG.md
