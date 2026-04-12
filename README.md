@@ -1,6 +1,6 @@
 # CoreFS
 
-`CoreFS` ist ein in Rust entwickeltes, plattformneutrales Dateisystemprojekt mit dem Ziel, als natives Standard-Dateisystem eines eigenen Betriebssystems eingesetzt zu werden. Das Repository enthält aktuell einen strukturierten, getesteten Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts- und Performance-Prototyp mit klarer Modultrennung, CLI-Einstiegspunkt und einer dokumentierten Zielarchitektur.
+`CoreFS` ist ein in Rust entwickeltes, plattformneutrales Dateisystemprojekt mit dem Ziel, als natives Standard-Dateisystem eines eigenen Betriebssystems eingesetzt zu werden. Das Repository enthält aktuell einen strukturierten, getesteten Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp mit klarer Modultrennung, CLI-Einstiegspunkt und einer dokumentierten Zielarchitektur.
 
 ## Ziel
 
@@ -21,7 +21,7 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `64/64` Tests erfolgreich
+- Test-Status: `66/66` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -80,6 +80,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Speichern und Laden eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks (`SUPR` und `SUP2`), Generation Countern, Prüfsummen und getrennten Fachsegmenten wie `AINO`, `DINO`, `JOUR`, `VERS`, `SNAP`, `BLKD` und `DATA`
 - Dateien, Verzeichnisse und symbolische Links
 - Lesen und Schreiben von Inhalten
+- Linux-Testadapter über FUSE mit `.img`-Dateien als Mount-Backend
 - Journaling von Operationen
 - Basis-Versionierung
 - Snapshots
@@ -97,6 +98,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - best-effort-Recovery über Header und Segmenttabelle, auch wenn keine gültige Superblock-Kopie mehr vorhanden ist
 - Rekonstruktion einzelner Segmenteinträge aus bekannter Segmentreihenfolge und JSON-validierbaren Payload-Grenzen
 - plattformneutrales Runtime-Blueprint-Modell
+- Linux-spezifischer FUSE-Adapter als optionaler Test- und Integrationspfad
 - synthetisches Performance-Tool
 - Markdown-basierte Performance-Historie
 - konfigurierbare Benchmark-Profile fuer verschiedene Lastbilder
@@ -201,6 +203,12 @@ Volume-Image speichern:
 cargo run -- save-image ./corefs-volume.img
 ```
 
+Linux-Test-Image erzeugen:
+
+```bash
+cargo run -- mkfs-image ./corefs-linux.img --demo
+```
+
 Volume-Image laden:
 
 ```bash
@@ -235,6 +243,13 @@ Volume-Image prüfen und redundante Superblocks reparieren:
 
 ```bash
 cargo run -- fsck-image ./corefs-volume.img --repair
+```
+
+Image unter Linux per FUSE mounten:
+
+```bash
+mkdir -p /tmp/corefs-mnt
+cargo run -- mount-image ./corefs-linux.img /tmp/corefs-mnt
 ```
 
 Verfuegbare Profile:

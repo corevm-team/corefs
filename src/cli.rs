@@ -1,6 +1,8 @@
 use crate::app::CoreFsService;
 use crate::config::CoreFsConfig;
 use crate::error::{CoreFsError, CoreFsResult};
+#[cfg(target_os = "linux")]
+use crate::platform::linux_fuse;
 use crate::platform::performance::{
     BenchmarkConfig, BenchmarkProfile, append_benchmark_markdown, run_benchmark,
 };
@@ -98,6 +100,24 @@ where
             fs.save_image_to_path(path)?;
             println!("saved volume image to {path}");
         }
+        "mkfs-image" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for mkfs-image".to_string())
+            })?;
+            let include_demo = args.iter().any(|arg| arg == "--demo");
+            #[cfg(target_os = "linux")]
+            {
+                linux_fuse::create_image(path, include_demo)?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = include_demo;
+                return Err(CoreFsError::InvalidCommand(
+                    "mkfs-image is only available on Linux builds".to_string(),
+                ));
+            }
+            println!("created CoreFS image at {path}");
+        }
         "load" => {
             let path = args
                 .get(2)
@@ -160,6 +180,24 @@ where
                     report.directory_checksum_valid, report.payload_checksum_valid
                 );
                 println!("block_descriptors: {}", report.block_descriptors);
+            }
+        }
+        "mount-image" => {
+            let image_path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing image path for mount-image".to_string())
+            })?;
+            let mount_point = args.get(3).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing mount point for mount-image".to_string())
+            })?;
+            #[cfg(target_os = "linux")]
+            {
+                linux_fuse::mount_image(image_path, mount_point)?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(CoreFsError::InvalidCommand(
+                    "mount-image is only available on Linux builds".to_string(),
+                ));
             }
         }
         "benchmark" => {
@@ -235,9 +273,11 @@ fn print_usage() {
     println!("  read <path>");
     println!("  save <path>");
     println!("  save-image <path>");
+    println!("  mkfs-image <path> [--demo]");
     println!("  load <path>");
     println!("  load-image <path>");
     println!("  fsck-image <path> [--repair]");
+    println!("  mount-image <image-path> <mount-point>");
     println!(
         "  benchmark [--profile <name>] [--files <n>] [--payload <bytes>] [--snapshots <n>] [--saves <n>]"
     );
@@ -376,6 +416,12 @@ mod tests {
             ],
             vec![
                 "corefs".to_string(),
+                "mkfs-image".to_string(),
+                temp_path("mkfs-image", "img"),
+                "--demo".to_string(),
+            ],
+            vec![
+                "corefs".to_string(),
                 "fsck-image".to_string(),
                 fsck_image_path.clone(),
             ],
@@ -464,11 +510,17 @@ mod tests {
         let save_image = run(vec!["corefs".to_string(), "save-image".to_string()]);
         assert!(matches!(save_image, Err(CoreFsError::InvalidCommand(_))));
 
+        let mkfs_image = run(vec!["corefs".to_string(), "mkfs-image".to_string()]);
+        assert!(matches!(mkfs_image, Err(CoreFsError::InvalidCommand(_))));
+
         let load_image = run(vec!["corefs".to_string(), "load-image".to_string()]);
         assert!(matches!(load_image, Err(CoreFsError::InvalidCommand(_))));
 
         let fsck_image = run(vec!["corefs".to_string(), "fsck-image".to_string()]);
         assert!(matches!(fsck_image, Err(CoreFsError::InvalidCommand(_))));
+
+        let mount_image = run(vec!["corefs".to_string(), "mount-image".to_string()]);
+        assert!(matches!(mount_image, Err(CoreFsError::InvalidCommand(_))));
 
         let benchmark_log = run(vec!["corefs".to_string(), "benchmark-log".to_string()]);
         assert!(matches!(benchmark_log, Err(CoreFsError::InvalidCommand(_))));

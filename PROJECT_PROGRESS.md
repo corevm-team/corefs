@@ -2,13 +2,13 @@
 
 ## Überblick
 
-`CoreFS` ist ein in Rust entwickeltes, plattformneutrales Dateisystemprojekt mit Fokus auf den nativen Einsatz als Standard-Dateisystem des eigenen Betriebssystems. Das Repository enthält aktuell ein strukturiertes, kompilierbares Grundsystem mit klarer Modultrennung, CLI-Einstiegspunkt, Service-Schichten, Persistenzpfad, Integritätswerkzeugen, Performance-Tooling und einer breiten Testsuite.
+`CoreFS` ist ein in Rust entwickeltes, plattformneutrales Dateisystemprojekt mit Fokus auf den nativen Einsatz als Standard-Dateisystem des eigenen Betriebssystems. Das Repository enthält aktuell ein strukturiertes, kompilierbares Grundsystem mit klarer Modultrennung, CLI-Einstiegspunkt, Service-Schichten, Persistenzpfad, Integritätswerkzeugen, Linux-FUSE-Testadapter, Performance-Tooling und einer breiten Testsuite.
 
 ## Aktueller Status
 
-**Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts- und Performance-Prototyp  
+**Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `64/64` Tests erfolgreich  
+**Test-Status:** `66/66` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -35,6 +35,7 @@
 - Formatierung eines CoreFS-Volumes im Userspace-Modell
 - Persistenz eines kompletten CoreFS-Zustands als JSON-basiertes Zwischenformat
 - Persistenz eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks, Generation Countern und getrennten Fachsegmenten
+- Linux-Testadapter über FUSE zum read-only Mounten von `.img`-Dateien
 - Erzeugen von Dateien, Verzeichnissen und symbolischen Links
 - Lesen und Schreiben von Dateiinhalten
 - Journaling von Operationen
@@ -59,6 +60,7 @@
 - optionale Kompatibilitätsziele als Adapter-Konzept
 - Tool-Registry für `mkfs`, `fsck` und Administration
 - Tool-Registry für Benchmarking
+- Linux-FUSE-Mountpfad für Image-basierte Integrationstests
 
 ### Qualitätssicherung
 
@@ -122,6 +124,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 
 - plattformneutrales Runtime-Integrationsmodell
 - Blueprint für Verwaltungswerkzeuge
+- optionaler Linux-FUSE-Adapter für `.img`-basierte Dateisystemtests
 - Performance-Benchmarking und Protokollierung
 
 ### `src/cli.rs`
@@ -142,6 +145,7 @@ Die Datei [features_corefs.md](/daten1/development/brian/corefs/features_corefs.
 - Persistenz eines vollständigen CoreFS-Zustands
 - Performance-Messung und Ergebnisprotokollierung
 - strukturelle Prüfung persistierter Volume-Images
+- Linux-Nutzung und Testbarkeit über gemountete `.img`-Dateien
 - profilbasierte Performance-Messung mit variablen Parametern
 
 Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
@@ -186,6 +190,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 ## Wichtige Hinweise
 
 - Das Projekt ist aktuell ein strukturierter, getesteter Kern-, Persistenz- und Volume-Layout-Prototyp und noch kein produktionsreifes Dateisystem.
+- Der Linux-Mountpfad ist derzeit bewusst read-only ausgelegt, damit Images sicher und reproduzierbar getestet werden können.
 - Performance-Messungen werden jetzt über `benchmark` und `benchmark-log` reproduzierbar ausführbar.
 - Die vorhandene Testsuite ist stark für die aktuelle In-Memory-Implementierung, aber keine Garantie für `100%` messbare Coverage, da in der Umgebung keine Coverage-Tools installiert sind.
 - `.codex` ist inzwischen als projektinterne Vorgabedatei befüllt.

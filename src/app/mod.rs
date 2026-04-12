@@ -298,6 +298,10 @@ impl CoreFsService {
         Ok(())
     }
 
+    pub fn export_state(&self) -> PersistedState {
+        self.persisted_state()
+    }
+
     pub fn stats(&self) -> FsStats {
         let versions = self
             .catalog
