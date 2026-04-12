@@ -80,7 +80,7 @@ Einfacher Einstieg für Demo- und Verwaltungsoperationen.
 Der Prototyp deckt bereits folgende Bereiche ab:
 
 - Formatierung eines CoreFS-Volumes im In-Memory-Modell
-- Speichern und Laden eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks (`SUPR` und `SUP2`), Generation Countern, Prüfsummen und getrennten Fachsegmenten wie `AINO`, `DINO`, `JOUR`, `VERS`, `SNAP`, `BLKD` und `DATA`
+- Speichern und Laden eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks (`SUPR` und `SUP2`), Generation Countern, Prüfsummen und binären Segment-Frames für Fachsegmente wie `AINO`, `DINO`, `JOUR`, `VERS`, `SNAP`, `BLKD` und `DATA`
 - Dateien, Verzeichnisse und symbolische Links
 - Lesen und Schreiben von Inhalten
 - Linux-FUSE-Adapter mit `.img`-Dateien als Mount-Backend (read-only und read-write mit Writeback)
@@ -99,7 +99,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Auswahl der besten gültigen Superblock-Kopie über Generation Counter
 - Journal-basierte Kanonisierung aktiver und gelöschter Inodes beim Image-Repair
 - best-effort-Recovery über Header und Segmenttabelle, auch wenn keine gültige Superblock-Kopie mehr vorhanden ist
-- Rekonstruktion einzelner Segmenteinträge aus bekannter Segmentreihenfolge und JSON-validierbaren Payload-Grenzen
+- Rekonstruktion einzelner Segmenteinträge aus bekannter Segmentreihenfolge und validierbaren binären Segment-Frames
 - plattformneutrales Runtime-Blueprint-Modell
 - Linux-spezifischer FUSE-Adapter als optionaler Test- und Integrationspfad
 - synthetisches Performance-Tool
@@ -354,7 +354,7 @@ cargo run -- read /etc/corefs.conf
 
 Die nächste sinnvolle Ausbaufolge ist:
 
-1. Die noch JSON-basierten Segment-Payloads im Volume-Image schrittweise durch ein echtes blockorientiertes Binärformat ersetzen.
+1. Das aktuelle segmentierte Binärformat weiter in Richtung eines echten blockorientierten On-Disk-Layouts mit stärker spezialisierter Segmentcodierung weiterentwickeln.
 2. Journal und Metadaten dauerhaft und crash-konsistent speichern.
 3. VFS- und Kernel-Integrationsschnittstelle für das eigene Betriebssystem entwerfen.
 4. Sicherheits-, Integritäts- und Recovery-Funktionen auf reale Laufzeitmechanismen anheben.

@@ -33,7 +33,7 @@
 ### Kernfunktionen im Prototyp
 
 - Formatierung eines CoreFS-Volumes im Userspace-Modell
-- Persistenz eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks, Generation Countern und getrennten Fachsegmenten
+- Persistenz eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks, Generation Countern und binären Segment-Frames für Fachsegmente
 - Linux-Testadapter über FUSE zum read-only Mounten von `.img`-Dateien
 - Erzeugen von Dateien, Verzeichnissen und symbolischen Links
 - Lesen und Schreiben von Dateiinhalten
@@ -106,7 +106,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - Inode-Allokation
 - Blockspeicher im In-Memory-Modell
 - Katalog für aktive und gelöschte Einträge
-- mehrsegmentiges binäres Volume-Image-Format mit Segmenttabelle, Alignment-Regeln, redundanten Superblocks, Generation Countern und Prüflogik als weiterer Persistenzpfad
+- mehrsegmentiges binäres Volume-Image-Format mit Segmenttabelle, Alignment-Regeln, redundanten Superblocks, Generation Countern, binären Segment-Frames und Prüflogik als weiterer Persistenzpfad
 
 ### `src/services`
 
@@ -159,7 +159,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 
 - blockorientiertes On-Disk-Format definieren
 - Metadaten-Layout festlegen
-- die noch JSON-basierten Segment-Payloads im Volume-Image schrittweise in ein produktionsnahes Binärformat überführen
+- die aktuellen binären Segment-Frames schrittweise in ein noch stärker blockorientiertes und spezialisierteres On-Disk-Format überführen
 - Block- und Journal-Speicherung crash-konsistent machen
 - Performance-Baseline für zukünftige Persistenzumstellungen fortlaufend protokollieren
 

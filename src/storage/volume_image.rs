@@ -20,6 +20,7 @@ const SEGMENT_ALIGNMENT: usize = 64;
 const SEGMENT_ENTRY_SIZE: usize = 24;
 const HEADER_SIZE: usize = 16;
 const SUPERBLOCK_SIZE: usize = 52;
+const SEGMENT_FRAME_SIZE: usize = 24;
 const EXPECTED_SEGMENT_KINDS: [[u8; 4]; 12] = [
     *b"SUPR", *b"SUP2", *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC",
     *b"SNAP", *b"BLKD", *b"DATA",
@@ -135,8 +136,8 @@ pub fn save_volume_image(path: impl AsRef<Path>, state: &PersistedState) -> Core
     let (descriptors, block_data) = split_blocks(&state.block_records);
 
     let mut segments = vec![
-        segment_from_bytes(*b"SUPR", vec![0; SUPERBLOCK_SIZE]),
-        segment_from_bytes(*b"SUP2", vec![0; SUPERBLOCK_SIZE]),
+        raw_segment_from_bytes(*b"SUPR", vec![0; SUPERBLOCK_SIZE]),
+        raw_segment_from_bytes(*b"SUP2", vec![0; SUPERBLOCK_SIZE]),
         serialize_segment(
             *b"CNFG",
             &ConfigSegment {
@@ -195,7 +196,7 @@ pub fn save_volume_image(path: impl AsRef<Path>, state: &PersistedState) -> Core
             path,
         )?,
         serialize_segment(*b"BLKD", &BlockDescriptorSegment { descriptors }, path)?,
-        segment_from_bytes(*b"DATA", block_data),
+        serialize_bytes_segment(*b"DATA", &block_data, path)?,
     ];
 
     let segment_count = segments.len();
@@ -341,7 +342,14 @@ struct SegmentPayload {
     payload: Vec<u8>,
 }
 
-fn segment_from_bytes(kind: [u8; 4], payload: Vec<u8>) -> SegmentPayload {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SegmentFrameHeader {
+    kind: [u8; 4],
+    payload_length: u64,
+    payload_checksum: u64,
+}
+
+fn raw_segment_from_bytes(kind: [u8; 4], payload: Vec<u8>) -> SegmentPayload {
     SegmentPayload { kind, payload }
 }
 
@@ -350,14 +358,28 @@ fn serialize_segment<T: Serialize>(
     value: &T,
     path: &Path,
 ) -> CoreFsResult<SegmentPayload> {
-    let payload = serde_json::to_vec(value).map_err(|error| {
+    let payload = bincode::serialize(value).map_err(|error| {
         CoreFsError::State(format!(
             "failed to serialize CoreFS volume image segment {} for {}: {error}",
             String::from_utf8_lossy(&kind),
             path.display()
         ))
     })?;
-    Ok(SegmentPayload { kind, payload })
+    Ok(SegmentPayload {
+        kind,
+        payload: encode_segment_frame(kind, &payload),
+    })
+}
+
+fn serialize_bytes_segment(
+    kind: [u8; 4],
+    payload: &[u8],
+    _path: &Path,
+) -> CoreFsResult<SegmentPayload> {
+    Ok(SegmentPayload {
+        kind,
+        payload: encode_segment_frame(kind, payload),
+    })
 }
 
 fn deserialize_segment<T: for<'de> Deserialize<'de>>(
@@ -366,7 +388,7 @@ fn deserialize_segment<T: for<'de> Deserialize<'de>>(
     path: &Path,
 ) -> CoreFsResult<T> {
     let payload = segment_bytes(bytes, entry, path)?;
-    serde_json::from_slice(payload).map_err(|error| {
+    bincode::deserialize(payload).map_err(|error| {
         CoreFsError::State(format!(
             "failed to deserialize CoreFS volume image segment {} from {}: {error}",
             String::from_utf8_lossy(&entry.kind),
@@ -396,13 +418,22 @@ fn segment_bytes<'a>(bytes: &'a [u8], entry: &SegmentEntry, path: &Path) -> Core
             path.display()
         ))
     })?;
-    bytes.get(start..end).ok_or_else(|| {
-        CoreFsError::State(format!(
-            "truncated CoreFS volume image segment {} in {}",
-            String::from_utf8_lossy(&entry.kind),
-            path.display()
-        ))
-    })
+    bytes
+        .get(start..end)
+        .ok_or_else(|| {
+            CoreFsError::State(format!(
+                "truncated CoreFS volume image segment {} in {}",
+                String::from_utf8_lossy(&entry.kind),
+                path.display()
+            ))
+        })
+        .and_then(|segment| {
+            if entry.kind == *b"SUPR" || entry.kind == *b"SUP2" {
+                Ok(segment)
+            } else {
+                decode_segment_frame(segment, &entry.kind, path)
+            }
+        })
 }
 
 fn find_segment<'a>(entries: &'a [SegmentEntry], kind: &[u8; 4]) -> CoreFsResult<&'a SegmentEntry> {
@@ -503,6 +534,70 @@ fn encode_superblock(superblock: &Superblock) -> Vec<u8> {
     bytes.extend_from_slice(&superblock.directory_checksum.to_le_bytes());
     bytes.extend_from_slice(&superblock.payload_checksum.to_le_bytes());
     bytes
+}
+
+fn encode_segment_frame(kind: [u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(SEGMENT_FRAME_SIZE + payload.len());
+    bytes.extend_from_slice(&kind);
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&checksum(payload).to_le_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+fn decode_segment_frame<'a>(
+    bytes: &'a [u8],
+    expected_kind: &[u8; 4],
+    path: &Path,
+) -> CoreFsResult<&'a [u8]> {
+    let header = parse_segment_frame_header(bytes, path)?;
+    if &header.kind != expected_kind {
+        return Err(CoreFsError::State(format!(
+            "mismatched CoreFS segment frame kind {} in {}",
+            String::from_utf8_lossy(&header.kind),
+            path.display()
+        )));
+    }
+    let payload_start = SEGMENT_FRAME_SIZE;
+    let payload_end = payload_start
+        .checked_add(header.payload_length as usize)
+        .ok_or_else(|| {
+            CoreFsError::State(format!(
+                "invalid CoreFS segment payload range {} in {}",
+                String::from_utf8_lossy(expected_kind),
+                path.display()
+            ))
+        })?;
+    let payload = bytes.get(payload_start..payload_end).ok_or_else(|| {
+        CoreFsError::State(format!(
+            "truncated CoreFS segment payload {} in {}",
+            String::from_utf8_lossy(expected_kind),
+            path.display()
+        ))
+    })?;
+    if checksum(payload) != header.payload_checksum {
+        return Err(CoreFsError::State(format!(
+            "invalid CoreFS segment payload checksum {} in {}",
+            String::from_utf8_lossy(expected_kind),
+            path.display()
+        )));
+    }
+    Ok(payload)
+}
+
+fn parse_segment_frame_header(bytes: &[u8], path: &Path) -> CoreFsResult<SegmentFrameHeader> {
+    if bytes.len() < SEGMENT_FRAME_SIZE {
+        return Err(CoreFsError::State(format!(
+            "truncated CoreFS segment frame in {}",
+            path.display()
+        )));
+    }
+    Ok(SegmentFrameHeader {
+        kind: bytes[0..4].try_into().expect("fixed slice"),
+        payload_length: u64::from_le_bytes(bytes[8..16].try_into().expect("fixed slice")),
+        payload_checksum: u64::from_le_bytes(bytes[16..24].try_into().expect("fixed slice")),
+    })
 }
 
 fn decode_superblock(bytes: &[u8]) -> CoreFsResult<Superblock> {
@@ -809,7 +904,7 @@ fn reconstruct_directory_from_payloads(
     for kind in [
         *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC", *b"SNAP",
     ] {
-        let length = detect_json_segment_length(bytes, offset, &kind, path)?;
+        let length = detect_framed_segment_length(bytes, offset, &kind, path)?;
         entries.push(SegmentEntry {
             kind,
             offset: offset as u64,
@@ -818,7 +913,7 @@ fn reconstruct_directory_from_payloads(
         offset = align_up(offset + length, SEGMENT_ALIGNMENT);
     }
 
-    let descriptor_length = detect_json_segment_length(bytes, offset, b"BLKD", path)?;
+    let descriptor_length = detect_framed_segment_length(bytes, offset, b"BLKD", path)?;
     let descriptor_entry = SegmentEntry {
         kind: *b"BLKD",
         offset: offset as u64,
@@ -828,12 +923,13 @@ fn reconstruct_directory_from_payloads(
     offset = align_up(offset + descriptor_length, SEGMENT_ALIGNMENT);
 
     let descriptors: BlockDescriptorSegment = deserialize_segment(bytes, &descriptor_entry, path)?;
-    let data_length = descriptors
+    let data_payload_length = descriptors
         .descriptors
         .iter()
         .map(|descriptor| descriptor.offset + descriptor.length)
         .max()
         .unwrap_or(0) as usize;
+    let data_length = SEGMENT_FRAME_SIZE + data_payload_length;
     let data_end = offset + data_length;
     if data_end > bytes.len() {
         return Err(CoreFsError::State(format!(
@@ -841,6 +937,12 @@ fn reconstruct_directory_from_payloads(
             path.display()
         )));
     }
+    let data_entry = SegmentEntry {
+        kind: *b"DATA",
+        offset: offset as u64,
+        length: data_length as u64,
+    };
+    let _ = segment_bytes(bytes, &data_entry, path)?;
     entries.push(SegmentEntry {
         kind: *b"DATA",
         offset: offset as u64,
@@ -850,64 +952,45 @@ fn reconstruct_directory_from_payloads(
     Ok(entries)
 }
 
-fn detect_json_segment_length(
+fn detect_framed_segment_length(
     bytes: &[u8],
     offset: usize,
     kind: &[u8; 4],
     path: &Path,
 ) -> CoreFsResult<usize> {
-    let payload = bytes.get(offset..).ok_or_else(|| {
+    let segment = bytes.get(offset..).ok_or_else(|| {
         CoreFsError::State(format!(
             "reconstructed segment {} starts outside image {}",
             String::from_utf8_lossy(kind),
             path.display()
         ))
     })?;
-
-    match kind {
-        b"CNFG" => detect_json_length::<ConfigSegment>(payload, kind, path),
-        b"VOLM" => detect_json_length::<VolumeSegment>(payload, kind, path),
-        b"AINO" | b"DINO" => detect_json_length::<InodeSegment>(payload, kind, path),
-        b"JOUR" => detect_json_length::<JournalSegment>(payload, kind, path),
-        b"VERS" => detect_json_length::<VersionSegment>(payload, kind, path),
-        b"SYNC" => detect_json_length::<SyncSegment>(payload, kind, path),
-        b"SNAP" => detect_json_length::<SnapshotSegment>(payload, kind, path),
-        b"BLKD" => detect_json_length::<BlockDescriptorSegment>(payload, kind, path),
-        _ => Err(CoreFsError::State(format!(
-            "cannot reconstruct unsupported segment {} in {}",
+    let header = parse_segment_frame_header(segment, path)?;
+    if &header.kind != kind {
+        return Err(CoreFsError::State(format!(
+            "unable to reconstruct segment {}, frame kind mismatch in {}",
             String::from_utf8_lossy(kind),
             path.display()
-        ))),
+        )));
     }
-}
-
-fn detect_json_length<T>(payload: &[u8], kind: &[u8; 4], path: &Path) -> CoreFsResult<usize>
-where
-    T: for<'de> Deserialize<'de> + Serialize,
-{
-    for length in 1..=payload.len() {
-        let prefix = &payload[..length];
-        let parsed = match serde_json::from_slice::<T>(prefix) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let normalized = serde_json::to_vec(&parsed).map_err(|error| {
+    let total_length = SEGMENT_FRAME_SIZE
+        .checked_add(header.payload_length as usize)
+        .ok_or_else(|| {
             CoreFsError::State(format!(
-                "failed to reserialize reconstructed segment {} for {}: {error}",
+                "invalid reconstructed segment length {} in {}",
                 String::from_utf8_lossy(kind),
                 path.display()
             ))
         })?;
-        if normalized == prefix {
-            return Ok(length);
-        }
-    }
-
-    Err(CoreFsError::State(format!(
-        "unable to reconstruct segment {} in {}",
-        String::from_utf8_lossy(kind),
-        path.display()
-    )))
+    let frame = segment.get(..total_length).ok_or_else(|| {
+        CoreFsError::State(format!(
+            "truncated reconstructed segment {} in {}",
+            String::from_utf8_lossy(kind),
+            path.display()
+        ))
+    })?;
+    let _ = decode_segment_frame(frame, kind, path)?;
+    Ok(total_length)
 }
 
 fn inspect_volume_image_bytes(bytes: &[u8], path: &Path) -> CoreFsResult<InspectedImage> {
@@ -1065,7 +1148,9 @@ fn checksum_of_payloads(segments: &[SegmentPayload]) -> u64 {
     segments
         .iter()
         .filter(|segment| segment.kind != *b"SUPR" && segment.kind != *b"SUP2")
-        .fold(0u64, |acc, segment| acc ^ checksum(&segment.payload))
+        .fold(0u64, |acc, segment| {
+            acc ^ checksum(segment_payload_for_checksum(segment))
+        })
 }
 
 fn checksum_of_segment_data(
@@ -1082,6 +1167,14 @@ fn checksum_of_segment_data(
         value ^= checksum(segment_bytes(bytes, entry, path)?);
     }
     Ok(value)
+}
+
+fn segment_payload_for_checksum<'a>(segment: &'a SegmentPayload) -> &'a [u8] {
+    if segment.kind == *b"SUPR" || segment.kind == *b"SUP2" {
+        &segment.payload
+    } else {
+        &segment.payload[SEGMENT_FRAME_SIZE..]
+    }
 }
 
 fn current_generation() -> u64 {
