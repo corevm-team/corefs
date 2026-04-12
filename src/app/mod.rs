@@ -9,7 +9,7 @@ pub use types::{AdminReport, DirectoryEntry, FsStats, MetadataView, PersistedSta
 use crate::config::{CoreFsConfig, StorageTier};
 use crate::domain::acl::{AclEntry, Principal};
 use crate::domain::inode::{Inode, InodeId, InodeKind};
-use crate::domain::metadata::FileMetadata;
+use crate::domain::metadata::{ContentClass, FileMetadata};
 use crate::domain::snapshot::Snapshot;
 use crate::domain::volume::VolumeDescriptor;
 use crate::error::{CoreFsError, CoreFsResult};
@@ -23,6 +23,7 @@ use crate::services::metadata::MetadataService;
 use crate::services::quota::{QuotaReport, QuotaService};
 use crate::services::recovery::RecoveryService;
 use crate::services::security::SecurityService;
+use crate::services::semantic::SemanticService;
 use crate::services::sync::SyncService;
 use crate::services::versioning::VersioningService;
 use crate::storage::allocator::InodeAllocator;
@@ -100,6 +101,7 @@ impl CoreFsService {
         let mut inode = Inode::new(inode_id, InodeKind::File, path.to_string(), metadata);
         self.ensure_quota_allows(1, bytes.len() as isize)?;
         inode.size = self.blocks.write(inode_id, bytes.to_vec());
+        apply_semantic_attributes(&mut inode, bytes);
 
         if self.config.versioning.keep_latest > 0 {
             self.versioning.store_version(path, bytes.to_vec());
@@ -197,6 +199,7 @@ impl CoreFsService {
 
         inode.modified_at = SystemTime::now();
         inode.size = self.blocks.write(inode.id, merged.clone());
+        apply_semantic_attributes(inode, &merged);
         self.versioning.store_version(path, merged);
         self.versioning
             .prune(path, self.config.versioning.keep_latest);
@@ -226,7 +229,7 @@ impl CoreFsService {
         self.hot_paths
             .borrow_mut()
             .record_read(path, record.bytes.len());
-        Ok(record.bytes.clone())
+        Ok(record.bytes)
     }
 
     pub fn read_file_range(&self, path: &str, offset: usize, size: usize) -> CoreFsResult<Vec<u8>> {
@@ -661,6 +664,35 @@ impl CoreFsService {
         matches
     }
 
+    pub fn find_by_content_term(&self, term: &str) -> Vec<String> {
+        let lowered = term.to_lowercase();
+        let mut matches = self
+            .catalog
+            .active_entries()
+            .into_iter()
+            .filter(|inode| {
+                if matches_resolved_attributes(self, inode, &lowered) {
+                    return true;
+                }
+
+                match inode.metadata.content_class {
+                    ContentClass::Text | ContentClass::SourceCode => self
+                        .read_file(&inode.path)
+                        .map(|bytes| {
+                            String::from_utf8_lossy(&bytes)
+                                .to_lowercase()
+                                .contains(&lowered)
+                        })
+                        .unwrap_or(false),
+                    _ => false,
+                }
+            })
+            .map(|inode| inode.path)
+            .collect::<Vec<_>>();
+        matches.sort();
+        matches
+    }
+
     pub fn stats(&self) -> FsStats {
         let versions = self
             .catalog
@@ -861,5 +893,32 @@ impl CoreFsService {
             .collect::<Vec<_>>();
         paths.sort();
         paths
+    }
+}
+
+fn matches_resolved_attributes(fs: &CoreFsService, inode: &Inode, lowered_term: &str) -> bool {
+    MetadataService::resolve_attributes(inode, |target_path| fs.read_file(target_path))
+        .into_iter()
+        .any(|(_, value)| value.to_lowercase().contains(lowered_term))
+}
+
+fn apply_semantic_attributes(inode: &mut Inode, bytes: &[u8]) {
+    let semantic = SemanticService::analyze(&inode.path, bytes, &inode.metadata.content_class);
+    for (key, value) in semantic.attributes {
+        MetadataService::set_attribute(inode, &key, &value);
+    }
+
+    if matches!(
+        inode.metadata.content_class,
+        ContentClass::Text | ContentClass::SourceCode
+    ) {
+        let path = inode.path.clone();
+        MetadataService::set_content_pointer(
+            inode,
+            "semantic.pointer.summary",
+            &path,
+            "summary-160",
+        );
+        MetadataService::set_content_pointer(inode, "semantic.pointer.fulltext", &path, "full");
     }
 }

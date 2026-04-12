@@ -187,6 +187,22 @@ where
                 println!("{path}");
             }
         }
+        "find-attr" => {
+            let term = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing term for find-attr".to_string())
+            })?;
+            for path in fs.find_by_attribute_term(term) {
+                println!("{path}");
+            }
+        }
+        "find-content" => {
+            let term = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing term for find-content".to_string())
+            })?;
+            for path in fs.find_by_content_term(term) {
+                println!("{path}");
+            }
+        }
         "attr-set" => {
             let path = args.get(2).ok_or_else(|| {
                 CoreFsError::InvalidCommand("missing path for attr-set".to_string())
@@ -199,6 +215,20 @@ where
             })?;
             fs.set_attribute(path, key, value)?;
             println!("set attribute {key} on {path}");
+        }
+        "attr-pointer" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for attr-pointer".to_string())
+            })?;
+            let key = args.get(3).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing key for attr-pointer".to_string())
+            })?;
+            let target = args.get(4).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing target for attr-pointer".to_string())
+            })?;
+            let extractor = args.get(5).map(String::as_str).unwrap_or("summary-160");
+            fs.set_content_pointer_attribute(path, key, target, extractor)?;
+            println!("set pointer attribute {key} on {path} to {target}");
         }
         "attr-get" => {
             let path = args.get(2).ok_or_else(|| {
@@ -237,6 +267,28 @@ where
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "unlimited".to_string())
             );
+        }
+        "hot-paths" => {
+            let limit = args
+                .get(2)
+                .map(|value| value.parse::<usize>())
+                .transpose()
+                .map_err(|error| {
+                    CoreFsError::InvalidInput(format!("invalid limit for hot-paths: {error}"))
+                })?
+                .unwrap_or(10);
+            for entry in fs.hot_paths(limit) {
+                println!(
+                    "path={} score={} reads={} writes={} metadata={} bytes_read={} bytes_written={}",
+                    entry.path,
+                    entry.score,
+                    entry.read_ops,
+                    entry.write_ops,
+                    entry.metadata_ops,
+                    entry.bytes_read,
+                    entry.bytes_written
+                );
+            }
         }
         "save" => {
             let path = args
@@ -384,10 +436,14 @@ fn print_usage() {
     println!("  tag-add <path> <tag>");
     println!("  tag-remove <path> <tag>");
     println!("  find-tag <tag>");
+    println!("  find-attr <term>");
+    println!("  find-content <term>");
     println!("  attr-set <path> <key> <value>");
+    println!("  attr-pointer <path> <key> <target-path> [extractor]");
     println!("  attr-get <path>");
     println!("  set-tier <path> <hot|warm|cold>");
     println!("  quota");
+    println!("  hot-paths [limit]");
     println!("  save <path>");
     println!("  save-image <path>");
     println!("  load <path>");
@@ -590,6 +646,24 @@ mod tests {
                 "corefs".to_string(),
                 "read".to_string(),
                 "/etc/corefs.conf".to_string(),
+            ],
+            vec![
+                "corefs".to_string(),
+                "attr-pointer".to_string(),
+                "/etc/corefs.conf".to_string(),
+                "summary".to_string(),
+                "/var/readme.txt".to_string(),
+                "summary-12".to_string(),
+            ],
+            vec![
+                "corefs".to_string(),
+                "find-attr".to_string(),
+                "CoreFS".to_string(),
+            ],
+            vec![
+                "corefs".to_string(),
+                "hot-paths".to_string(),
+                "5".to_string(),
             ],
             vec![
                 "corefs".to_string(),

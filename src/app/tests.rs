@@ -221,9 +221,32 @@ fn subtree_snapshots_metadata_and_version_selectors_work() {
         .metadata_for_path("/projects/a/readme.txt")
         .expect("metadata");
     assert!(metadata.tags.iter().any(|tag| tag == "important"));
+    let attrs = metadata
+        .attributes
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(attrs.get("owner").map(String::as_str), Some("team-a"));
     assert_eq!(
-        metadata.attributes,
-        vec![("owner".to_string(), "team-a".to_string())]
+        attrs.get("semantic.byte_size").map(String::as_str),
+        Some("2")
+    );
+    assert_eq!(
+        attrs.get("semantic.language").map(String::as_str),
+        Some("text")
+    );
+    assert_eq!(attrs.get("semantic.lines").map(String::as_str), Some("1"));
+    assert_eq!(attrs.get("semantic.words").map(String::as_str), Some("1"));
+    assert_eq!(
+        attrs.get("semantic.summary").map(String::as_str),
+        Some("v2")
+    );
+    assert_eq!(
+        attrs.get("semantic.pointer.summary").map(String::as_str),
+        Some("v2")
+    );
+    assert_eq!(
+        attrs.get("semantic.pointer.fulltext").map(String::as_str),
+        Some("v2")
     );
     assert_eq!(metadata.storage_tier, StorageTier::Hot);
     assert_eq!(
@@ -244,6 +267,14 @@ fn subtree_snapshots_metadata_and_version_selectors_work() {
         fs.read_version_selector("/projects/a/readme.txt@2099-01-01-00-00-00")
             .expect("future resolves latest before timestamp"),
         b"v2".to_vec()
+    );
+    assert_eq!(
+        fs.find_by_content_term("team-a"),
+        vec!["/projects/a/readme.txt".to_string()]
+    );
+    assert_eq!(
+        fs.find_by_content_term("v2"),
+        vec!["/projects/a/readme.txt".to_string()]
     );
 }
 

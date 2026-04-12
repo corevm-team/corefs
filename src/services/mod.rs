@@ -6,5 +6,6 @@ pub mod metadata;
 pub mod quota;
 pub mod recovery;
 pub mod security;
+pub mod semantic;
 pub mod sync;
 pub mod versioning;

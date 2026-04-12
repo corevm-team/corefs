@@ -11,6 +11,7 @@ use fuser::{
     SessionACL, TimeOrNow, WriteFlags,
 };
 use std::ffi::OsStr;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
@@ -637,9 +638,15 @@ pub fn mount_volume(
     config.clone_fd = true;
 
     fuser::mount2(filesystem, mountpoint, &config).map_err(|error| {
-        CoreFsError::State(format!(
-            "failed to mount CoreFS volume through FUSE: {error}"
-        ))
+        if error.kind() == ErrorKind::PermissionDenied {
+            CoreFsError::State(format!(
+                "failed to mount CoreFS volume through FUSE: {error}. This usually means the current environment does not permit FUSE mounts for this process. Try a normal Linux host session with FUSE enabled, or mount with elevated privileges."
+            ))
+        } else {
+            CoreFsError::State(format!(
+                "failed to mount CoreFS volume through FUSE: {error}"
+            ))
+        }
     })
 }
 
