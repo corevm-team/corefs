@@ -581,6 +581,34 @@ impl CoreFsFuseMountRw {
         }
         self.service.save_image_to_path(&self.image_path)
     }
+
+    fn record_block_patch(
+        &mut self,
+        inode: InodeId,
+        start: usize,
+        bytes: &[u8],
+        final_len: usize,
+    ) -> CoreFsResult<()> {
+        let block_size = self.service.block_size().max(1);
+        let mut consumed = 0usize;
+
+        while consumed < bytes.len() {
+            let absolute_offset = start + consumed;
+            let block_index = absolute_offset / block_size;
+            let block_offset = absolute_offset % block_size;
+            let chunk_len = (block_size - block_offset).min(bytes.len() - consumed);
+            self.record_wal_operation(WalOperation::PatchBlock {
+                inode,
+                block_index,
+                block_offset,
+                bytes: bytes[consumed..consumed + chunk_len].to_vec(),
+                final_len,
+            })?;
+            consumed += chunk_len;
+        }
+
+        Ok(())
+    }
 }
 
 impl Filesystem for CoreFsFuseMountRw {
@@ -625,6 +653,11 @@ impl Filesystem for CoreFsFuseMountRw {
             return;
         }
         if let Some(new_size) = size {
+            let inode_id = node
+                .inode
+                .as_ref()
+                .map(|inode| inode.id)
+                .unwrap_or(InodeId(0));
             let path = node.path.clone();
             if self.ensure_mutation_session("setattr").is_err() {
                 reply.error(EIO);
@@ -638,8 +671,8 @@ impl Filesystem for CoreFsFuseMountRw {
                 return;
             }
             if self
-                .record_wal_operation(WalOperation::TruncateFile {
-                    path: path.clone(),
+                .record_wal_operation(WalOperation::TruncateInode {
+                    inode: inode_id,
                     size: new_size as usize,
                 })
                 .is_err()
@@ -680,6 +713,10 @@ impl Filesystem for CoreFsFuseMountRw {
         });
         match file_path {
             Some(path) => {
+                let inode_id = self
+                    .node(ino)
+                    .and_then(|node| node.inode.as_ref().map(|inode| inode.id))
+                    .unwrap_or(InodeId(0));
                 // truncate on open with O_TRUNC
                 if flags & libc::O_TRUNC != 0 {
                     if self.ensure_mutation_session("truncate").is_err() {
@@ -691,8 +728,8 @@ impl Filesystem for CoreFsFuseMountRw {
                         return;
                     }
                     if self
-                        .record_wal_operation(WalOperation::TruncateFile {
-                            path: path.clone(),
+                        .record_wal_operation(WalOperation::TruncateInode {
+                            inode: inode_id,
                             size: 0,
                         })
                         .is_err()
@@ -758,6 +795,11 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EISDIR);
             return;
         }
+        let inode_id = node
+            .inode
+            .as_ref()
+            .map(|inode| inode.id)
+            .unwrap_or(InodeId(0));
         let path = node.path.clone();
         let start = offset.max(0) as usize;
         let end = start + data.len();
@@ -778,12 +820,7 @@ impl Filesystem for CoreFsFuseMountRw {
             return;
         }
         if self
-            .record_wal_operation(WalOperation::PatchFile {
-                path: path.clone(),
-                offset: start,
-                bytes: data.to_vec(),
-                final_len: buf.len(),
-            })
+            .record_block_patch(inode_id, start, data, buf.len())
             .is_err()
         {
             reply.error(EIO);
@@ -827,17 +864,20 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EIO);
             return;
         }
+        let Some(inode_id) = self.service.inode_for_path(&path) else {
+            reply.error(EIO);
+            return;
+        };
         if self
-            .record_wal_operation(WalOperation::CreateFile { path: path.clone() })
+            .record_wal_operation(WalOperation::CreateFile {
+                path: path.clone(),
+                inode: inode_id,
+            })
             .is_err()
         {
             reply.error(EIO);
             return;
         }
-        if self.service.inode_for_path(&path).is_none() {
-            reply.error(EIO);
-            return;
-        };
         let inode = self.service.get_inode(&path).cloned();
         let par = parent_path(&path);
         let node = FuseNode {
@@ -877,17 +917,20 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EIO);
             return;
         }
+        let Some(inode_id) = self.service.inode_for_path(&path) else {
+            reply.error(EIO);
+            return;
+        };
         if self
-            .record_wal_operation(WalOperation::CreateDirectory { path: path.clone() })
+            .record_wal_operation(WalOperation::CreateDirectory {
+                path: path.clone(),
+                inode: inode_id,
+            })
             .is_err()
         {
             reply.error(EIO);
             return;
         }
-        if self.service.inode_for_path(&path).is_none() {
-            reply.error(EIO);
-            return;
-        };
         let inode = self.service.get_inode(&path).cloned();
         let par = parent_path(&path);
         let node = FuseNode {
@@ -1591,9 +1634,10 @@ mod tests {
             .write_file("/hello.txt", b"updated")
             .expect("write");
         mount
-            .record_wal_operation(WalOperation::PatchFile {
-                path: "/hello.txt".to_string(),
-                offset: 0,
+            .record_wal_operation(WalOperation::PatchBlock {
+                inode: mount.service.inode_for_path("/hello.txt").expect("inode"),
+                block_index: 0,
+                block_offset: 0,
                 bytes: b"updated".to_vec(),
                 final_len: 7,
             })

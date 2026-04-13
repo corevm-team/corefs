@@ -21,6 +21,19 @@ impl InodeAllocator {
         self.recycled.push_back(inode);
     }
 
+    pub fn allocate_specific(&mut self, inode: InodeId) {
+        if let Some(index) = self
+            .recycled
+            .iter()
+            .position(|candidate| *candidate == inode)
+        {
+            self.recycled.remove(index);
+        }
+        if inode.0 > self.next_inode {
+            self.next_inode = inode.0;
+        }
+    }
+
     pub fn with_next_inode(next_inode: u64) -> Self {
         Self {
             next_inode,
@@ -44,5 +57,17 @@ mod tests {
         assert_eq!(first, InodeId(1));
         assert_eq!(second, InodeId(2));
         assert_eq!(recycled, InodeId(1));
+    }
+
+    #[test]
+    fn allocator_can_reserve_specific_inode_ids() {
+        let mut allocator = InodeAllocator::default();
+        allocator.allocate_specific(InodeId(7));
+
+        assert_eq!(allocator.allocate(), InodeId(8));
+
+        allocator.release(InodeId(3));
+        allocator.allocate_specific(InodeId(3));
+        assert_eq!(allocator.allocate(), InodeId(9));
     }
 }

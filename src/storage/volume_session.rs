@@ -149,10 +149,16 @@ mod tests {
             operations: vec![
                 WalOperation::CreateDirectory {
                     path: "/data".to_string(),
+                    inode: crate::domain::inode::InodeId(1),
                 },
-                WalOperation::PatchFile {
+                WalOperation::CreateFile {
                     path: "/data/file.txt".to_string(),
-                    offset: 0,
+                    inode: crate::domain::inode::InodeId(2),
+                },
+                WalOperation::PatchBlock {
+                    inode: crate::domain::inode::InodeId(2),
+                    block_index: 0,
+                    block_offset: 0,
                     bytes: b"hello".to_vec(),
                     final_len: 5,
                 },

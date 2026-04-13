@@ -104,6 +104,17 @@ impl CoreFsService {
     }
 
     pub fn create_file(&mut self, path: &str, bytes: &[u8], tags: &[String]) -> CoreFsResult<()> {
+        let inode_id = self.allocator.allocate();
+        self.create_file_with_inode(path, bytes, tags, inode_id)
+    }
+
+    pub fn create_file_with_inode(
+        &mut self,
+        path: &str,
+        bytes: &[u8],
+        tags: &[String],
+        inode_id: InodeId,
+    ) -> CoreFsResult<()> {
         validate_path(path)?;
         if self.catalog.get(path).is_some() {
             return Err(CoreFsError::AlreadyExists(format!(
@@ -111,7 +122,7 @@ impl CoreFsService {
             )));
         }
 
-        let inode_id = self.allocator.allocate();
+        self.allocator.allocate_specific(inode_id);
         let mut metadata = FileMetadata::default();
         metadata.tags = tags.to_vec();
         metadata.content_class = self.indexing.classify_path(path);
@@ -137,6 +148,15 @@ impl CoreFsService {
     }
 
     pub fn create_directory(&mut self, path: &str) -> CoreFsResult<()> {
+        let inode_id = self.allocator.allocate();
+        self.create_directory_with_inode(path, inode_id)
+    }
+
+    pub fn create_directory_with_inode(
+        &mut self,
+        path: &str,
+        inode_id: InodeId,
+    ) -> CoreFsResult<()> {
         validate_path(path)?;
         if self.catalog.get(path).is_some() {
             return Err(CoreFsError::AlreadyExists(format!(
@@ -144,7 +164,7 @@ impl CoreFsService {
             )));
         }
 
-        let inode_id = self.allocator.allocate();
+        self.allocator.allocate_specific(inode_id);
         let inode = Inode::new(
             inode_id,
             InodeKind::Directory,
@@ -350,6 +370,16 @@ impl CoreFsService {
 
     pub fn had_unclean_shutdown(&self) -> bool {
         !self.clean_unmount
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.volume.block_size
+    }
+
+    pub fn path_for_inode(&self, inode_id: InodeId) -> Option<String> {
+        self.catalog
+            .inode_by_id(inode_id)
+            .map(|inode| inode.path.clone())
     }
 
     pub fn pending_wal(&self) -> Option<&VolumeWal> {
