@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `129/129` Tests erfolgreich  
+**Test-Status:** `131/131` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -73,6 +73,9 @@
 - FUSE-Schreibdurchsatz-Optimierungen: `FUSE_WRITEBACK_CACHE` (Kernel-seitiges Schreib-Batching) und `max_write = 1 MiB` (weniger Kernel↔Daemon-Roundtrips), O(n²)-Klon-Bug in `write_to_handle` behoben (vorher: `node.data.clone()` bei jedem Write-Call)
 - WAL-Vereinfachung für Dateidaten: `PatchExtent`-Records werden nicht mehr pro Flush geschrieben, da der atomare Image-Save (write→rename) hinreichende Crash-Safety bietet; strukturelle Ops (CreateFile, TruncateInode etc.) bleiben vollständig WAL-geschützt
 - inkrementelle Prüfsummenfortschreibung in `BlockStore::append_to_inode`: `O(extra.len())` statt `O(gesamt)`, Rekey der Blob-Map nach Checksum-Änderung
+- transparente LZ4-Kompression für Dateiinhalte: `CompressionService` (lz4_flex frame format) komprimiert Payloads ≥ 64 B bei Schreibzugriffen automatisch; `read_file` dekomprimiert transparent; `inode.size` enthält immer die logische (unkomprimierte) Größe; Versionen werden vor der Kompression gespeichert, sodass die Versionshistorie stets vollständig lesbar bleibt
+- Quota-Enforcement in `create_file` und `write_file`: schnelle Überprüfung über `Catalog::quota_stats()` (liefert `(file_count, total_bytes)` ohne Klon aller Inodes) und `QuotaService::check_stats()`; bei Überschreitung wird `CoreFsError::QuotaExceeded` zurückgegeben, bevor Daten geschrieben werden
+- automatische Versionsbereinigung unter Platzdruck: `VersioningService::prune_to_budget(max_bytes)` entfernt global die ältesten Versionen solange das Gesamtvolumen der versionierten Bytes den konfigurierbaren `max_version_bytes`-Wert (Standard: 64 MiB) überschreitet
 
 ### Plattform- und Integrationsmodell
 
@@ -104,9 +107,8 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - Self-Healing mit Redundanzquellen
 - Cluster-Synchronisation
 - Hot/Cold-Storage und Tiering-Strategien
-- echte Kompression und echte Verschlüsselung
-- Quota-Durchsetzung
-- Time-Travel-Adressierung im FUSE-RW-Mount über `@`-Syntax ist für Lookup und Read umgesetzt; fehlt noch: Adressierung im Read-only-Mount, persistente Zugriffspfade als reale Symlinks, automatische Versionenbereinigung bei Platzdruck
+- echte Verschlüsselung
+- Time-Travel-Adressierung im FUSE-RW-Mount über `@`-Syntax ist für Lookup und Read umgesetzt; fehlt noch: Adressierung im Read-only-Mount, persistente Zugriffspfade als reale Symlinks
 - fsck als weiter auszubauendes Reparatur- und Korrekturwerkzeug für stärker beschädigte Segmenttabellen, tiefere Blockdeskriptor-Rekonstruktion, Datensegment-Validierung und echte Datenheilung
 - native Kernel-/VFS-Integration für das eigene Betriebssystem
 - Fremdsystem-Adapter als reale Laufzeitkomponenten
@@ -132,12 +134,14 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 ### `src/services`
 
 - Journaling
-- Versionierung
+- Versionierung mit konfigurierbarer Byte-Budget-Bereinigung (`prune_to_budget`)
 - Recovery
 - Integrität
 - Indexierung
 - Sicherheit
 - Synchronisationsstatus
+- Kompression (LZ4 frame via `lz4_flex`)
+- Quota-Enforcement
 
 ### `src/platform`
 
