@@ -764,64 +764,84 @@ impl CoreFsFuseMountRw {
         offset: i64,
         data: &[u8],
     ) -> CoreFsResult<u32> {
-        let handle = self
-            .open_files
-            .get_mut(&fh)
-            .ok_or_else(|| CoreFsError::State(format!("unknown file handle: {fh}")))?;
-        if handle.ino != ino {
-            return Err(CoreFsError::State(format!(
-                "file handle {fh} does not match inode {ino}"
-            )));
-        }
-
-        // How many bytes does this write cover in the logical file?
         let write_start = offset.max(0) as usize;
         let write_end = write_start.saturating_add(data.len());
 
-        // Determine whether this write extends the file sequentially.
-        // Sequential: the write begins exactly at the current end of logical content.
-        let logical_end_before = handle.committed_size + handle.data.len();
-        let is_sequential_append = write_start == logical_end_before;
+        // --- Phase 1: read handle state with a shared borrow (no &mut self needed) ---
+        let (is_streaming_flush, needs_mutation_session) = {
+            let handle = self
+                .open_files
+                .get(&fh)
+                .ok_or_else(|| CoreFsError::State(format!("unknown file handle: {fh}")))?;
+            if handle.ino != ino {
+                return Err(CoreFsError::State(format!(
+                    "file handle {fh} does not match inode {ino}"
+                )));
+            }
+            let logical_end = handle.committed_size + handle.data.len();
+            let is_sequential = write_start == logical_end;
+            let would_exceed = logical_end + data.len() > STREAM_FLUSH_THRESHOLD;
+            let streaming = is_sequential && would_exceed && write_start >= handle.committed_size;
+            let needs_session = streaming && handle.committed_size == 0;
+            (streaming, needs_session)
+        };
 
-        if is_sequential_append && handle.committed_size + handle.data.len() + data.len()
-            > STREAM_FLUSH_THRESHOLD
-            && write_start >= handle.committed_size
-        {
-            // Streaming mode: flush the current buffer to the service before buffering
-            // more, so that handle.data stays bounded to ≤ STREAM_FLUSH_THRESHOLD.
-            let buf_to_flush = std::mem::take(&mut handle.data);
-            if !buf_to_flush.is_empty() {
-                if handle.committed_size == 0 {
-                    // First flush: create the initial committed content.
-                    if self.service.write_file(&handle.path, &buf_to_flush).is_err() {
-                        handle.data = buf_to_flush;
-                        return Err(CoreFsError::State("streaming flush failed".into()));
-                    }
-                } else {
-                    // Subsequent flushes: append to what is already in the service.
-                    if self.service.extend_file(&handle.path, &buf_to_flush).is_err() {
-                        handle.data = buf_to_flush;
-                        return Err(CoreFsError::State("streaming extend failed".into()));
+        // --- Phase 2: start mutation session if this is the first streaming flush ---
+        // This must happen before re-borrowing handle mutably so that
+        // ensure_mutation_session can take &mut self freely.
+        if needs_mutation_session {
+            self.ensure_mutation_session("streaming-write")?;
+        }
+
+        // --- Phase 3: perform the write with a mutable borrow ---
+        let new_total = {
+            let handle = self
+                .open_files
+                .get_mut(&fh)
+                .ok_or_else(|| CoreFsError::State(format!("unknown file handle: {fh}")))?;
+
+            if is_streaming_flush {
+                // Flush the current buffer to the service so that handle.data stays
+                // bounded to ≤ STREAM_FLUSH_THRESHOLD.
+                let buf_to_flush = std::mem::take(&mut handle.data);
+                if !buf_to_flush.is_empty() {
+                    let result = if handle.committed_size == 0 {
+                        self.service.write_file(&handle.path, &buf_to_flush)
+                    } else {
+                        self.service.extend_file(&handle.path, &buf_to_flush)
+                    };
+                    let handle = self.open_files.get_mut(&fh).expect("handle must exist");
+                    match result {
+                        Ok(()) => handle.committed_size += buf_to_flush.len(),
+                        Err(_) => {
+                            handle.data = buf_to_flush;
+                            return Err(CoreFsError::State("streaming flush failed".into()));
+                        }
                     }
                 }
-                handle.committed_size += buf_to_flush.len();
+                self.open_files
+                    .get_mut(&fh)
+                    .expect("handle must exist")
+                    .data
+                    .extend_from_slice(data);
+            } else {
+                // Small file or non-sequential write: keep everything in the buffer.
+                let buf_needed = write_end.saturating_sub(handle.committed_size);
+                if handle.data.len() < buf_needed {
+                    handle.data.resize(buf_needed, 0);
+                }
+                let buf_start = write_start.saturating_sub(handle.committed_size);
+                let buf_end = write_end.saturating_sub(handle.committed_size);
+                handle.data[buf_start..buf_end].copy_from_slice(data);
             }
-            // Now buffer the newly arrived chunk.
-            handle.data.extend_from_slice(data);
-        } else {
-            // Small file or non-sequential write: keep everything in the buffer.
-            if handle.data.len() < write_end.saturating_sub(handle.committed_size) {
-                handle.data.resize(write_end.saturating_sub(handle.committed_size), 0);
-            }
-            let buf_start = write_start.saturating_sub(handle.committed_size);
-            let buf_end = write_end.saturating_sub(handle.committed_size);
-            handle.data[buf_start..buf_end].copy_from_slice(data);
-        }
-        handle.dirty = true;
 
-        let new_total = handle.committed_size + handle.data.len();
-        // Update only the cached inode metadata; reads on an open handle go through
-        // read_from_handle (which checks handle.data / service), not node.data.
+            let handle = self.open_files.get_mut(&fh).expect("handle must exist");
+            handle.dirty = true;
+            handle.committed_size + handle.data.len()
+        };
+
+        // Update only cached inode metadata; reads on an open handle go through
+        // read_from_handle (checks handle.data / service), not node.data.
         if let Some(node) = self.nodes_by_ino.get_mut(&ino) {
             if let Some(ref mut inode) = node.inode {
                 inode.size = new_total;
@@ -847,33 +867,38 @@ impl CoreFsFuseMountRw {
             .ok_or_else(|| CoreFsError::State(format!("missing inode metadata for handle {fh}")))?;
         self.ensure_mutation_session("write-cache-flush")?;
 
+        let total_size = handle.committed_size + handle.data.len();
+
         if handle.committed_size == 0 {
             // Non-streaming path: write the full buffer to the service in one call.
             self.service.write_file(&handle.path, &handle.data)?;
-        } else if handle.data.is_empty() {
-            // Streaming: all bytes already committed, nothing left to flush.
-        } else {
+        } else if !handle.data.is_empty() {
             // Streaming: flush the remaining uncommitted tail.
             self.service.extend_file(&handle.path, &handle.data)?;
         }
+        // If committed_size > 0 and handle.data is empty: all bytes already committed.
 
-        // Record WAL for the entire logical file (needed for crash recovery).
-        let total_size = handle.committed_size + handle.data.len();
+        // WAL strategy for file data:
+        //
+        // PatchExtent records that embed the full file bytes are intentionally NOT
+        // recorded here.  The image save below is atomic (write-then-rename), so after
+        // the save the image is authoritative and no WAL replay is needed.  Recording
+        // PatchExtent for a large file would:
+        //   1. Clone the full blob from the service  (O(file_size) RAM)
+        //   2. Generate O(file_size / block_size) WAL entries with embedded bytes
+        //   3. Double the image size written to disk
+        //
+        // Only truncation-to-zero is recorded because it changes structural metadata
+        // (inode.size) and must survive a crash before the next persist().
         if total_size == 0 {
             self.record_wal_operation(WalOperation::TruncateInode {
                 inode: inode_id,
                 size: 0,
             })?;
-        } else {
-            // For streaming files read the full content back from the service (one-time,
-            // at close) to record the WAL covering the entire extent.
-            let full_data = if handle.committed_size > 0 {
-                self.service.read_file(&handle.path)?
-            } else {
-                handle.data.clone()
-            };
-            self.record_extent_patch(inode_id, 0, &full_data, full_data.len())?;
         }
+        // For non-zero writes: the data is in the service and will be committed
+        // atomically by the image save; no WAL entry required.
+
         self.service.save_image_to_path(&self.image_path)?;
 
         // Sync node.data once from the service so subsequent opens seed correct content.
@@ -925,6 +950,11 @@ impl Filesystem for CoreFsFuseMountRw {
         // decouples the application from our per-flush latency.
         const FUSE_WRITEBACK_CACHE: u32 = 1 << 16;
         let _ = config.add_capabilities(FUSE_WRITEBACK_CACHE);
+
+        // Increase the maximum write request size from the default 128 KiB to 1 MiB.
+        // This reduces the number of kernel↔daemon round-trips for large sequential
+        // writes by ~8× (e.g. 250 MB: ~2 000 calls → ~250 calls).
+        let _ = config.set_max_write(1024 * 1024);
         Ok(())
     }
 
