@@ -34,6 +34,8 @@ const EXPECTED_SEGMENT_KINDS: [[u8; 4]; 13] = [
 struct BlockDescriptor {
     inode: InodeId,
     checksum: u64,
+    device_block: u64,
+    allocated_blocks: u64,
     offset: u64,
     length: u64,
 }
@@ -135,7 +137,7 @@ struct RecoveredImageState {
 
 pub fn save_volume_image(path: impl AsRef<Path>, state: &PersistedState) -> CoreFsResult<()> {
     let path = path.as_ref();
-    let (descriptors, block_data) = split_blocks(&state.block_records);
+    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size);
 
     let mut segments = vec![
         raw_segment_from_bytes(*b"SUPR", vec![0; SUPERBLOCK_SIZE]),
@@ -541,17 +543,38 @@ fn find_segment<'a>(entries: &'a [SegmentEntry], kind: &[u8; 4]) -> CoreFsResult
         })
 }
 
-fn split_blocks(block_records: &[BlockRecord]) -> (Vec<BlockDescriptor>, Vec<u8>) {
+fn split_blocks(
+    block_records: &[BlockRecord],
+    block_size: usize,
+) -> (Vec<BlockDescriptor>, Vec<u8>) {
     let mut descriptors = Vec::with_capacity(block_records.len());
-    let mut data = Vec::new();
+    let block_size = block_size.max(1) as u64;
+    let total_size = block_records
+        .iter()
+        .map(|record| {
+            record
+                .device_block
+                .saturating_add(record.allocated_blocks.max(1))
+                .saturating_mul(block_size)
+        })
+        .max()
+        .unwrap_or(0) as usize;
+    let mut data = vec![0u8; total_size];
 
     for record in block_records {
-        let offset = data.len() as u64;
+        let offset = record.device_block.saturating_mul(block_size);
         let length = record.bytes.len() as u64;
-        data.extend_from_slice(&record.bytes);
+        let start = offset as usize;
+        let end = start.saturating_add(record.bytes.len());
+        if end > data.len() {
+            data.resize(end, 0);
+        }
+        data[start..end].copy_from_slice(&record.bytes);
         descriptors.push(BlockDescriptor {
             inode: record.inode,
             checksum: record.checksum,
+            device_block: record.device_block,
+            allocated_blocks: record.allocated_blocks.max(1),
             offset,
             length,
         });
@@ -574,6 +597,8 @@ fn join_blocks(descriptors: Vec<BlockDescriptor>, data: &[u8]) -> CoreFsResult<V
             inode: descriptor.inode,
             bytes: bytes.to_vec(),
             checksum: descriptor.checksum,
+            device_block: descriptor.device_block,
+            allocated_blocks: descriptor.allocated_blocks.max(1),
         });
     }
 
@@ -1223,6 +1248,7 @@ fn persisted_state_from_entries_relaxed(
             state.block_records = reconstruct_block_records_from_data(
                 &state.active_inodes,
                 &state.deleted_inodes,
+                state.volume.block_size,
                 bytes,
                 entries,
                 path,
@@ -1296,6 +1322,7 @@ fn persisted_state_without_blocks(
 fn reconstruct_block_records_from_data(
     active_inodes: &[Inode],
     deleted_inodes: &[Inode],
+    block_size: usize,
     bytes: &[u8],
     entries: &[SegmentEntry],
     path: &Path,
@@ -1323,6 +1350,7 @@ fn reconstruct_block_records_from_data(
         )));
     }
 
+    let block_size = block_size.max(1);
     let mut offset = 0usize;
     let mut records = Vec::with_capacity(file_like_inodes.len());
     for inode in file_like_inodes {
@@ -1341,6 +1369,8 @@ fn reconstruct_block_records_from_data(
             inode: inode.id,
             checksum: checksum(&payload),
             bytes: payload,
+            device_block: (offset / block_size) as u64,
+            allocated_blocks: inode.size.max(1).div_ceil(block_size) as u64,
         });
         offset = end;
     }
@@ -1742,7 +1772,14 @@ mod tests {
     #[test]
     fn save_and_load_volume_image_round_trip() {
         let path = temp_path("roundtrip");
-        let state = sample_state();
+        let mut state = sample_state();
+        state.block_records = vec![BlockRecord {
+            inode: InodeId(7),
+            bytes: b"payload".to_vec(),
+            checksum: checksum(b"payload"),
+            device_block: 4,
+            allocated_blocks: 2,
+        }];
 
         save_volume_image(&path, &state).expect("volume image should be written");
         let loaded = load_volume_image(&path).expect("volume image should be loaded");
@@ -1750,6 +1787,7 @@ mod tests {
         assert_eq!(loaded.config, state.config);
         assert_eq!(loaded.next_snapshot_id, 1);
         assert_eq!(loaded.snapshots.len(), 1);
+        assert_eq!(loaded.block_records, state.block_records);
 
         let _ = fs::remove_file(path);
     }
@@ -1906,11 +1944,15 @@ mod tests {
                     inode: InodeId(1),
                     bytes: b"hello".to_vec(),
                     checksum: 123,
+                    device_block: 0,
+                    allocated_blocks: 1,
                 },
                 BlockRecord {
                     inode: InodeId(99),
                     bytes: b"orphan".to_vec(),
                     checksum: 456,
+                    device_block: 1,
+                    allocated_blocks: 1,
                 },
             ],
             journal_entries: vec![
@@ -2025,6 +2067,8 @@ mod tests {
                 inode: InodeId(7),
                 bytes: b"hello".to_vec(),
                 checksum: checksum(b"hello"),
+                device_block: 0,
+                allocated_blocks: 1,
             }],
             journal_entries: Vec::new(),
             journal_runtime: JournalRuntimeState::default(),

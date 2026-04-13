@@ -408,11 +408,15 @@ mod tests {
                     inode: crate::domain::inode::InodeId(1),
                     bytes: b"hello".to_vec(),
                     checksum: 1,
+                    device_block: 0,
+                    allocated_blocks: 1,
                 },
                 BlockRecord {
                     inode: crate::domain::inode::InodeId(99),
                     bytes: b"orphan".to_vec(),
                     checksum: 2,
+                    device_block: 1,
+                    allocated_blocks: 1,
                 },
             ],
             journal_entries: vec![

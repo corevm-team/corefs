@@ -93,6 +93,7 @@ pub struct CoreFsService {
 
 impl CoreFsService {
     pub fn format(config: CoreFsConfig) -> Self {
+        let block_size = config.block_size;
         let volume = VolumeDescriptor::from_config(&config);
         let mut journal = JournalService::default();
         journal.record("format", "/", format!("volume={}", volume.name));
@@ -102,7 +103,7 @@ impl CoreFsService {
             volume,
             allocator: InodeAllocator::default(),
             catalog: Catalog::default(),
-            blocks: BlockStore::default(),
+            blocks: BlockStore::with_block_size(block_size),
             journal,
             versioning: VersioningService::default(),
             recovery: RecoveryService::default(),
@@ -391,18 +392,10 @@ impl CoreFsService {
     }
 
     pub fn data_layout_for_inode(&self, inode_id: InodeId) -> Option<InodeDataLayout> {
-        let mut offset = 0u64;
-        for record in self.blocks.records() {
-            let layout = InodeDataLayout {
-                data_offset: offset,
-                length: record.bytes.len(),
-            };
-            if record.inode == inode_id {
-                return Some(layout);
-            }
-            offset = offset.saturating_add(record.bytes.len() as u64);
-        }
-        None
+        self.blocks.read(inode_id).map(|record| InodeDataLayout {
+            data_offset: record.device_block.saturating_mul(self.block_size() as u64),
+            length: record.bytes.len(),
+        })
     }
 
     pub fn data_extents_for_inode(&self, inode_id: InodeId) -> Vec<DataExtent> {
@@ -595,6 +588,7 @@ impl CoreFsService {
     }
 
     fn from_persisted_state(state: PersistedState) -> Self {
+        let block_size = state.volume.block_size;
         let next_inode = state
             .active_inodes
             .iter()
@@ -613,7 +607,7 @@ impl CoreFsService {
             volume: state.volume,
             allocator: InodeAllocator::with_next_inode(next_inode),
             catalog: Catalog::from_parts(state.active_inodes, state.deleted_inodes),
-            blocks: BlockStore::from_records(state.block_records),
+            blocks: BlockStore::from_records_with_block_size(state.block_records, block_size),
             journal: JournalService::from_entries_with_runtime(
                 state.journal_entries,
                 state.journal_runtime,
@@ -1062,7 +1056,7 @@ mod tests {
 
         assert_eq!(first.data_offset, 0);
         assert_eq!(first.length, 3);
-        assert_eq!(second.data_offset, 3);
+        assert_eq!(second.data_offset, fs.block_size() as u64);
         assert_eq!(second.length, 5);
     }
 
