@@ -21,7 +21,7 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `118/118` Tests erfolgreich
+- Test-Status: `119/119` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -88,6 +88,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Linux-FUSE-Read-/Write-Caching auf File-Handle-Ebene mit Write-Back-Flush ueber `flush`/`fsync`/`release`
 - backing-store-aware `statfs`-Kapazitaetsmeldung fuer Linux-FUSE und `ENOSPC`-Rueckgabe bei Platzmangel im `.img`-Persistenzpfad
 - treibernahe Linux-FUSE-Tests fuer Handle-Open, Truncate, Read-Cache, Write-Back-Flush, Release und Persistenzpfade
+- Fix fuer neu angelegte Dateien im Linux-FUSE-RW-Pfad: `create` liefert jetzt sofort einen gueltigen Write-Back-Handle fuer anschliessende `write()`-Aufrufe
 - Journaling von Operationen
 - transaktionales Journal mit `tx_begin`/`tx_commit`/`tx_abort`, Pending-Transaktionen und Recovery-Markern
 - persistente physische Volume-Allokation pro Dateiinhalt mit stabilen `device_block`-/`allocated_blocks`-Metadaten im Volume-Image

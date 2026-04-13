@@ -999,8 +999,13 @@ impl Filesystem for CoreFsFuseMountRw {
         };
         let attr = node.attr();
         self.register_node(node);
+        let ino = inode_id.0 + 1;
+        let Ok(fh) = self.open_file_handle(ino, _flags) else {
+            reply.error(EIO);
+            return;
+        };
         self.dirty = true;
-        reply.created(&TTL, &attr, 0, 0, 0);
+        reply.created(&TTL, &attr, 0, fh, 0);
     }
 
     fn mkdir(
@@ -1706,6 +1711,41 @@ mod tests {
                 .read_file("/docs/readme.txt")
                 .expect("service read"),
             b"release".to_vec()
+        );
+    }
+
+    #[test]
+    fn rw_mount_new_file_can_be_opened_and_written_immediately() {
+        let mut mount = rw_mount_from_demo();
+
+        mount
+            .service
+            .create_file("/docs/new.bin", b"", &[])
+            .expect("create file");
+        let inode_id = mount.service.inode_for_path("/docs/new.bin").expect("inode");
+        let ino = inode_id.0 + 1;
+        let node = FuseNode {
+            path: "/docs/new.bin".to_string(),
+            parent_path: "/docs".to_string(),
+            inode: mount.service.get_inode("/docs/new.bin").cloned(),
+            data: Vec::new(),
+        };
+        mount.register_node(node);
+
+        let fh = mount
+            .open_file_handle(ino, libc::O_RDWR)
+            .expect("newly created file should be openable");
+        mount
+            .write_to_handle(ino, fh, 0, b"abc123")
+            .expect("write through handle");
+        mount.flush_file_handle(fh).expect("flush");
+
+        assert_eq!(
+            mount
+                .service
+                .read_file("/docs/new.bin")
+                .expect("service read"),
+            b"abc123".to_vec()
         );
     }
 
