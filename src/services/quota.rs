@@ -116,13 +116,15 @@ mod tests {
     use std::time::SystemTime;
 
     fn inode(id: u64, kind: InodeKind, path: &str, size: usize) -> Inode {
+        let now = SystemTime::now();
         Inode {
             id: crate::domain::inode::InodeId(id),
             kind,
             path: path.to_string(),
             size,
-            created_at: SystemTime::now(),
-            modified_at: SystemTime::now(),
+            created_at: now,
+            modified_at: now,
+            changed_at: now,
             metadata: FileMetadata::default(),
         }
     }

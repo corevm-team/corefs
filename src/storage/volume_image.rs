@@ -20,7 +20,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAGIC: &[u8; 8] = b"COREFS01";
-const FORMAT_VERSION: u32 = 5;
+const FORMAT_VERSION: u32 = 6;
 const SEGMENT_ALIGNMENT: usize = 64;
 const SEGMENT_ENTRY_SIZE: usize = 24;
 const HEADER_SIZE: usize = 16;
@@ -678,6 +678,7 @@ fn encode_inodes_payload(inodes: &[Inode]) -> Result<Vec<u8>, String> {
         push_u64(&mut bytes, inode.size as u64);
         push_system_time(&mut bytes, inode.created_at)?;
         push_system_time(&mut bytes, inode.modified_at)?;
+        push_system_time(&mut bytes, inode.changed_at)?;
         push_metadata(&mut bytes, &inode.metadata)?;
     }
     Ok(bytes)
@@ -694,6 +695,7 @@ fn decode_inodes_payload(bytes: &[u8]) -> Result<Vec<Inode>, String> {
         let size = read_u64(bytes, &mut cursor)? as usize;
         let created_at = read_system_time(bytes, &mut cursor)?;
         let modified_at = read_system_time(bytes, &mut cursor)?;
+        let changed_at = read_system_time(bytes, &mut cursor)?;
         let metadata = read_metadata(bytes, &mut cursor)?;
         inodes.push(Inode {
             id,
@@ -702,6 +704,7 @@ fn decode_inodes_payload(bytes: &[u8]) -> Result<Vec<Inode>, String> {
             size,
             created_at,
             modified_at,
+            changed_at,
             metadata,
         });
     }
@@ -3065,6 +3068,7 @@ mod tests {
             size: 0,
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
+            changed_at: std::time::SystemTime::now(),
             metadata: crate::domain::metadata::FileMetadata::default(),
         });
 
@@ -3117,6 +3121,7 @@ mod tests {
             size: 0,
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
+            changed_at: std::time::SystemTime::now(),
             metadata: crate::domain::metadata::FileMetadata::default(),
         });
 
@@ -3142,6 +3147,7 @@ mod tests {
             size: 64 * 1024,
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
+            changed_at: std::time::SystemTime::now(),
             metadata: crate::domain::metadata::FileMetadata::default(),
         });
         state.block_records = vec![

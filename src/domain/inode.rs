@@ -18,8 +18,14 @@ pub struct Inode {
     pub kind: InodeKind,
     pub path: String,
     pub size: usize,
+    /// POSIX `birth time` — set on creation, never updated afterwards.
     pub created_at: SystemTime,
+    /// POSIX `mtime` — updated when file **content** changes
+    /// (write, truncate).  Not updated by chown/chmod/rename.
     pub modified_at: SystemTime,
+    /// POSIX `ctime` — updated on any inode change: content changes,
+    /// metadata changes (chown/chmod), or rename.
+    pub changed_at: SystemTime,
     pub metadata: FileMetadata,
 }
 
@@ -33,8 +39,23 @@ impl Inode {
             size: 0,
             created_at: now,
             modified_at: now,
+            changed_at: now,
             metadata,
         }
+    }
+
+    /// Marks the inode as having its content modified (updates both
+    /// `modified_at` and `changed_at`).
+    pub fn touch_modified(&mut self) {
+        let now = SystemTime::now();
+        self.modified_at = now;
+        self.changed_at = now;
+    }
+
+    /// Marks the inode as having its status changed (metadata-only update).
+    /// Updates `changed_at` but leaves `modified_at` untouched.
+    pub fn touch_changed(&mut self) {
+        self.changed_at = SystemTime::now();
     }
 }
 

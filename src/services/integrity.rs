@@ -368,7 +368,7 @@ mod tests {
 
         let report = service.fsck_image(&path).expect("fsck should succeed");
 
-        assert_eq!(report.format_version, 5);
+        assert_eq!(report.format_version, 6);
         assert_eq!(report.segment_count, 15);
         assert_eq!(report.valid_superblocks, 2);
         assert!(report.directory_checksum_valid);

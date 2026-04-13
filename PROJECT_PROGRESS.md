@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `303/303` Tests erfolgreich  
+**Test-Status:** `322/322` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -101,7 +101,8 @@
 - Fake-Stick-Erkennung: `sanity_check_writable()` probiert 6 verteilte Offsets (10/25/50/75/90/99% der Kapazität) mit deterministischen Testmustern, liest zurück und zero-fillt — läuft automatisch nach `mkfs-device` (überspringbar mit `--skip-check`); `verify_device_capacity()` führt destruktiven Vollscan mit konfigurierbarer Chunk-Anzahl durch, exponiert als `verify-device --destructive` CLI-Kommando mit `fake_ratio_percent`-Verdict
 - Permission-Checks: `check_device_permissions()` prüft Root/Write-Access vor Device-Zugriff mit hilfreicher `sudo`-Fehlermeldung; eingebaut in `mkfs-device`, `mount-device-rw`, `verify-device`
 - CLI-Integritätsprüfung auf Blockgeräten: `fsck-device <path>` via `inspect_device()` ohne Schreibzugriff (Magic, Format-Version, Superblock-Redundanz, Checksummen, Segmentvollständigkeit, Block-Deskriptoren)
-- POSIX-Besitzer und -Berechtigungen: `FileMetadata.uid`, `.gid`, `.mode` pro Inode persistent gespeichert; `CoreFsService::set_owner()` und `set_mode()` API; FUSE `setattr` handled `chown`/`chmod` korrekt für Dateien und Verzeichnisse; `create`/`mkdir` übernehmen UID/GID/Mode aus der FUSE-Request (umask-respektierend); Format-Version auf 5 gebumpt
+- POSIX-Besitzer und -Berechtigungen: `FileMetadata.uid`, `.gid`, `.mode` pro Inode persistent gespeichert; `CoreFsService::set_owner()` und `set_mode()` API; FUSE `setattr` handled `chown`/`chmod` korrekt für Dateien und Verzeichnisse; `create`/`mkdir` übernehmen UID/GID/Mode aus der FUSE-Request (umask-respektierend)
+- Dreistufige POSIX-Zeitstempel pro Inode: `created_at` (crtime, immutable), `modified_at` (mtime, bei Inhalts-Änderungen), `changed_at` (ctime, bei beliebigen Inode-Änderungen); `Inode::touch_modified()` bumpt mtime+ctime, `touch_changed()` bumpt nur ctime; FUSE `attr()` liefert alle drei Zeitstempel korrekt; Format-Version auf 6 gebumpt
 - Inkrementelle Device-Persistenz: `persist_to_device_incremental()` mit `DeviceImageCache` schreibt nur geänderte Segmente, wenn das Image-Layout stabil bleibt (Segment-Grössen unverändert); Fallback auf Full-Rewrite bei Size-Changes; Read-Modify-Write für partial-sector Segmente; `PersistReport` liefert `incremental`/`segments_written`/`bytes_written` für Telemetrie; FUSE RW-Device-Mount nutzt diesen Pfad automatisch (`persist()`), was `chown`/`chmod`-Kaskaden von Sekunden auf Millisekunden reduziert (nur AINO + Superblocks statt komplettes Image)
 
 ### Plattform- und Integrationsmodell

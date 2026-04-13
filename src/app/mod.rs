@@ -368,7 +368,7 @@ impl CoreFsService {
         }
 
         let inode = self.catalog.get_mut(path).expect("path still exists");
-        inode.modified_at = SystemTime::now();
+        inode.touch_modified(); // content changed → mtime + ctime
         inode.metadata.compressed = compress;
         inode.metadata.encrypted = encrypt;
         inode.size = bytes.len(); // logical size
@@ -427,7 +427,7 @@ impl CoreFsService {
             .catalog
             .get_mut(path)
             .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
-        inode.modified_at = SystemTime::now();
+        inode.touch_modified(); // content changed → mtime + ctime
         inode.size = self.blocks.append_to_inode(inode_id, extra);
         self.hot_paths.record_write(path, extra.len());
         self.journal
@@ -1240,9 +1240,8 @@ impl CoreFsService {
     /// Updates the POSIX owner (uid/gid) of a path.  Either value can be
     /// `None` to leave it unchanged (matching `chown`/`lchown` semantics).
     ///
-    /// Does **not** create a new file version and does **not** update
-    /// `modified_at` — metadata-only changes are tracked by `ctime` in
-    /// POSIX, not `mtime`.  Versioning captures content history only.
+    /// Bumps `changed_at` (ctime) but not `modified_at` (mtime).  Does not
+    /// create a new file version — versioning captures content history only.
     pub fn set_owner(
         &mut self,
         path: &str,
@@ -1258,20 +1257,21 @@ impl CoreFsService {
         if let Some(g) = gid {
             inode.metadata.gid = g;
         }
+        inode.touch_changed();
         Ok(())
     }
 
     /// Updates the POSIX mode bits of a path (permissions only; `0o7777` mask
     /// — type bits are derived from `InodeKind`).
     ///
-    /// Does **not** create a new file version and does **not** update
-    /// `modified_at` — metadata-only changes are tracked by `ctime` in
-    /// POSIX, not `mtime`.  Versioning captures content history only.
+    /// Bumps `changed_at` (ctime) but not `modified_at` (mtime).  Does not
+    /// create a new file version.
     pub fn set_mode(&mut self, path: &str, mode: u32) -> CoreFsResult<()> {
         let inode = self.catalog.get_mut(path).ok_or_else(|| {
             CoreFsError::NotFound(format!("path not found: {path}"))
         })?;
         inode.metadata.mode = mode & 0o7777;
+        inode.touch_changed();
         Ok(())
     }
 
@@ -1298,7 +1298,7 @@ impl CoreFsService {
             let new_path = format!("{to}{}", &old_path[from.len()..]);
             if let Some(mut inode) = self.catalog.remove(&old_path) {
                 inode.path = new_path;
-                inode.modified_at = SystemTime::now();
+                inode.touch_changed(); // rename is metadata change → ctime only
                 self.catalog.insert(inode);
             }
         }
@@ -2662,6 +2662,331 @@ mod tests {
             before, after,
             "chown/chmod must not update modified_at (POSIX mtime)"
         );
+    }
+
+    // =====================================================================
+    // POSIX timestamp tests (mtime, ctime, crtime)
+    // =====================================================================
+
+    /// Helper: force a measurable gap between SystemTime::now() calls.
+    fn sleep_ms(ms: u64) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+
+    #[test]
+    fn new_file_has_equal_timestamps() {
+        let mut fs = test_fs();
+        fs.create_file("/new.txt", b"hello", &[]).expect("create");
+        let inode = fs.get_inode("/new.txt").expect("inode");
+        // At creation, created == modified == changed.
+        assert_eq!(inode.created_at, inode.modified_at);
+        assert_eq!(inode.created_at, inode.changed_at);
+    }
+
+    #[test]
+    fn write_file_bumps_mtime_and_ctime() {
+        let mut fs = test_fs();
+        fs.create_file("/w.txt", b"v1", &[]).expect("create");
+        let before = {
+            let i = fs.get_inode("/w.txt").expect("inode");
+            (i.created_at, i.modified_at, i.changed_at)
+        };
+
+        sleep_ms(10);
+        fs.write_file("/w.txt", b"v2-longer").expect("write");
+
+        let after = {
+            let i = fs.get_inode("/w.txt").expect("inode");
+            (i.created_at, i.modified_at, i.changed_at)
+        };
+
+        // created_at never changes.
+        assert_eq!(before.0, after.0, "created_at must be immutable");
+        // Content change → mtime bumped.
+        assert!(after.1 > before.1, "modified_at must advance on write");
+        // Any change → ctime bumped.
+        assert!(after.2 > before.2, "changed_at must advance on write");
+    }
+
+    #[test]
+    fn chown_bumps_ctime_only_not_mtime() {
+        let mut fs = test_fs();
+        fs.create_file("/c.txt", b"x", &[]).expect("create");
+        let before = {
+            let i = fs.get_inode("/c.txt").expect("inode");
+            (i.created_at, i.modified_at, i.changed_at)
+        };
+
+        sleep_ms(10);
+        fs.set_owner("/c.txt", Some(1000), Some(1000)).expect("chown");
+
+        let after = {
+            let i = fs.get_inode("/c.txt").expect("inode");
+            (i.created_at, i.modified_at, i.changed_at)
+        };
+
+        assert_eq!(before.0, after.0, "created_at immutable under chown");
+        assert_eq!(before.1, after.1, "modified_at must NOT bump on chown");
+        assert!(after.2 > before.2, "changed_at must bump on chown");
+    }
+
+    #[test]
+    fn chmod_bumps_ctime_only_not_mtime() {
+        let mut fs = test_fs();
+        fs.create_file("/m.txt", b"x", &[]).expect("create");
+        let before = {
+            let i = fs.get_inode("/m.txt").expect("inode");
+            (i.modified_at, i.changed_at)
+        };
+
+        sleep_ms(10);
+        fs.set_mode("/m.txt", 0o600).expect("chmod");
+
+        let after = {
+            let i = fs.get_inode("/m.txt").expect("inode");
+            (i.modified_at, i.changed_at)
+        };
+
+        assert_eq!(before.0, after.0, "modified_at must NOT bump on chmod");
+        assert!(after.1 > before.1, "changed_at must bump on chmod");
+    }
+
+    #[test]
+    fn rename_bumps_ctime_only_not_mtime() {
+        let mut fs = test_fs();
+        fs.create_file("/r1.txt", b"x", &[]).expect("create");
+        let before = {
+            let i = fs.get_inode("/r1.txt").expect("inode");
+            (i.modified_at, i.changed_at)
+        };
+
+        sleep_ms(10);
+        fs.rename_entry("/r1.txt", "/r2.txt").expect("rename");
+
+        let after = {
+            let i = fs.get_inode("/r2.txt").expect("inode");
+            (i.modified_at, i.changed_at)
+        };
+
+        assert_eq!(before.0, after.0, "rename must NOT bump modified_at");
+        assert!(after.1 > before.1, "rename must bump changed_at");
+    }
+
+    #[test]
+    fn timestamps_survive_image_roundtrip() {
+        use crate::storage::volume_image;
+        let path = std::env::temp_dir().join(format!(
+            "corefs-timestamps-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+
+        let mut fs = test_fs();
+        fs.create_file("/ts.txt", b"v1", &[]).expect("create");
+        sleep_ms(10);
+        fs.write_file("/ts.txt", b"v2").expect("write");
+        sleep_ms(10);
+        fs.set_mode("/ts.txt", 0o600).expect("chmod");
+
+        let before = {
+            let i = fs.get_inode("/ts.txt").expect("inode");
+            (i.created_at, i.modified_at, i.changed_at)
+        };
+        fs.save_image_to_path(&path).expect("save");
+
+        let loaded = CoreFsService::load_image_from_path(&path).expect("load");
+        let after = {
+            let i = loaded.get_inode("/ts.txt").expect("inode");
+            (i.created_at, i.modified_at, i.changed_at)
+        };
+
+        assert_eq!(before, after, "all three timestamps must round-trip");
+        // Sanity: ctime >= mtime >= created (created set at start, mtime at write,
+        // ctime bumped by chmod which came after the write).
+        assert!(after.0 <= after.1);
+        assert!(after.1 <= after.2);
+
+        let _ = std::fs::remove_file(path);
+        let _ = volume_image::build_volume_image_bytes;
+    }
+
+    // =====================================================================
+    // Content-modification tests
+    // =====================================================================
+
+    #[test]
+    fn write_creates_version_per_content_change() {
+        let mut fs = test_fs();
+        fs.create_file("/v.txt", b"one", &[]).expect("create");
+        let v0 = fs.versioning.list_versions("/v.txt").len();
+
+        fs.write_file("/v.txt", b"two").expect("write v2");
+        let v1 = fs.versioning.list_versions("/v.txt").len();
+
+        fs.write_file("/v.txt", b"three").expect("write v3");
+        let v2 = fs.versioning.list_versions("/v.txt").len();
+
+        assert!(v1 > v0, "first write should add a version");
+        assert!(v2 > v1, "second write should add another version");
+    }
+
+    #[test]
+    fn write_updates_size_to_new_content_length() {
+        let mut fs = test_fs();
+        fs.create_file("/s.txt", b"abc", &[]).expect("create");
+        assert_eq!(fs.get_inode("/s.txt").expect("inode").size, 3);
+
+        fs.write_file("/s.txt", b"abcdefghij").expect("grow");
+        assert_eq!(fs.get_inode("/s.txt").expect("inode").size, 10);
+
+        fs.write_file("/s.txt", b"x").expect("shrink");
+        assert_eq!(fs.get_inode("/s.txt").expect("inode").size, 1);
+    }
+
+    #[test]
+    fn write_preserves_inode_id() {
+        let mut fs = test_fs();
+        fs.create_file("/id.txt", b"one", &[]).expect("create");
+        let id_before = fs.inode_for_path("/id.txt").expect("id");
+
+        fs.write_file("/id.txt", b"two").expect("write");
+        fs.write_file("/id.txt", b"three").expect("write");
+
+        let id_after = fs.inode_for_path("/id.txt").expect("id");
+        assert_eq!(id_before, id_after, "inode id must be stable across writes");
+    }
+
+    #[test]
+    fn write_preserves_owner_and_mode() {
+        let mut fs = test_fs();
+        fs.create_file("/p.txt", b"one", &[]).expect("create");
+        fs.set_owner("/p.txt", Some(1337), Some(42)).expect("chown");
+        fs.set_mode("/p.txt", 0o640).expect("chmod");
+
+        fs.write_file("/p.txt", b"two").expect("write");
+
+        let inode = fs.get_inode("/p.txt").expect("inode");
+        assert_eq!(inode.metadata.uid, 1337, "uid survives content write");
+        assert_eq!(inode.metadata.gid, 42, "gid survives content write");
+        assert_eq!(inode.metadata.mode, 0o640, "mode survives content write");
+    }
+
+    // =====================================================================
+    // Attribute change tests (uid/gid/mode)
+    // =====================================================================
+
+    #[test]
+    fn new_file_has_default_mode() {
+        let mut fs = test_fs();
+        fs.create_file("/d.txt", b"x", &[]).expect("create");
+        let inode = fs.get_inode("/d.txt").expect("inode");
+        assert_eq!(inode.metadata.mode, 0o644, "files default to 0o644");
+    }
+
+    #[test]
+    fn chmod_masks_upper_bits() {
+        let mut fs = test_fs();
+        fs.create_file("/k.txt", b"x", &[]).expect("create");
+
+        // setuid + setgid + sticky + rwx all set → still valid under 0o7777.
+        fs.set_mode("/k.txt", 0o7777).expect("chmod");
+        assert_eq!(fs.get_inode("/k.txt").expect("inode").metadata.mode, 0o7777);
+
+        // Bits above 0o7777 get masked away.
+        fs.set_mode("/k.txt", 0o170777).expect("chmod");
+        assert_eq!(fs.get_inode("/k.txt").expect("inode").metadata.mode, 0o777);
+    }
+
+    #[test]
+    fn chown_uid_only_preserves_gid() {
+        let mut fs = test_fs();
+        fs.create_file("/u.txt", b"x", &[]).expect("create");
+        fs.set_owner("/u.txt", Some(100), Some(200)).expect("chown both");
+
+        fs.set_owner("/u.txt", Some(999), None).expect("chown uid");
+        let inode = fs.get_inode("/u.txt").expect("inode");
+        assert_eq!(inode.metadata.uid, 999);
+        assert_eq!(inode.metadata.gid, 200, "gid preserved");
+    }
+
+    #[test]
+    fn chown_gid_only_preserves_uid() {
+        let mut fs = test_fs();
+        fs.create_file("/g.txt", b"x", &[]).expect("create");
+        fs.set_owner("/g.txt", Some(100), Some(200)).expect("chown both");
+
+        fs.set_owner("/g.txt", None, Some(888)).expect("chgrp");
+        let inode = fs.get_inode("/g.txt").expect("inode");
+        assert_eq!(inode.metadata.uid, 100, "uid preserved");
+        assert_eq!(inode.metadata.gid, 888);
+    }
+
+    #[test]
+    fn chown_and_chmod_are_independent() {
+        let mut fs = test_fs();
+        fs.create_file("/i.txt", b"x", &[]).expect("create");
+
+        fs.set_mode("/i.txt", 0o755).expect("chmod");
+        fs.set_owner("/i.txt", Some(42), Some(42)).expect("chown");
+        let inode = fs.get_inode("/i.txt").expect("inode");
+        assert_eq!(inode.metadata.mode, 0o755, "mode preserved after chown");
+        assert_eq!(inode.metadata.uid, 42);
+        assert_eq!(inode.metadata.gid, 42);
+
+        fs.set_mode("/i.txt", 0o600).expect("chmod 2");
+        let inode = fs.get_inode("/i.txt").expect("inode");
+        assert_eq!(inode.metadata.mode, 0o600);
+        assert_eq!(inode.metadata.uid, 42, "uid preserved after chmod");
+        assert_eq!(inode.metadata.gid, 42, "gid preserved after chmod");
+    }
+
+    #[test]
+    fn attributes_survive_multiple_roundtrips() {
+        use crate::storage::volume_image;
+        let path = std::env::temp_dir().join(format!(
+            "corefs-attr-loop-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+
+        let mut fs = test_fs();
+        fs.create_file("/a.txt", b"data", &[]).expect("create");
+        fs.set_owner("/a.txt", Some(500), Some(600)).expect("chown");
+        fs.set_mode("/a.txt", 0o751).expect("chmod");
+        fs.save_image_to_path(&path).expect("save 1");
+
+        // Three mount-unmount cycles.
+        for i in 0..3 {
+            let mut loaded = CoreFsService::load_image_from_path(&path).expect("load");
+            let inode = loaded.get_inode("/a.txt").expect("inode");
+            assert_eq!(inode.metadata.uid, 500, "uid stable cycle {i}");
+            assert_eq!(inode.metadata.gid, 600, "gid stable cycle {i}");
+            assert_eq!(inode.metadata.mode, 0o751, "mode stable cycle {i}");
+            loaded.save_image_to_path(&path).expect("save cycle");
+        }
+
+        let _ = std::fs::remove_file(path);
+        let _ = volume_image::build_volume_image_bytes;
+    }
+
+    #[test]
+    fn delete_file_does_not_affect_other_timestamps() {
+        let mut fs = test_fs();
+        fs.create_file("/a.txt", b"a", &[]).expect("a");
+        fs.create_file("/b.txt", b"b", &[]).expect("b");
+
+        let before_a = fs.get_inode("/a.txt").expect("a").modified_at;
+        sleep_ms(10);
+        fs.delete_file("/b.txt", false).expect("delete b");
+
+        let after_a = fs.get_inode("/a.txt").expect("a").modified_at;
+        assert_eq!(before_a, after_a, "unrelated file's mtime must not change");
     }
 
     #[test]

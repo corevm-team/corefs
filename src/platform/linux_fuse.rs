@@ -80,7 +80,14 @@ impl FuseNode {
             .as_ref()
             .map(|inode| inode.modified_at)
             .unwrap_or(now);
+        // POSIX ctime — status-change time.  Falls back to mtime when the
+        // inode has no explicit changed_at yet.
         let ctime = self
+            .inode
+            .as_ref()
+            .map(|inode| inode.changed_at)
+            .unwrap_or(now);
+        let crtime = self
             .inode
             .as_ref()
             .map(|inode| inode.created_at)
@@ -93,7 +100,7 @@ impl FuseNode {
             atime: mtime,
             mtime,
             ctime,
-            crtime: ctime,
+            crtime,
             kind: match self.kind() {
                 InodeKind::File => FileType::RegularFile,
                 InodeKind::Directory => FileType::Directory,
@@ -1104,7 +1111,7 @@ impl CoreFsFuseMountRw {
                 node.data.clear();
                 if let Some(ref mut inode) = node.inode {
                     inode.size = 0;
-                    inode.modified_at = SystemTime::now();
+                    inode.touch_modified();
                 }
             }
             self.dirty = true;
@@ -1620,7 +1627,7 @@ impl Filesystem for CoreFsFuseMountRw {
             if let Some(n) = self.nodes_by_ino.get_mut(&ino) {
                 n.data = buf;
                 if let Some(ref mut inode) = n.inode {
-                    inode.modified_at = SystemTime::now();
+                    inode.touch_modified();
                     inode.size = new_size as usize;
                 }
             }
