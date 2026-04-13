@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `131/131` Tests erfolgreich  
+**Test-Status:** `154/154` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -76,6 +76,11 @@
 - transparente LZ4-Kompression für Dateiinhalte: `CompressionService` (lz4_flex frame format) komprimiert Payloads ≥ 64 B bei Schreibzugriffen automatisch; `read_file` dekomprimiert transparent; `inode.size` enthält immer die logische (unkomprimierte) Größe; Versionen werden vor der Kompression gespeichert, sodass die Versionshistorie stets vollständig lesbar bleibt
 - Quota-Enforcement in `create_file` und `write_file`: schnelle Überprüfung über `Catalog::quota_stats()` (liefert `(file_count, total_bytes)` ohne Klon aller Inodes) und `QuotaService::check_stats()`; bei Überschreitung wird `CoreFsError::QuotaExceeded` zurückgegeben, bevor Daten geschrieben werden
 - automatische Versionsbereinigung unter Platzdruck: `VersioningService::prune_to_budget(max_bytes)` entfernt global die ältesten Versionen solange das Gesamtvolumen der versionierten Bytes den konfigurierbaren `max_version_bytes`-Wert (Standard: 64 MiB) überschreitet
+- Copy-on-Write auf Storage-Ebene: `BlockStore` implementiert vollständiges CoW mit Referenz-Zählung auf Blob-Ebene; `clone_for_inode()` teilt einen Blob zwischen zwei Inodes (ref_count++); der nächste Schreibzugriff auf einen der beiden Inodes materialisiert eine unabhängige Kopie; `cow_stats()` liefert ein Sharing-Report; `CowStats` (shared_blobs, exclusive_blobs, bytes_saved_by_sharing, max_ref_count)
+- Snapshot-Block-Pinning: `Snapshot.file_data` speichert die unkomprimierten Bytes aller regulären Dateien zum Snapshot-Zeitpunkt; Snapshots sind dadurch vollständig selbständig und unabhängig von späteren Block-Mutationen
+- Snapshot-Lifecycle-Management: `delete_snapshot(id)` entfernt Snapshots; `restore_snapshot(id)` schreibt alle Dateien aus `file_data` zurück (überschreibt vorhandene, legt gelöschte neu an, meldet Fehler pro Pfad statt abzubrechen)
+- CoW-Klon-Semantik: `clone_file(from, to)` erstellt einen CoW-Klon — teilt sofort den Blob, divergiert erst beim nächsten Schreibzugriff; `expunge_file(path)` löscht soft-gelöschte Dateien permanent und dekrementiert den Blob-ref_count korrekt
+- Bug-Fix in `BlockStore::append_to_inode` (shared path): doppeltes ref_count-Dekrement verhindert — `write()` dekrementiert bereits beim BlockEntry-Remove; das manuelle Dekrement davor würde den Blob auf 0 setzen während andere Inodes ihn noch referenzieren
 
 ### Plattform- und Integrationsmodell
 
@@ -108,6 +113,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - Cluster-Synchronisation
 - Hot/Cold-Storage und Tiering-Strategien
 - echte Verschlüsselung
+- echtes Copy-on-Write auf Datenträgerebene (physische Block-Sharing auf persistierten Medien; aktuell: logisches CoW im In-Memory-Modell)
 - Time-Travel-Adressierung im FUSE-RW-Mount über `@`-Syntax ist für Lookup und Read umgesetzt; fehlt noch: Adressierung im Read-only-Mount, persistente Zugriffspfade als reale Symlinks
 - fsck als weiter auszubauendes Reparatur- und Korrekturwerkzeug für stärker beschädigte Segmenttabellen, tiefere Blockdeskriptor-Rekonstruktion, Datensegment-Validierung und echte Datenheilung
 - native Kernel-/VFS-Integration für das eigene Betriebssystem
@@ -142,6 +148,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - Synchronisationsstatus
 - Kompression (LZ4 frame via `lz4_flex`)
 - Quota-Enforcement
+- Copy-on-Write mit Blob-Referenz-Zählung, CoW-Klons und Snapshot-Pinning
 
 ### `src/platform`
 
