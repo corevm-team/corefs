@@ -559,6 +559,7 @@ impl CoreFsFuseMountRw {
             ));
         }
         self.service.commit_write_transaction();
+        self.service.clear_pending_wal();
         self.service.mark_clean_shutdown();
         match self.service.save_image_to_path(&self.image_path) {
             Ok(()) => {
@@ -723,18 +724,22 @@ impl CoreFsFuseMountRw {
             )));
         }
 
-        let start = offset.max(0) as usize;
-        let end = start.saturating_add(data.len());
-        if handle.data.len() < end {
-            handle.data.resize(end, 0);
-        }
-        handle.data[start..end].copy_from_slice(data);
-        handle.dirty = true;
-
+        let new_len = {
+            let start = offset.max(0) as usize;
+            let end = start.saturating_add(data.len());
+            if handle.data.len() < end {
+                handle.data.resize(end, 0);
+            }
+            handle.data[start..end].copy_from_slice(data);
+            handle.dirty = true;
+            handle.data.len()
+        };
+        // Update only the cached inode metadata; the open handle is the authoritative data
+        // source for reads while the file is open (see read_from_handle), so we must NOT
+        // clone the full buffer here — doing so is O(n²) in file size.
         if let Some(node) = self.nodes_by_ino.get_mut(&ino) {
-            node.data = handle.data.clone();
             if let Some(ref mut inode) = node.inode {
-                inode.size = node.data.len();
+                inode.size = new_len;
                 inode.modified_at = SystemTime::now();
             }
         }
@@ -766,6 +771,11 @@ impl CoreFsFuseMountRw {
             self.record_extent_patch(inode_id, 0, &handle.data, handle.data.len())?;
         }
         self.service.save_image_to_path(&self.image_path)?;
+        // Sync node.data once from the flushed handle so that subsequent opens seed the
+        // correct data (we no longer mirror every write into node.data to avoid O(n²) copies).
+        if let Some(node) = self.nodes_by_ino.get_mut(&handle.ino) {
+            node.data = handle.data.clone();
+        }
         if let Some(open) = self.open_files.get_mut(&fh) {
             open.dirty = false;
         }
@@ -1621,9 +1631,16 @@ mod tests {
             b"hello".to_vec(),
             "service should not see write-back cache before flush"
         );
+        // node.data is NOT kept in sync during writes — reads on an open handle go through
+        // handle.data directly (see read_from_handle). Only inode metadata is updated.
         assert_eq!(
-            mount.nodes_by_ino.get(&readme_ino).map(|n| n.data.clone()),
-            Some(b"world".to_vec())
+            mount
+                .nodes_by_ino
+                .get(&readme_ino)
+                .and_then(|n| n.inode.as_ref())
+                .map(|i| i.size),
+            Some(5),
+            "inode.size must reflect the write"
         );
 
         mount.flush_file_handle(fh).expect("flush");

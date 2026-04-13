@@ -108,7 +108,7 @@ echo "Creating demo image: ${IMAGE_PATH}"
 "${BIN_CMD[@]}" mkfs-image "${IMAGE_PATH}" --demo
 
 echo "Preparing source payload"
-head -c 262144 /dev/urandom > "${SOURCE_PAYLOAD}"
+head -c 26214400 /dev/urandom > "${SOURCE_PAYLOAD}"
 
 echo "Starting RW mount: ${MOUNT_POINT}"
 "${BIN_CMD[@]}" mount-image-rw "${IMAGE_PATH}" "${MOUNT_POINT}" >"${LOG_PATH}" 2>&1 &
