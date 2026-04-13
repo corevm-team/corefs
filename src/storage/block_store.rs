@@ -11,6 +11,37 @@ pub struct BlockRecord {
     pub allocated_blocks: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreeExtentRecord {
+    pub device_block: u64,
+    pub allocated_blocks: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AllocationStrategy {
+    BestFit,
+    FirstFit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllocatorPolicy {
+    pub strategy: AllocationStrategy,
+    pub split_threshold_blocks: u64,
+    pub coalesce_on_release: bool,
+    pub tail_trim_enabled: bool,
+}
+
+impl Default for AllocatorPolicy {
+    fn default() -> Self {
+        Self {
+            strategy: AllocationStrategy::BestFit,
+            split_threshold_blocks: 1,
+            coalesce_on_release: true,
+            tail_trim_enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlobRecord {
     bytes: Vec<u8>,
@@ -27,11 +58,7 @@ struct BlockEntry {
     allocated_blocks: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FreeExtent {
-    device_block: u64,
-    allocated_blocks: u64,
-}
+type FreeExtent = FreeExtentRecord;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DedupeStats {
@@ -44,6 +71,7 @@ pub struct DedupeStats {
 pub struct BlockStore {
     block_size: usize,
     next_device_block: u64,
+    policy: AllocatorPolicy,
     free_extents: Vec<FreeExtent>,
     blocks: BTreeMap<InodeId, BlockEntry>,
     blobs: BTreeMap<u64, BlobRecord>,
@@ -51,9 +79,14 @@ pub struct BlockStore {
 
 impl BlockStore {
     pub fn with_block_size(block_size: usize) -> Self {
+        Self::with_block_size_and_policy(block_size, AllocatorPolicy::default())
+    }
+
+    pub fn with_block_size_and_policy(block_size: usize, policy: AllocatorPolicy) -> Self {
         Self {
             block_size: block_size.max(1),
             next_device_block: 0,
+            policy,
             free_extents: Vec::new(),
             blocks: BTreeMap::new(),
             blobs: BTreeMap::new(),
@@ -156,6 +189,28 @@ impl BlockStore {
         store
     }
 
+    pub fn from_records_with_allocator(
+        records: Vec<BlockRecord>,
+        block_size: usize,
+        policy: AllocatorPolicy,
+        free_extents: Vec<FreeExtentRecord>,
+    ) -> Self {
+        let mut store = Self::with_block_size_and_policy(block_size, policy);
+        store.ingest_records(records);
+        if store.adopt_free_extents(free_extents).is_err() {
+            store.rebuild_free_extents();
+        }
+        store
+    }
+
+    pub fn allocator_policy(&self) -> &AllocatorPolicy {
+        &self.policy
+    }
+
+    pub fn free_extents(&self) -> Vec<FreeExtentRecord> {
+        self.free_extents.clone()
+    }
+
     fn ingest_records(&mut self, records: Vec<BlockRecord>) {
         for record in records {
             let next = record
@@ -195,22 +250,33 @@ impl BlockStore {
     }
 
     fn allocate_extent(&mut self, required_blocks: u64) -> (u64, u64) {
-        if let Some(index) = self
-            .free_extents
-            .iter()
-            .enumerate()
-            .filter(|(_, extent)| extent.allocated_blocks >= required_blocks)
-            .min_by_key(|(_, extent)| extent.allocated_blocks)
-            .map(|(index, _)| index)
-        {
+        let index = match self.policy.strategy {
+            AllocationStrategy::BestFit => self
+                .free_extents
+                .iter()
+                .enumerate()
+                .filter(|(_, extent)| extent.allocated_blocks >= required_blocks)
+                .min_by_key(|(_, extent)| extent.allocated_blocks)
+                .map(|(index, _)| index),
+            AllocationStrategy::FirstFit => self
+                .free_extents
+                .iter()
+                .enumerate()
+                .find(|(_, extent)| extent.allocated_blocks >= required_blocks)
+                .map(|(index, _)| index),
+        };
+
+        if let Some(index) = index {
             let extent = self.free_extents.remove(index);
-            if extent.allocated_blocks > required_blocks {
+            let remainder = extent.allocated_blocks.saturating_sub(required_blocks);
+            if remainder >= self.policy.split_threshold_blocks.max(1) {
                 self.insert_free_extent(FreeExtent {
                     device_block: extent.device_block.saturating_add(required_blocks),
-                    allocated_blocks: extent.allocated_blocks - required_blocks,
+                    allocated_blocks: remainder,
                 });
+                return (extent.device_block, required_blocks);
             }
-            return (extent.device_block, required_blocks);
+            return (extent.device_block, extent.allocated_blocks);
         }
 
         let device_block = self.next_device_block;
@@ -223,7 +289,15 @@ impl BlockStore {
             return;
         }
         self.free_extents.push(extent);
-        self.normalize_free_extents();
+        if self.policy.coalesce_on_release {
+            self.normalize_free_extents();
+        } else {
+            self.free_extents
+                .sort_by_key(|candidate| candidate.device_block);
+            if self.policy.tail_trim_enabled {
+                self.trim_free_tail();
+            }
+        }
     }
 
     fn normalize_free_extents(&mut self) {
@@ -243,7 +317,9 @@ impl BlockStore {
         }
 
         self.free_extents = merged;
-        self.trim_free_tail();
+        if self.policy.tail_trim_enabled {
+            self.trim_free_tail();
+        }
     }
 
     fn trim_free_tail(&mut self) {
@@ -282,7 +358,70 @@ impl BlockStore {
             cursor = cursor.max(end);
         }
         self.next_device_block = self.next_device_block.max(cursor);
-        self.trim_free_tail();
+        if self.policy.tail_trim_enabled {
+            self.trim_free_tail();
+        }
+    }
+
+    fn adopt_free_extents(&mut self, free_extents: Vec<FreeExtentRecord>) -> Result<(), ()> {
+        self.free_extents = free_extents
+            .into_iter()
+            .filter(|extent| extent.allocated_blocks > 0)
+            .collect();
+        if self.policy.coalesce_on_release {
+            self.normalize_free_extents();
+        } else {
+            self.free_extents.sort_by_key(|extent| extent.device_block);
+            if self.policy.tail_trim_enabled {
+                self.trim_free_tail();
+            }
+        }
+        self.validate_allocator_state()
+    }
+
+    fn validate_allocator_state(&mut self) -> Result<(), ()> {
+        let mut occupied: Vec<(u64, u64)> = self
+            .blocks
+            .values()
+            .map(|entry| {
+                (
+                    entry.device_block,
+                    entry.device_block.saturating_add(entry.allocated_blocks),
+                )
+            })
+            .collect();
+        occupied.sort_by_key(|(start, _)| *start);
+
+        let mut free = self.free_extents.clone();
+        free.sort_by_key(|extent| extent.device_block);
+        for pair in free.windows(2) {
+            let left = pair[0];
+            let right = pair[1];
+            if left.device_block.saturating_add(left.allocated_blocks) > right.device_block {
+                return Err(());
+            }
+        }
+
+        for extent in &free {
+            let free_start = extent.device_block;
+            let free_end = extent.device_block.saturating_add(extent.allocated_blocks);
+            for (occupied_start, occupied_end) in &occupied {
+                if free_start < *occupied_end && *occupied_start < free_end {
+                    return Err(());
+                }
+            }
+        }
+
+        let max_free_end = free
+            .iter()
+            .map(|extent| extent.device_block.saturating_add(extent.allocated_blocks))
+            .max()
+            .unwrap_or(0);
+        let max_occupied_end = occupied.iter().map(|(_, end)| *end).max().unwrap_or(0);
+        self.next_device_block = self
+            .next_device_block
+            .max(max_free_end.max(max_occupied_end));
+        Ok(())
     }
 
     fn release_inode(&mut self, inode: InodeId) {
@@ -450,5 +589,36 @@ mod tests {
         let inserted = store.read(InodeId(3)).expect("record");
 
         assert_eq!(inserted.device_block, 1);
+    }
+
+    #[test]
+    fn allocator_metadata_round_trips_with_policy_and_free_extents() {
+        let policy = AllocatorPolicy {
+            strategy: AllocationStrategy::FirstFit,
+            split_threshold_blocks: 2,
+            coalesce_on_release: true,
+            tail_trim_enabled: true,
+        };
+        let records = vec![BlockRecord {
+            inode: InodeId(1),
+            bytes: b"aa".to_vec(),
+            checksum: checksum(b"aa"),
+            device_block: 2,
+            allocated_blocks: 1,
+        }];
+        let free_extents = vec![FreeExtentRecord {
+            device_block: 0,
+            allocated_blocks: 2,
+        }];
+
+        let store = BlockStore::from_records_with_allocator(
+            records,
+            4,
+            policy.clone(),
+            free_extents.clone(),
+        );
+
+        assert_eq!(store.allocator_policy(), &policy);
+        assert_eq!(store.free_extents(), free_extents);
     }
 }

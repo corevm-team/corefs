@@ -138,6 +138,8 @@ mod tests {
             pending_wal: None,
             active_inodes: Vec::new(),
             deleted_inodes: Vec::new(),
+            allocator_policy: crate::storage::block_store::AllocatorPolicy::default(),
+            free_extents: Vec::new(),
             block_records: Vec::new(),
             journal_entries: Vec::new(),
             journal_runtime: crate::services::journal::JournalRuntimeState::default(),
@@ -177,7 +179,7 @@ mod tests {
         let report = service.fsck_image(&path).expect("fsck should succeed");
 
         assert_eq!(report.format_version, 4);
-        assert_eq!(report.segment_count, 13);
+        assert_eq!(report.segment_count, 14);
         assert_eq!(report.valid_superblocks, 2);
         assert!(report.directory_checksum_valid);
         assert!(report.payload_checksum_valid);

@@ -4,6 +4,7 @@ use crate::domain::snapshot::Snapshot;
 use crate::domain::volume::VolumeDescriptor;
 use crate::platform::runtime::RuntimeIntegrationBlueprint;
 use crate::platform::tools::ToolRegistry;
+use crate::storage::block_store::{AllocatorPolicy, FreeExtentRecord};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +46,8 @@ pub struct PersistedState {
     pub volume: VolumeDescriptor,
     pub active_inodes: Vec<Inode>,
     pub deleted_inodes: Vec<Inode>,
+    pub allocator_policy: AllocatorPolicy,
+    pub free_extents: Vec<FreeExtentRecord>,
     pub block_records: Vec<crate::storage::block_store::BlockRecord>,
     pub journal_entries: Vec<crate::services::journal::JournalEntry>,
     pub versions: Vec<crate::services::versioning::FileVersion>,

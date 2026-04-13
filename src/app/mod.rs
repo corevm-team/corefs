@@ -15,7 +15,7 @@ use crate::services::security::SecurityService;
 use crate::services::sync::SyncService;
 use crate::services::versioning::VersioningService;
 use crate::storage::allocator::InodeAllocator;
-use crate::storage::block_store::BlockStore;
+use crate::storage::block_store::{AllocatorPolicy, BlockStore, FreeExtentRecord};
 use crate::storage::catalog::Catalog;
 use crate::storage::volume_image;
 use crate::storage::volume_wal::{self, VolumeWal};
@@ -62,6 +62,8 @@ pub struct PersistedState {
     pub pending_wal: Option<VolumeWal>,
     pub active_inodes: Vec<Inode>,
     pub deleted_inodes: Vec<Inode>,
+    pub allocator_policy: AllocatorPolicy,
+    pub free_extents: Vec<FreeExtentRecord>,
     pub block_records: Vec<crate::storage::block_store::BlockRecord>,
     pub journal_entries: Vec<crate::services::journal::JournalEntry>,
     pub journal_runtime: JournalRuntimeState,
@@ -577,6 +579,8 @@ impl CoreFsService {
             pending_wal: self.pending_wal.clone(),
             active_inodes: self.catalog.active_entries(),
             deleted_inodes: self.catalog.deleted_entries(),
+            allocator_policy: self.blocks.allocator_policy().clone(),
+            free_extents: self.blocks.free_extents(),
             block_records: self.blocks.records(),
             journal_entries: self.journal.entries().to_vec(),
             journal_runtime: self.journal.runtime_state().clone(),
@@ -607,7 +611,12 @@ impl CoreFsService {
             volume: state.volume,
             allocator: InodeAllocator::with_next_inode(next_inode),
             catalog: Catalog::from_parts(state.active_inodes, state.deleted_inodes),
-            blocks: BlockStore::from_records_with_block_size(state.block_records, block_size),
+            blocks: BlockStore::from_records_with_allocator(
+                state.block_records,
+                block_size,
+                state.allocator_policy,
+                state.free_extents,
+            ),
             journal: JournalService::from_entries_with_runtime(
                 state.journal_entries,
                 state.journal_runtime,

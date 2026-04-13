@@ -11,7 +11,7 @@ use crate::services::journal::JournalRuntimeState;
 use crate::services::journal::{JournalRepairSummary, reconcile_persisted_state};
 use crate::services::sync::SyncStatus;
 use crate::services::versioning::FileVersion;
-use crate::storage::block_store::BlockRecord;
+use crate::storage::block_store::{AllocatorPolicy, BlockRecord, FreeExtentRecord};
 use crate::storage::volume_wal::VolumeWal;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -25,9 +25,9 @@ const SEGMENT_ENTRY_SIZE: usize = 24;
 const HEADER_SIZE: usize = 16;
 const SUPERBLOCK_SIZE: usize = 56;
 const SEGMENT_FRAME_SIZE: usize = 24;
-const EXPECTED_SEGMENT_KINDS: [[u8; 4]; 13] = [
+const EXPECTED_SEGMENT_KINDS: [[u8; 4]; 14] = [
     *b"SUPR", *b"SUP2", *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC",
-    *b"SNAP", *b"TXNJ", *b"BLKD", *b"DATA",
+    *b"SNAP", *b"TXNJ", *b"FREE", *b"BLKD", *b"DATA",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +76,12 @@ struct JournalRuntimeSegment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BlockDescriptorSegment {
     descriptors: Vec<BlockDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FreeSpaceSegment {
+    policy: AllocatorPolicy,
+    extents: Vec<FreeExtentRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +193,14 @@ pub fn save_volume_image(path: impl AsRef<Path>, state: &PersistedState) -> Core
                 clean_unmount: state.clean_unmount,
                 runtime: state.journal_runtime.clone(),
                 pending_wal: state.pending_wal.clone(),
+            },
+            path,
+        )?,
+        serialize_segment(
+            *b"FREE",
+            &FreeSpaceSegment {
+                policy: state.allocator_policy.clone(),
+                extents: state.free_extents.clone(),
             },
             path,
         )?,
@@ -1207,6 +1221,12 @@ fn persisted_state_from_entries(
                 runtime: JournalRuntimeState::default(),
                 pending_wal: None,
             });
+    let free_space =
+        deserialize_optional_segment::<FreeSpaceSegment>(bytes, &entries, b"FREE", path)?
+            .unwrap_or(FreeSpaceSegment {
+                policy: AllocatorPolicy::default(),
+                extents: Vec::new(),
+            });
 
     let block_records = match (
         deserialize_optional_segment::<BlockDescriptorSegment>(bytes, entries, b"BLKD", path)?,
@@ -1218,6 +1238,12 @@ fn persisted_state_from_entries(
         }
         _ => Vec::new(),
     };
+    let free_extents = if free_space.extents.is_empty() {
+        reconstruct_free_extents_from_records(&block_records)
+    } else {
+        free_space.extents
+    };
+    validate_free_space_layout(&block_records, &free_extents)?;
 
     Ok(PersistedState {
         config,
@@ -1226,6 +1252,8 @@ fn persisted_state_from_entries(
         pending_wal: journal_runtime.pending_wal,
         active_inodes: active,
         deleted_inodes: deleted,
+        allocator_policy: free_space.policy,
+        free_extents,
         block_records,
         journal_entries: journal,
         journal_runtime: journal_runtime.runtime,
@@ -1253,6 +1281,7 @@ fn persisted_state_from_entries_relaxed(
                 entries,
                 path,
             )?;
+            state.free_extents = reconstruct_free_extents_from_records(&state.block_records);
             Ok((state, true))
         }
     }
@@ -1309,6 +1338,8 @@ fn persisted_state_without_blocks(
         pending_wal: journal_runtime.pending_wal,
         active_inodes: active,
         deleted_inodes: deleted,
+        allocator_policy: AllocatorPolicy::default(),
+        free_extents: Vec::new(),
         block_records: Vec::new(),
         journal_entries: journal,
         journal_runtime: journal_runtime.runtime,
@@ -1378,6 +1409,86 @@ fn reconstruct_block_records_from_data(
     Ok(records)
 }
 
+fn reconstruct_free_extents_from_records(block_records: &[BlockRecord]) -> Vec<FreeExtentRecord> {
+    let mut occupied: Vec<(u64, u64)> = block_records
+        .iter()
+        .map(|record| {
+            (
+                record.device_block,
+                record
+                    .device_block
+                    .saturating_add(record.allocated_blocks.max(1)),
+            )
+        })
+        .collect();
+    occupied.sort_by_key(|(start, _)| *start);
+
+    let mut extents = Vec::new();
+    let mut cursor = 0u64;
+    for (start, end) in occupied {
+        if start > cursor {
+            extents.push(FreeExtentRecord {
+                device_block: cursor,
+                allocated_blocks: start - cursor,
+            });
+        }
+        cursor = cursor.max(end);
+    }
+    extents
+}
+
+fn validate_free_space_layout(
+    block_records: &[BlockRecord],
+    free_extents: &[FreeExtentRecord],
+) -> CoreFsResult<()> {
+    let mut free = free_extents.to_vec();
+    free.sort_by_key(|extent| extent.device_block);
+
+    for extent in &free {
+        if extent.allocated_blocks == 0 {
+            return Err(CoreFsError::State(
+                "invalid CoreFS FREE segment extent with zero length".to_string(),
+            ));
+        }
+    }
+
+    for pair in free.windows(2) {
+        let left = pair[0];
+        let right = pair[1];
+        if left.device_block.saturating_add(left.allocated_blocks) > right.device_block {
+            return Err(CoreFsError::State(
+                "invalid CoreFS FREE segment overlap".to_string(),
+            ));
+        }
+    }
+
+    let occupied: Vec<(u64, u64)> = block_records
+        .iter()
+        .map(|record| {
+            (
+                record.device_block,
+                record
+                    .device_block
+                    .saturating_add(record.allocated_blocks.max(1)),
+            )
+        })
+        .collect();
+
+    for extent in &free {
+        let free_start = extent.device_block;
+        let free_end = extent.device_block.saturating_add(extent.allocated_blocks);
+        for (occupied_start, occupied_end) in &occupied {
+            if free_start < *occupied_end && *occupied_start < free_end {
+                return Err(CoreFsError::State(
+                    "CoreFS FREE segment overlaps allocated blocks".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn reconstruct_directory_from_payloads(
     bytes: &[u8],
     path: &Path,
@@ -1414,6 +1525,7 @@ fn reconstruct_directory_from_payloads(
 
     for kind in [
         *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC", *b"SNAP", *b"TXNJ",
+        *b"FREE",
     ] {
         let length = detect_framed_segment_length(bytes, offset, &kind, path)?;
         entries.push(SegmentEntry {
@@ -1539,7 +1651,19 @@ fn inspect_volume_image_bytes(bytes: &[u8], path: &Path) -> CoreFsResult<Inspect
     let block_descriptors: BlockDescriptorSegment =
         deserialize_segment(bytes, find_segment(&entries, b"BLKD")?, path)?;
     let data = segment_bytes(bytes, find_segment(&entries, b"DATA")?, path)?;
-    let _ = join_blocks(block_descriptors.descriptors.clone(), data)?;
+    let block_records = join_blocks(block_descriptors.descriptors.clone(), data)?;
+    let free_space =
+        deserialize_optional_segment::<FreeSpaceSegment>(bytes, &entries, b"FREE", path)?
+            .unwrap_or(FreeSpaceSegment {
+                policy: AllocatorPolicy::default(),
+                extents: Vec::new(),
+            });
+    let free_extents = if free_space.extents.is_empty() {
+        reconstruct_free_extents_from_records(&block_records)
+    } else {
+        free_space.extents
+    };
+    validate_free_space_layout(&block_records, &free_extents)?;
 
     Ok(InspectedImage {
         report: VolumeImageInspectionReport {
@@ -1753,6 +1877,8 @@ mod tests {
             pending_wal: None,
             active_inodes: Vec::new(),
             deleted_inodes: Vec::new(),
+            allocator_policy: AllocatorPolicy::default(),
+            free_extents: Vec::new(),
             block_records: Vec::new(),
             journal_entries: Vec::new(),
             journal_runtime: JournalRuntimeState::default(),
@@ -1773,6 +1899,16 @@ mod tests {
     fn save_and_load_volume_image_round_trip() {
         let path = temp_path("roundtrip");
         let mut state = sample_state();
+        state.allocator_policy = AllocatorPolicy {
+            strategy: crate::storage::block_store::AllocationStrategy::FirstFit,
+            split_threshold_blocks: 2,
+            coalesce_on_release: true,
+            tail_trim_enabled: true,
+        };
+        state.free_extents = vec![FreeExtentRecord {
+            device_block: 0,
+            allocated_blocks: 4,
+        }];
         state.block_records = vec![BlockRecord {
             inode: InodeId(7),
             bytes: b"payload".to_vec(),
@@ -1787,6 +1923,8 @@ mod tests {
         assert_eq!(loaded.config, state.config);
         assert_eq!(loaded.next_snapshot_id, 1);
         assert_eq!(loaded.snapshots.len(), 1);
+        assert_eq!(loaded.allocator_policy, state.allocator_policy);
+        assert_eq!(loaded.free_extents, state.free_extents);
         assert_eq!(loaded.block_records, state.block_records);
 
         let _ = fs::remove_file(path);
@@ -1818,7 +1956,7 @@ mod tests {
         );
         assert_eq!(
             u32::from_le_bytes(bytes[12..16].try_into().expect("fixed")),
-            13
+            EXPECTED_SEGMENT_KINDS.len() as u32
         );
         assert_eq!(&bytes[16..20], b"SUPR");
         assert_eq!(&bytes[40..44], b"SUP2");
@@ -1858,7 +1996,7 @@ mod tests {
         let report = inspect_volume_image(&path).expect("inspection should succeed");
 
         assert_eq!(report.format_version, FORMAT_VERSION);
-        assert_eq!(report.segment_count, 13);
+        assert_eq!(report.segment_count, EXPECTED_SEGMENT_KINDS.len());
         assert_eq!(report.valid_superblocks, 2);
         assert!(report.directory_checksum_valid);
         assert!(report.payload_checksum_valid);
@@ -1874,8 +2012,10 @@ mod tests {
 
         save_volume_image(&path, &state).expect("volume image should be written");
         let mut bytes = fs::read(&path).expect("image should exist");
-        let entries = parse_directory(&bytes[HEADER_SIZE..HEADER_SIZE + (13 * SEGMENT_ENTRY_SIZE)])
-            .expect("directory should parse");
+        let entries = parse_directory(
+            &bytes[HEADER_SIZE..HEADER_SIZE + (EXPECTED_SEGMENT_KINDS.len() * SEGMENT_ENTRY_SIZE)],
+        )
+        .expect("directory should parse");
         let secondary = find_segment(&entries, b"SUP2").expect("secondary superblock should exist");
         let generation_offset = secondary.offset as usize + 16;
         let old_generation = u64::from_le_bytes(
@@ -1939,6 +2079,8 @@ mod tests {
             pending_wal: None,
             active_inodes: vec![active_inode],
             deleted_inodes: vec![deleted_inode],
+            allocator_policy: AllocatorPolicy::default(),
+            free_extents: Vec::new(),
             block_records: vec![
                 BlockRecord {
                     inode: InodeId(1),
@@ -2063,6 +2205,8 @@ mod tests {
             pending_wal: None,
             active_inodes: vec![inode],
             deleted_inodes: Vec::new(),
+            allocator_policy: AllocatorPolicy::default(),
+            free_extents: Vec::new(),
             block_records: vec![BlockRecord {
                 inode: InodeId(7),
                 bytes: b"hello".to_vec(),
@@ -2080,8 +2224,10 @@ mod tests {
 
         save_volume_image(&path, &state).expect("volume image should be written");
         let mut bytes = fs::read(&path).expect("image should exist");
-        let entries = parse_directory(&bytes[HEADER_SIZE..HEADER_SIZE + (13 * SEGMENT_ENTRY_SIZE)])
-            .expect("directory should parse");
+        let entries = parse_directory(
+            &bytes[HEADER_SIZE..HEADER_SIZE + (EXPECTED_SEGMENT_KINDS.len() * SEGMENT_ENTRY_SIZE)],
+        )
+        .expect("directory should parse");
         let blkd_offset = find_segment(&entries, b"BLKD")
             .expect("blkd segment should exist")
             .offset as usize;

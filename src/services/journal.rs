@@ -403,6 +403,8 @@ mod tests {
                 "/b".to_string(),
                 FileMetadata::default(),
             )],
+            allocator_policy: crate::storage::block_store::AllocatorPolicy::default(),
+            free_extents: Vec::new(),
             block_records: vec![
                 BlockRecord {
                     inode: crate::domain::inode::InodeId(1),
