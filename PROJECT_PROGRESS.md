@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `154/154` Tests erfolgreich  
+**Test-Status:** `165/165` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -81,6 +81,11 @@
 - Snapshot-Lifecycle-Management: `delete_snapshot(id)` entfernt Snapshots; `restore_snapshot(id)` schreibt alle Dateien aus `file_data` zurück (überschreibt vorhandene, legt gelöschte neu an, meldet Fehler pro Pfad statt abzubrechen)
 - CoW-Klon-Semantik: `clone_file(from, to)` erstellt einen CoW-Klon — teilt sofort den Blob, divergiert erst beim nächsten Schreibzugriff; `expunge_file(path)` löscht soft-gelöschte Dateien permanent und dekrementiert den Blob-ref_count korrekt
 - Bug-Fix in `BlockStore::append_to_inode` (shared path): doppeltes ref_count-Dekrement verhindert — `write()` dekrementiert bereits beim BlockEntry-Remove; das manuelle Dekrement davor würde den Blob auf 0 setzen während andere Inodes ihn noch referenzieren
+- Config-Enforcement: `clone_file()` prüft `config.performance.copy_on_write`; bei deaktiviertem CoW wird eine vollständige Kopie (read+create) statt Blob-Sharing durchgeführt
+- rekursives Verzeichnis-Klonen: `clone_tree(from, to)` klont einen Teilbaum mit CoW für Dateien, Verzeichnis-Erzeugung und Symlink-Neuanlage; liefert `CloneTreeReport` mit Zählern und Fehler-pro-Pfad
+- Scoped Snapshots: `create_snapshot_scoped(name, scope_root)` erfasst nur Pfade unter `scope_root`; `create_snapshot(name)` delegiert auf `scope_root="/"`
+- Snapshot-Diff: `diff_snapshots(a_id, b_id)` klassifiziert Dateien als added/removed/modified/unchanged zwischen zwei Snapshots
+- FUSE `copy_file_range`: serverseitige Kopie zwischen zwei offenen File-Handles ohne Kernel↔Userspace-Roundtrips; liest aus Source-Handle (oder virtuellem Snapshot-Node), schreibt in Destination-Handle; EROFS für virtuelle Destinations
 
 ### Plattform- und Integrationsmodell
 
@@ -106,7 +111,6 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 
 - produktionsnahes blockorientiertes On-Disk-Format
 - echter Blockdevice-Zugriff
-- vollständige Copy-on-Write-Implementierung auf Datenträgerebene
 - persistentes physisch device-blockadressiertes Write-Ahead-Log direkt im Volume statt des aktuellen extent-orientierten Pending-WAL
 - Deduplizierung
 - Self-Healing mit Redundanzquellen
