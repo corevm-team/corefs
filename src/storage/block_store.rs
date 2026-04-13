@@ -104,6 +104,26 @@ pub struct HeatReallocationReport {
     pub final_device_blocks: u64,
 }
 
+/// Report returned by an explicit deduplication pass over all blocks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedupePassReport {
+    /// Total blobs inspected.
+    pub blobs_scanned: usize,
+    /// Total bytes inspected across all blobs.
+    pub bytes_scanned: usize,
+    /// Number of duplicate blobs consolidated (byte-identical content under
+    /// different checksums, e.g. after a hash algorithm change or corruption).
+    pub duplicates_consolidated: usize,
+    /// Bytes reclaimed by consolidation.
+    pub bytes_reclaimed: usize,
+    /// Number of hash collisions detected (same checksum, different bytes).
+    /// A nonzero value indicates a data-integrity risk.
+    pub hash_collisions: usize,
+    /// Reference-count mismatches: blobs whose ref_count disagrees with the
+    /// number of `BlockEntry` records that reference them.
+    pub ref_count_mismatches: usize,
+}
+
 /// Snapshot of copy-on-write sharing state across all blobs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CowStats {
@@ -458,6 +478,101 @@ impl BlockStore {
             bytes_saved_by_sharing,
             exclusive_blobs,
             max_ref_count,
+        }
+    }
+
+    /// Runs an explicit deduplication and consistency pass over all blocks.
+    ///
+    /// 1. Verifies reference counts: each blob's `ref_count` should equal the
+    ///    number of `BlockEntry` records referencing its checksum.
+    /// 2. Detects hash collisions: blobs whose checksum maps to bytes that do
+    ///    **not** match `checksum(bytes)`.
+    /// 3. Finds byte-identical blobs stored under different checksums (e.g. after
+    ///    corruption or hash-algorithm changes) and consolidates them.
+    pub fn dedup_pass(&mut self) -> DedupePassReport {
+        let blobs_scanned = self.blobs.len();
+        let bytes_scanned: usize = self.blobs.values().map(|b| b.bytes.len()).sum();
+
+        // --- Phase 1: ref-count audit ---
+        let mut expected_refs: HashMap<u64, usize> = HashMap::new();
+        for entry in self.blocks.values() {
+            *expected_refs.entry(entry.blob_checksum).or_insert(0) += 1;
+        }
+        let mut ref_count_mismatches = 0usize;
+        for (cs, blob) in &mut self.blobs {
+            let expected = expected_refs.get(cs).copied().unwrap_or(0);
+            if blob.ref_count != expected {
+                blob.ref_count = expected;
+                ref_count_mismatches += 1;
+            }
+        }
+        // Remove orphaned blobs (ref_count == 0 with no entries).
+        self.blobs.retain(|_, blob| blob.ref_count > 0);
+
+        // --- Phase 2: hash collision detection ---
+        let mut hash_collisions = 0usize;
+        let checksums: Vec<u64> = self.blobs.keys().copied().collect();
+        for cs in &checksums {
+            if let Some(blob) = self.blobs.get(cs) {
+                if checksum(&blob.bytes) != blob.checksum {
+                    hash_collisions += 1;
+                }
+            }
+        }
+
+        // --- Phase 3: byte-identical consolidation ---
+        // Group blobs by actual byte content and merge duplicates.
+        let mut content_map: HashMap<Vec<u8>, u64> = HashMap::new();
+        let mut remap: HashMap<u64, u64> = HashMap::new(); // old_checksum → canonical_checksum
+        let blob_checksums: Vec<u64> = self.blobs.keys().copied().collect();
+        for cs in &blob_checksums {
+            let Some(blob) = self.blobs.get(cs) else {
+                continue;
+            };
+            if let Some(&canonical) = content_map.get(&blob.bytes) {
+                if canonical != *cs {
+                    remap.insert(*cs, canonical);
+                }
+            } else {
+                content_map.insert(blob.bytes.clone(), *cs);
+            }
+        }
+
+        let duplicates_consolidated = remap.len();
+        let mut bytes_reclaimed = 0usize;
+
+        // Re-point entries and move ref_counts.
+        for (old_cs, canonical_cs) in &remap {
+            let old_refs = self
+                .blobs
+                .get(old_cs)
+                .map(|b| b.ref_count)
+                .unwrap_or(0);
+            let old_size = self
+                .blobs
+                .get(old_cs)
+                .map(|b| b.bytes.len())
+                .unwrap_or(0);
+            bytes_reclaimed += old_size;
+            if let Some(canonical) = self.blobs.get_mut(canonical_cs) {
+                canonical.ref_count += old_refs;
+            }
+            self.blobs.remove(old_cs);
+            // Update all BlockEntries that pointed to old_cs.
+            for entry in self.blocks.values_mut() {
+                if entry.blob_checksum == *old_cs {
+                    entry.blob_checksum = *canonical_cs;
+                }
+            }
+        }
+
+        DedupePassReport {
+            blobs_scanned,
+            bytes_scanned,
+            duplicates_consolidated,
+            bytes_reclaimed,
+            hash_collisions,
+            ref_count_mismatches,
         }
     }
 

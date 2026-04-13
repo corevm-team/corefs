@@ -113,6 +113,20 @@ struct CoreFsFuseView {
 
 impl CoreFsFuseView {
     fn from_state(state: PersistedState) -> Self {
+        let encryption_service = if state.config.security.encryption_at_rest {
+            let mut enc = crate::services::encryption::EncryptionService::default();
+            enc.derive_key_from(state.config.volume_name.as_bytes());
+            Some(enc)
+        } else {
+            None
+        };
+        Self::from_state_with_encryption(state, encryption_service.as_ref())
+    }
+
+    fn from_state_with_encryption(
+        state: PersistedState,
+        encryption_service: Option<&crate::services::encryption::EncryptionService>,
+    ) -> Self {
         let mut nodes_by_ino = HashMap::new();
         let mut ino_by_path = HashMap::new();
         let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -136,17 +150,21 @@ impl CoreFsFuseView {
             let ino = inode.id.0 + 1;
             let parent_path = parent_path(&inode.path);
             let raw = block_map.get(&inode.id).cloned().unwrap_or_default();
-            // Decompress transparently: the block bytes may be LZ4-compressed when
-            // the file was created with compression enabled.
-            let data = if inode.metadata.compressed && !raw.is_empty() {
-                let mut dec = lz4_flex::frame::FrameDecoder::new(raw.as_slice());
+            // Reverse pipeline: decrypt → decompress.  Block bytes may be encrypted
+            // and/or LZ4-compressed when the file was written with those features.
+            let mut data = raw;
+            if inode.metadata.encrypted && !data.is_empty() {
+                if let Some(enc) = encryption_service {
+                    data = enc.decrypt(&data).unwrap_or(data);
+                }
+            }
+            if inode.metadata.compressed && !data.is_empty() {
+                let mut dec = lz4_flex::frame::FrameDecoder::new(data.as_slice());
                 let mut out = Vec::new();
-                std::io::Read::read_to_end(&mut dec, &mut out)
+                data = std::io::Read::read_to_end(&mut dec, &mut out)
                     .map(|_| out)
-                    .unwrap_or(raw)
-            } else {
-                raw
-            };
+                    .unwrap_or(data);
+            }
             children
                 .entry(parent_path.clone())
                 .or_default()

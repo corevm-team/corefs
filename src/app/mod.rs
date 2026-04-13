@@ -12,6 +12,7 @@ use crate::services::indexing::IndexingService;
 use crate::services::integrity::{IntegrityReport, IntegrityService};
 use crate::services::journal::{JournalRecoverySummary, JournalRuntimeState, JournalService};
 use crate::services::compression::CompressionService;
+use crate::services::encryption::EncryptionService;
 use crate::services::quota::QuotaService;
 use crate::services::recovery::RecoveryService;
 use crate::services::security::SecurityService;
@@ -134,6 +135,7 @@ pub struct CoreFsService {
     journal: JournalService,
     versioning: VersioningService,
     compression: CompressionService,
+    encryption: EncryptionService,
     quota: QuotaService,
     recovery: RecoveryService,
     integrity: IntegrityService,
@@ -154,6 +156,11 @@ impl CoreFsService {
         let mut journal = JournalService::default();
         journal.record("format", "/", format!("volume={}", volume.name));
 
+        let mut encryption = EncryptionService::default();
+        if config.security.encryption_at_rest {
+            encryption.derive_key_from(config.volume_name.as_bytes());
+        }
+
         Self {
             config,
             volume,
@@ -163,6 +170,7 @@ impl CoreFsService {
             journal,
             versioning: VersioningService::default(),
             compression: CompressionService,
+            encryption,
             quota: QuotaService,
             recovery: RecoveryService::default(),
             integrity: IntegrityService,
@@ -235,14 +243,19 @@ impl CoreFsService {
             }
         }
 
-        // Write block: compress if applicable; inode.size always tracks logical size.
-        let stored_bytes = if compress {
+        // Pipeline: compress → encrypt → store.  inode.size always tracks logical size.
+        let mut stored_bytes = if compress {
             self.compression.compress(bytes)?
         } else {
             bytes.to_vec()
         };
+        let encrypt = self.config.security.encryption_at_rest && self.encryption.has_key();
+        if encrypt {
+            stored_bytes = self.encryption.encrypt(&stored_bytes)?;
+        }
+        inode.metadata.encrypted = encrypt;
         self.blocks.write(inode_id, stored_bytes);
-        inode.size = bytes.len(); // logical (uncompressed) size
+        inode.size = bytes.len(); // logical (uncompressed, unencrypted) size
 
         self.catalog.insert(inode);
         self.hot_paths.record_write(path, bytes.len());
@@ -341,18 +354,23 @@ impl CoreFsService {
             }
         }
 
-        // Compress if enabled; inode.size always tracks logical (uncompressed) size.
+        // Pipeline: compress → encrypt → store.
         let compress = self.config.performance.compression_enabled
             && self.compression.should_compress(bytes);
-        let stored_bytes = if compress {
+        let mut stored_bytes = if compress {
             self.compression.compress(bytes)?
         } else {
             bytes.to_vec()
         };
+        let encrypt = self.config.security.encryption_at_rest && self.encryption.has_key();
+        if encrypt {
+            stored_bytes = self.encryption.encrypt(&stored_bytes)?;
+        }
 
         let inode = self.catalog.get_mut(path).expect("path still exists");
         inode.modified_at = SystemTime::now();
         inode.metadata.compressed = compress;
+        inode.metadata.encrypted = encrypt;
         inode.size = bytes.len(); // logical size
         let inode_id = inode.id;
         self.blocks.write(inode_id, stored_bytes);
@@ -370,12 +388,12 @@ impl CoreFsService {
     /// random writes use `write_file` instead.
     pub fn extend_file(&mut self, path: &str, extra: &[u8]) -> CoreFsResult<()> {
         // Phase 1: gather what we need before any mutation.
-        let (inode_id, inode_kind, was_compressed) = {
+        let (inode_id, inode_kind, was_compressed, was_encrypted) = {
             let inode = self
                 .catalog
                 .get(path)
                 .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
-            (inode.id, inode.kind, inode.metadata.compressed)
+            (inode.id, inode.kind, inode.metadata.compressed, inode.metadata.encrypted)
         };
 
         if inode_kind != InodeKind::File {
@@ -384,17 +402,24 @@ impl CoreFsService {
             )));
         }
 
-        // Phase 2: if the block was previously compressed, decompress and rewrite
-        // it as raw bytes before appending — mixing compressed and raw data is invalid.
-        if was_compressed {
+        // Phase 2: if the block was encrypted or compressed, materialise raw bytes
+        // before appending — mixed formats are invalid for append_to_inode.
+        if was_encrypted || was_compressed {
             let record = self
                 .blocks
                 .read(inode_id)
                 .ok_or_else(|| CoreFsError::State(format!("missing data blocks for {path}")))?;
-            let decompressed = self.compression.decompress(&record.bytes)?;
-            self.blocks.write(inode_id, decompressed);
+            let mut raw = record.bytes.clone();
+            if was_encrypted {
+                raw = self.encryption.decrypt(&raw)?;
+            }
+            if was_compressed {
+                raw = self.compression.decompress(&raw)?;
+            }
+            self.blocks.write(inode_id, raw);
             let inode = self.catalog.get_mut(path).expect("path still exists");
             inode.metadata.compressed = false;
+            inode.metadata.encrypted = false;
         }
 
         // Phase 3: append the new bytes (always uncompressed for extend).
@@ -410,6 +435,9 @@ impl CoreFsService {
         Ok(())
     }
 
+    /// Reads a file's content, transparently decrypting and/or decompressing as needed.
+    ///
+    /// Block pipeline (reverse of write): decrypt → decompress.
     pub fn read_file(&self, path: &str) -> CoreFsResult<Vec<u8>> {
         let inode = self
             .catalog
@@ -419,10 +447,17 @@ impl CoreFsService {
             .blocks
             .read(inode.id)
             .ok_or_else(|| CoreFsError::State(format!("missing data blocks for {path}")))?;
-        if inode.metadata.compressed {
-            self.compression.decompress(&record.bytes)
+
+        // Reverse pipeline: decrypt → decompress.
+        let decrypted = if inode.metadata.encrypted {
+            self.encryption.decrypt(&record.bytes)?
         } else {
-            Ok(record.bytes.clone())
+            record.bytes.clone()
+        };
+        if inode.metadata.compressed {
+            self.compression.decompress(&decrypted)
+        } else {
+            Ok(decrypted)
         }
     }
 
@@ -847,6 +882,44 @@ impl CoreFsService {
         }
     }
 
+    /// Runs an explicit deduplication pass over the block store.
+    ///
+    /// Returns `Err(PolicyViolation)` when `config.performance.deduplication_enabled`
+    /// is `false` — callers must opt in via configuration.
+    pub fn run_dedup(
+        &mut self,
+    ) -> CoreFsResult<crate::storage::block_store::DedupePassReport> {
+        if !self.config.performance.deduplication_enabled {
+            return Err(CoreFsError::PolicyViolation(
+                "deduplication is disabled in configuration".to_string(),
+            ));
+        }
+        let report = self.blocks.dedup_pass();
+        self.journal.record(
+            "dedup_pass",
+            "/",
+            format!(
+                "scanned={} consolidated={} reclaimed={} collisions={} ref_mismatches={}",
+                report.blobs_scanned,
+                report.duplicates_consolidated,
+                report.bytes_reclaimed,
+                report.hash_collisions,
+                report.ref_count_mismatches,
+            ),
+        );
+        Ok(report)
+    }
+
+    /// Runs a comprehensive in-memory consistency check (deep fsck).
+    pub fn fsck(&self) -> crate::services::integrity::FsckReport {
+        self.integrity.deep_fsck(
+            &self.catalog,
+            &self.blocks,
+            &self.compression,
+            &self.encryption,
+        )
+    }
+
     pub fn save_image_to_path(&self, path: impl AsRef<Path>) -> CoreFsResult<()> {
         let path = path.as_ref();
         let state = self.persisted_state();
@@ -1233,6 +1306,11 @@ impl CoreFsService {
             recovery.remember(inode.clone());
         }
 
+        let mut encryption = EncryptionService::default();
+        if state.config.security.encryption_at_rest {
+            encryption.derive_key_from(state.config.volume_name.as_bytes());
+        }
+
         let mut service = Self {
             config: state.config,
             volume: state.volume,
@@ -1250,6 +1328,7 @@ impl CoreFsService {
             ),
             versioning: VersioningService::from_versions(state.versions),
             compression: CompressionService,
+            encryption,
             quota: QuotaService,
             recovery,
             integrity: IntegrityService,
@@ -1730,7 +1809,18 @@ mod tests {
 
     #[test]
     fn data_layout_for_inode_tracks_data_segment_offsets() {
-        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        // Disable encryption and compression so stored bytes == raw bytes.
+        let mut fs = CoreFsService::format(CoreFsConfig {
+            security: crate::config::SecurityPolicy {
+                encryption_at_rest: false,
+                ..CoreFsConfig::default().security
+            },
+            performance: crate::config::PerformancePolicy {
+                compression_enabled: false,
+                ..CoreFsConfig::default().performance
+            },
+            ..CoreFsConfig::default()
+        });
         fs.create_file("/a.txt", b"abc", &[]).expect("file");
         fs.create_file("/b.txt", b"hello", &[]).expect("file");
 
@@ -1751,8 +1841,17 @@ mod tests {
 
     #[test]
     fn data_extents_for_inode_follow_block_boundaries() {
+        // Disable encryption and compression so stored bytes == raw bytes.
         let mut fs = CoreFsService::format(CoreFsConfig {
             block_size: 4,
+            security: crate::config::SecurityPolicy {
+                encryption_at_rest: false,
+                ..CoreFsConfig::default().security
+            },
+            performance: crate::config::PerformancePolicy {
+                compression_enabled: false,
+                ..CoreFsConfig::default().performance
+            },
             ..CoreFsConfig::default()
         });
         fs.create_file("/payload.bin", b"abcdefghij", &[])
@@ -2270,5 +2369,169 @@ mod tests {
         assert!(diff.removed.is_empty());
         assert!(diff.modified.is_empty());
         assert_eq!(diff.unchanged.len(), 1);
+    }
+
+    // ── Encryption at rest ──────────────────────────────────────────────────────
+
+    #[test]
+    fn encrypted_file_round_trips_through_read_write() {
+        // Default config has encryption_at_rest: true.
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/secret.txt", b"classified", &[])
+            .expect("create");
+
+        let inode = fs.get_inode("/secret.txt").expect("inode");
+        assert!(inode.metadata.encrypted, "file should be marked encrypted");
+
+        assert_eq!(
+            fs.read_file("/secret.txt").unwrap(),
+            b"classified".to_vec(),
+            "read_file must transparently decrypt"
+        );
+    }
+
+    #[test]
+    fn encrypted_file_write_updates_and_reads_back() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/doc.txt", b"v1", &[]).expect("create");
+        fs.write_file("/doc.txt", b"v2-encrypted").expect("write");
+
+        assert_eq!(
+            fs.read_file("/doc.txt").unwrap(),
+            b"v2-encrypted".to_vec()
+        );
+    }
+
+    #[test]
+    fn encryption_plus_compression_round_trips() {
+        let payload = b"compress and encrypt me ".repeat(50);
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/both.bin", &payload, &[]).expect("create");
+
+        let inode = fs.get_inode("/both.bin").expect("inode");
+        assert!(inode.metadata.encrypted);
+        assert!(inode.metadata.compressed);
+
+        assert_eq!(fs.read_file("/both.bin").unwrap(), payload);
+    }
+
+    #[test]
+    fn snapshot_captures_plaintext_bytes_even_when_encrypted() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/enc.txt", b"plaintext content", &[])
+            .expect("create");
+
+        let snap = fs.create_snapshot("encrypted-snap");
+
+        assert_eq!(
+            snap.file_data.get("/enc.txt").cloned().unwrap_or_default(),
+            b"plaintext content".to_vec(),
+            "snapshot must capture unencrypted content"
+        );
+    }
+
+    #[test]
+    fn encryption_disabled_stores_and_reads_plaintext() {
+        let config = CoreFsConfig {
+            security: crate::config::SecurityPolicy {
+                encryption_at_rest: false,
+                ..CoreFsConfig::default().security
+            },
+            ..CoreFsConfig::default()
+        };
+        let mut fs = CoreFsService::format(config);
+        fs.create_file("/plain.txt", b"no encryption", &[])
+            .expect("create");
+
+        let inode = fs.get_inode("/plain.txt").expect("inode");
+        assert!(!inode.metadata.encrypted);
+        assert_eq!(fs.read_file("/plain.txt").unwrap(), b"no encryption".to_vec());
+    }
+
+    // ── Dedup pass ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_dedup_requires_config_flag() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        // Default has deduplication_enabled: false.
+        assert!(
+            fs.run_dedup().is_err(),
+            "dedup should be rejected when disabled"
+        );
+    }
+
+    #[test]
+    fn run_dedup_reports_clean_state() {
+        let config = CoreFsConfig {
+            performance: crate::config::PerformancePolicy {
+                deduplication_enabled: true,
+                ..CoreFsConfig::default().performance
+            },
+            ..CoreFsConfig::default()
+        };
+        let mut fs = CoreFsService::format(config);
+        fs.create_file("/a.txt", b"data", &[]).expect("file");
+        fs.create_file("/b.txt", b"other", &[]).expect("file");
+
+        let report = fs.run_dedup().expect("dedup should succeed");
+
+        assert!(report.blobs_scanned >= 2);
+        assert_eq!(report.hash_collisions, 0);
+        assert_eq!(report.duplicates_consolidated, 0);
+    }
+
+    // ── Deep fsck ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fsck_clean_filesystem_reports_no_errors() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_directory("/docs").expect("dir");
+        fs.create_file("/docs/readme.md", b"hello", &[]).expect("file");
+        fs.create_file("/data.bin", b"binary payload", &[]).expect("file");
+
+        let report = fs.fsck();
+
+        assert!(report.checked_inodes >= 3);
+        assert_eq!(report.missing_blocks, Vec::<String>::new());
+        assert_eq!(report.checksum_failures, Vec::<String>::new());
+        assert_eq!(report.compression_errors, Vec::<String>::new());
+        assert_eq!(report.encryption_errors, Vec::<String>::new());
+        assert_eq!(report.size_mismatches, Vec::<(String, usize, usize)>::new());
+        assert_eq!(report.orphaned_blocks, Vec::<crate::domain::inode::InodeId>::new());
+    }
+
+    #[test]
+    fn fsck_with_encryption_and_compression_validates_all_layers() {
+        let payload = b"fsck test payload ".repeat(10);
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/layered.bin", &payload, &[]).expect("file");
+
+        let inode = fs.get_inode("/layered.bin").expect("inode");
+        assert!(inode.metadata.encrypted);
+        assert!(inode.metadata.compressed);
+
+        let report = fs.fsck();
+
+        // All layers valid: decrypt → decompress → size match.
+        assert_eq!(report.encryption_errors, Vec::<String>::new());
+        assert_eq!(report.compression_errors, Vec::<String>::new());
+        assert_eq!(report.size_mismatches, Vec::<(String, usize, usize)>::new());
+    }
+
+    #[test]
+    fn fsck_detects_missing_blocks() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/orphan.txt", b"data", &[]).expect("file");
+
+        // Manually remove the block to simulate corruption.
+        let inode_id = fs.inode_for_path("/orphan.txt").expect("inode");
+        fs.blocks.remove(inode_id);
+
+        let report = fs.fsck();
+
+        assert!(
+            report.missing_blocks.contains(&"/orphan.txt".to_string()),
+            "fsck must detect missing blocks"
+        );
     }
 }
