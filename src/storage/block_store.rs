@@ -104,6 +104,22 @@ pub struct HeatReallocationReport {
     pub final_device_blocks: u64,
 }
 
+/// Snapshot of copy-on-write sharing state across all blobs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CowStats {
+    /// Blobs referenced by two or more `BlockEntry` records.
+    pub shared_blobs: usize,
+    /// Sum of `blob_size × ref_count` for all shared blobs (total logical bytes mapped
+    /// by shared blobs, counting each referencing inode separately).
+    pub shared_logical_bytes: usize,
+    /// Physical bytes saved by sharing (`blob_size × (ref_count − 1)` per shared blob).
+    pub bytes_saved_by_sharing: usize,
+    /// Blobs owned exclusively by a single inode (ref_count == 1).
+    pub exclusive_blobs: usize,
+    /// Highest reference count seen across all blobs.
+    pub max_ref_count: usize,
+}
+
 #[derive(Debug)]
 pub struct BlockStore {
     block_size: usize,
@@ -252,7 +268,13 @@ impl BlockStore {
             new_size
         } else {
             // Shared blob: copy-on-write before extending.
-            blob.ref_count -= 1;
+            //
+            // Clone the content while the blob is still alive, then delegate to
+            // write() which will atomically release the old BlockEntry (decrementing
+            // the blob's ref_count by exactly one) and register the new blob.  We
+            // must NOT decrement ref_count manually here — write() does it when it
+            // removes the existing BlockEntry, and a double-decrement would zero the
+            // ref_count and destroy the blob while other inodes still reference it.
             let mut new_bytes = blob.bytes.clone();
             new_bytes.extend_from_slice(extra);
             self.write(inode, new_bytes)
@@ -356,6 +378,87 @@ impl BlockStore {
             );
         }
         self.rebuild_free_extents();
+    }
+
+    /// Returns `true` when the blob for `inode` is referenced by more than one
+    /// `BlockEntry`.  A subsequent write to either inode will copy-on-write.
+    pub fn is_shared(&self, inode: InodeId) -> bool {
+        self.blocks
+            .get(&inode)
+            .and_then(|entry| self.blobs.get(&entry.blob_checksum))
+            .is_some_and(|blob| blob.ref_count > 1)
+    }
+
+    /// Returns the content-hash of the blob currently assigned to `inode`,
+    /// or `None` if the inode has no allocated block.
+    pub fn blob_checksum(&self, inode: InodeId) -> Option<u64> {
+        self.blocks.get(&inode).map(|entry| entry.blob_checksum)
+    }
+
+    /// Creates a `BlockEntry` for `target` that shares the same blob as `source`
+    /// (CoW clone semantics).  The shared blob's reference count is incremented so
+    /// that neither inode's subsequent write will silently mutate the other's data —
+    /// `append_to_inode` and `write` both honour the reference count and perform a
+    /// copy-on-write materialisation when they detect a shared blob.
+    ///
+    /// The clone receives its own device extent so that the two inodes remain
+    /// independently addressable at the physical layer even while sharing logical
+    /// data.
+    ///
+    /// Returns `false` when `source` has no allocated block (nothing to clone).
+    pub fn clone_for_inode(&mut self, source: InodeId, target: InodeId) -> bool {
+        let Some(source_entry) = self.blocks.get(&source).cloned() else {
+            return false;
+        };
+        let Some(blob) = self.blobs.get_mut(&source_entry.blob_checksum) else {
+            return false;
+        };
+        blob.ref_count += 1;
+        // Allocate a separate device extent for the clone — physical independence
+        // even while the logical blob is shared.
+        let required = required_blocks(source_entry.size, self.block_size);
+        let (device_block, allocated_blocks) = self.allocate_extent(required.max(1));
+        self.blocks.insert(
+            target,
+            BlockEntry {
+                inode: target,
+                blob_checksum: source_entry.blob_checksum,
+                size: source_entry.size,
+                device_block,
+                allocated_blocks,
+            },
+        );
+        true
+    }
+
+    /// Returns a point-in-time snapshot of copy-on-write sharing state.
+    pub fn cow_stats(&self) -> CowStats {
+        let mut shared_blobs = 0usize;
+        let mut shared_logical_bytes = 0usize;
+        let mut bytes_saved_by_sharing = 0usize;
+        let mut exclusive_blobs = 0usize;
+        let mut max_ref_count = 0usize;
+
+        for blob in self.blobs.values() {
+            max_ref_count = max_ref_count.max(blob.ref_count);
+            if blob.ref_count > 1 {
+                shared_blobs += 1;
+                shared_logical_bytes =
+                    shared_logical_bytes.saturating_add(blob.bytes.len().saturating_mul(blob.ref_count));
+                bytes_saved_by_sharing = bytes_saved_by_sharing
+                    .saturating_add(blob.bytes.len().saturating_mul(blob.ref_count - 1));
+            } else {
+                exclusive_blobs += 1;
+            }
+        }
+
+        CowStats {
+            shared_blobs,
+            shared_logical_bytes,
+            bytes_saved_by_sharing,
+            exclusive_blobs,
+            max_ref_count,
+        }
     }
 
     pub fn dedupe_stats(&self) -> DedupeStats {
@@ -1090,5 +1193,142 @@ mod tests {
         assert_eq!(report.promoted_hot_inodes, 2);
         assert_eq!(store.read(InodeId(3)).expect("record").device_block, 0);
         assert_eq!(store.read(InodeId(1)).expect("record").device_block, 1);
+    }
+
+    // ── CoW / clone_for_inode / cow_stats ──────────────────────────────────────
+
+    #[test]
+    fn is_shared_detects_multiple_refs() {
+        let mut store = BlockStore::default();
+        store.write(InodeId(1), b"shared".to_vec());
+
+        assert!(!store.is_shared(InodeId(1)), "single inode: not shared");
+        assert!(!store.is_shared(InodeId(99)), "missing inode: not shared");
+
+        // A second inode writing the same bytes creates a shared blob.
+        store.write(InodeId(2), b"shared".to_vec());
+        assert!(store.is_shared(InodeId(1)));
+        assert!(store.is_shared(InodeId(2)));
+    }
+
+    #[test]
+    fn blob_checksum_is_consistent_before_and_after_clone() {
+        let mut store = BlockStore::default();
+        store.write(InodeId(1), b"hello".to_vec());
+        let cs = store.blob_checksum(InodeId(1)).expect("checksum");
+
+        store.clone_for_inode(InodeId(1), InodeId(2));
+
+        // Both inodes report the same checksum while sharing the blob.
+        assert_eq!(store.blob_checksum(InodeId(1)), Some(cs));
+        assert_eq!(store.blob_checksum(InodeId(2)), Some(cs));
+    }
+
+    #[test]
+    fn clone_for_inode_increments_ref_count_and_marks_shared() {
+        let mut store = BlockStore::default();
+        store.write(InodeId(10), b"data".to_vec());
+        assert!(!store.is_shared(InodeId(10)));
+
+        let cloned = store.clone_for_inode(InodeId(10), InodeId(20));
+        assert!(cloned, "clone should succeed");
+        assert!(store.is_shared(InodeId(10)), "source becomes shared");
+        assert!(store.is_shared(InodeId(20)), "clone is also shared");
+        assert_eq!(
+            store.read(InodeId(10)).map(|r| r.bytes.clone()),
+            store.read(InodeId(20)).map(|r| r.bytes.clone()),
+            "both inodes read the same data"
+        );
+    }
+
+    #[test]
+    fn clone_for_inode_returns_false_for_missing_source() {
+        let mut store = BlockStore::default();
+        assert!(!store.clone_for_inode(InodeId(99), InodeId(1)));
+    }
+
+    #[test]
+    fn write_after_clone_materialises_independent_copy() {
+        let mut store = BlockStore::default();
+        store.write(InodeId(1), b"original".to_vec());
+        store.clone_for_inode(InodeId(1), InodeId(2));
+
+        // Overwrite source — clone must still read original data.
+        store.write(InodeId(1), b"modified".to_vec());
+
+        assert_eq!(
+            store.read(InodeId(1)).expect("source").bytes,
+            b"modified".to_vec()
+        );
+        assert_eq!(
+            store.read(InodeId(2)).expect("clone").bytes,
+            b"original".to_vec(),
+            "clone must be independent after source write"
+        );
+        assert!(
+            !store.is_shared(InodeId(1)),
+            "source is now exclusively owned"
+        );
+        assert!(
+            !store.is_shared(InodeId(2)),
+            "clone is now exclusively owned"
+        );
+    }
+
+    #[test]
+    fn append_after_clone_triggers_cow_materialisation() {
+        let mut store = BlockStore::default();
+        store.write(InodeId(1), b"base".to_vec());
+        store.clone_for_inode(InodeId(1), InodeId(2));
+
+        // Append to source: shared blob must be cloned first.
+        store.append_to_inode(InodeId(1), b"_ext");
+
+        assert_eq!(store.read(InodeId(1)).expect("src").bytes, b"base_ext");
+        assert_eq!(
+            store.read(InodeId(2)).expect("clone").bytes,
+            b"base",
+            "clone must remain unmodified"
+        );
+    }
+
+    #[test]
+    fn cow_stats_reports_sharing_and_savings() {
+        let mut store = BlockStore::default();
+        // Two inodes sharing the same blob (identical content).
+        store.write(InodeId(1), b"abc".to_vec());
+        store.write(InodeId(2), b"abc".to_vec());
+        // One inode with unique content.
+        store.write(InodeId(3), b"xyz".to_vec());
+
+        let stats = store.cow_stats();
+
+        assert_eq!(stats.shared_blobs, 1, "one shared blob");
+        assert_eq!(stats.exclusive_blobs, 1, "one exclusive blob");
+        assert_eq!(stats.shared_logical_bytes, 6, "3 bytes × ref_count 2");
+        assert_eq!(stats.bytes_saved_by_sharing, 3, "3 bytes saved");
+        assert_eq!(stats.max_ref_count, 2);
+    }
+
+    #[test]
+    fn cow_stats_all_exclusive_when_no_sharing() {
+        let mut store = BlockStore::default();
+        store.write(InodeId(1), b"a".to_vec());
+        store.write(InodeId(2), b"b".to_vec());
+
+        let stats = store.cow_stats();
+
+        assert_eq!(stats.shared_blobs, 0);
+        assert_eq!(stats.bytes_saved_by_sharing, 0);
+        assert_eq!(stats.exclusive_blobs, 2);
+    }
+
+    #[test]
+    fn cow_stats_empty_store_is_zero() {
+        let store = BlockStore::default();
+        let stats = store.cow_stats();
+        assert_eq!(stats.shared_blobs, 0);
+        assert_eq!(stats.exclusive_blobs, 0);
+        assert_eq!(stats.max_ref_count, 0);
     }
 }

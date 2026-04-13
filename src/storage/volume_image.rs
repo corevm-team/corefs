@@ -750,6 +750,12 @@ fn encode_snapshot_payload(segment: &SnapshotSegment) -> Result<Vec<u8>, String>
         for path in &snapshot.paths {
             push_string(&mut bytes, path)?;
         }
+        // file_data: key-value pairs (path → raw bytes).
+        push_u32(&mut bytes, snapshot.file_data.len() as u32);
+        for (path, data) in &snapshot.file_data {
+            push_string(&mut bytes, path)?;
+            push_blob(&mut bytes, data)?;
+        }
     }
     Ok(bytes)
 }
@@ -769,12 +775,21 @@ fn decode_snapshot_payload(bytes: &[u8]) -> Result<SnapshotSegment, String> {
         for _ in 0..path_count {
             paths.push(read_string(bytes, &mut cursor)?);
         }
+        // file_data: deserialise key-value pairs (path → raw bytes).
+        let file_data_count = read_u32(bytes, &mut cursor)? as usize;
+        let mut file_data = std::collections::BTreeMap::new();
+        for _ in 0..file_data_count {
+            let key = read_string(bytes, &mut cursor)?;
+            let value = read_blob(bytes, &mut cursor)?;
+            file_data.insert(key, value);
+        }
         snapshots.push(Snapshot {
             id,
             name,
             scope_root,
             created_at,
             paths,
+            file_data,
         });
     }
     ensure_consumed(bytes, cursor)?;
@@ -964,6 +979,19 @@ fn read_string(bytes: &[u8], cursor: &mut usize) -> Result<String, String> {
     let len = read_u32(bytes, cursor)? as usize;
     let raw = read_exact(bytes, cursor, len)?;
     String::from_utf8(raw.to_vec()).map_err(|error| format!("invalid utf8 string: {error}"))
+}
+
+fn push_blob(bytes: &mut Vec<u8>, blob: &[u8]) -> Result<(), String> {
+    let len = u32::try_from(blob.len()).map_err(|_| "blob too large".to_string())?;
+    push_u32(bytes, len);
+    bytes.extend_from_slice(blob);
+    Ok(())
+}
+
+fn read_blob(bytes: &[u8], cursor: &mut usize) -> Result<Vec<u8>, String> {
+    let len = read_u32(bytes, cursor)? as usize;
+    let raw = read_exact(bytes, cursor, len)?;
+    Ok(raw.to_vec())
 }
 
 fn push_bool(bytes: &mut Vec<u8>, value: bool) {
@@ -1919,6 +1947,7 @@ mod tests {
                 scope_root: "/".to_string(),
                 created_at: SystemTime::now(),
                 paths: vec!["/".to_string()],
+                file_data: std::collections::BTreeMap::new(),
             }],
             next_snapshot_id: 1,
         }

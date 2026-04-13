@@ -32,6 +32,13 @@ impl Catalog {
         self.deleted.remove(path)
     }
 
+    /// Permanently removes a soft-deleted inode **without** restoring it to the active
+    /// catalog.  Used by the `expunge_file` path to complete a permanent deletion after
+    /// the recovery grace period has elapsed.
+    pub fn remove_from_deleted(&mut self, path: &str) -> Option<Inode> {
+        self.deleted.remove(path)
+    }
+
     pub fn deleted_contains(&self, path: &str) -> bool {
         self.deleted.contains_key(path)
     }

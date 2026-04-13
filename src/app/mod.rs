@@ -19,13 +19,14 @@ use crate::services::sync::SyncService;
 use crate::services::versioning::VersioningService;
 use crate::storage::allocator::InodeAllocator;
 use crate::storage::block_store::{
-    AllocatorPolicy, BlockStore, DefragmentationReport, FragmentationReport, FreeExtentRecord,
-    HeatReallocationReport, OptimizationReport,
+    AllocatorPolicy, BlockStore, CowStats, DefragmentationReport, FragmentationReport,
+    FreeExtentRecord, HeatReallocationReport, OptimizationReport,
 };
 use crate::storage::catalog::Catalog;
 use crate::storage::volume_image;
 use crate::storage::volume_wal::{self, VolumeWal};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -44,6 +45,28 @@ pub struct AdminReport {
     pub runtime: RuntimeIntegrationBlueprint,
     pub tools: ToolRegistry,
     pub stats: FsStats,
+}
+
+/// Report returned by `restore_snapshot`, describing what was restored and what was skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotRestoreReport {
+    pub snapshot_id: u64,
+    pub snapshot_name: String,
+    /// Number of files successfully written back from snapshot data.
+    pub restored_files: usize,
+    /// Paths that could not be restored, with an error description each.
+    pub skipped_paths: Vec<String>,
+}
+
+/// Top-level copy-on-write health report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CowReport {
+    /// Whether copy-on-write is enabled in the current configuration.
+    pub copy_on_write_enabled: bool,
+    /// Detailed sharing statistics from the block store.
+    pub stats: CowStats,
+    /// Number of snapshots currently held in memory.
+    pub snapshot_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,18 +449,230 @@ impl CoreFsService {
         Ok(())
     }
 
+    /// Creates a named snapshot of the current filesystem state.
+    ///
+    /// The snapshot captures:
+    /// - The list of all active paths (files, directories, symlinks).
+    /// - The **uncompressed** byte content of every regular file, making the
+    ///   snapshot self-contained and independent of subsequent block mutations.
+    ///
+    /// File content is stored in `Snapshot.file_data`.  On restoration via
+    /// `restore_snapshot`, these bytes are written back through the normal
+    /// write path (quota checks, compression, versioning all apply).
     pub fn create_snapshot(&mut self, name: &str) -> Snapshot {
         self.next_snapshot_id += 1;
+        let paths = self.catalog.list_paths();
+
+        // Capture uncompressed content for every regular file.  Checks whether
+        // the inode is a file without retaining a borrow, so that read_file can
+        // take an immutable &self borrow in the same iteration.
+        let mut file_data: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for path in &paths {
+            let is_file = self
+                .catalog
+                .get(path)
+                .is_some_and(|i| i.kind == InodeKind::File);
+            if is_file {
+                if let Ok(bytes) = self.read_file(path) {
+                    file_data.insert(path.clone(), bytes);
+                }
+            }
+        }
+
         let snapshot = Snapshot {
             id: self.next_snapshot_id,
             name: name.to_string(),
             scope_root: "/".to_string(),
             created_at: SystemTime::now(),
-            paths: self.catalog.list_paths(),
+            paths,
+            file_data,
         };
-        self.journal.record("snapshot", "/", format!("name={name}"));
+        self.journal.record(
+            "snapshot",
+            "/",
+            format!(
+                "name={name} id={} files={}",
+                snapshot.id,
+                snapshot.file_data.len()
+            ),
+        );
         self.snapshots.push(snapshot.clone());
         snapshot
+    }
+
+    /// Removes the snapshot with the given `snapshot_id`.
+    ///
+    /// Returns `Err(NotFound)` when no snapshot with that id exists.
+    pub fn delete_snapshot(&mut self, snapshot_id: u64) -> CoreFsResult<()> {
+        let pos = self
+            .snapshots
+            .iter()
+            .position(|s| s.id == snapshot_id)
+            .ok_or_else(|| {
+                CoreFsError::NotFound(format!("snapshot {snapshot_id} not found"))
+            })?;
+        let snapshot = self.snapshots.remove(pos);
+        self.journal.record(
+            "delete_snapshot",
+            "/",
+            format!("id={snapshot_id} name={}", snapshot.name),
+        );
+        Ok(())
+    }
+
+    /// Restores the filesystem to the state recorded in snapshot `snapshot_id`.
+    ///
+    /// For each file in `snapshot.file_data`:
+    /// - If the file still exists it is overwritten via `write_file`.
+    /// - If the file was deleted after the snapshot it is recreated via `create_file`.
+    ///
+    /// Paths that cannot be written (e.g. quota exceeded) are reported in
+    /// `SnapshotRestoreReport.skipped_paths` rather than aborting the whole restore.
+    /// Directories are not recreated — only file content is restored.
+    pub fn restore_snapshot(&mut self, snapshot_id: u64) -> CoreFsResult<SnapshotRestoreReport> {
+        let snapshot = self
+            .snapshots
+            .iter()
+            .find(|s| s.id == snapshot_id)
+            .ok_or_else(|| CoreFsError::NotFound(format!("snapshot {snapshot_id} not found")))?
+            .clone();
+
+        let mut restored_files = 0usize;
+        let mut skipped_paths: Vec<String> = Vec::new();
+
+        for (path, bytes) in &snapshot.file_data {
+            let is_file = self
+                .catalog
+                .get(path)
+                .is_some_and(|i| i.kind == InodeKind::File);
+            let missing = self.catalog.get(path).is_none();
+
+            if is_file {
+                match self.write_file(path, bytes) {
+                    Ok(()) => restored_files += 1,
+                    Err(e) => skipped_paths.push(format!("{path}: {e}")),
+                }
+            } else if missing {
+                match self.create_file(path, bytes, &[]) {
+                    Ok(()) => restored_files += 1,
+                    Err(e) => skipped_paths.push(format!("{path}: {e}")),
+                }
+            } else {
+                // Path exists but is not a regular file (directory, symlink) — skip.
+                skipped_paths.push(format!("{path}: not a regular file"));
+            }
+        }
+
+        self.journal.record(
+            "restore_snapshot",
+            "/",
+            format!(
+                "id={snapshot_id} restored={restored_files} skipped={}",
+                skipped_paths.len()
+            ),
+        );
+
+        Ok(SnapshotRestoreReport {
+            snapshot_id,
+            snapshot_name: snapshot.name.clone(),
+            restored_files,
+            skipped_paths,
+        })
+    }
+
+    /// Creates a copy-on-write clone of the file at `from` under the new path `to`.
+    ///
+    /// The clone initially shares the same underlying blob as the source — no data
+    /// is physically copied until one of the two inodes is written.  The next
+    /// `write_file` or `extend_file` call on either path will materialise an
+    /// independent copy via `BlockStore`'s reference-count tracking.
+    ///
+    /// Returns `Err(NotFound)` when `from` does not exist, `Err(AlreadyExists)` when
+    /// `to` already exists, and `Err(InvalidInput)` when `from` is not a regular file.
+    pub fn clone_file(&mut self, from: &str, to: &str) -> CoreFsResult<()> {
+        validate_path(to)?;
+
+        let source = self
+            .catalog
+            .get(from)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {from}")))?;
+
+        if source.kind != InodeKind::File {
+            return Err(CoreFsError::InvalidInput(format!(
+                "source is not a regular file: {from}"
+            )));
+        }
+        if self.catalog.get(to).is_some() {
+            return Err(CoreFsError::AlreadyExists(format!(
+                "target already exists: {to}"
+            )));
+        }
+
+        let source_id = source.id;
+        let source_size = source.size;
+        let source_meta = source.metadata.clone();
+
+        // Quota: 1 new file, source_size new logical bytes.
+        let (cur_files, cur_bytes) = self.catalog.quota_stats();
+        self.quota.check_stats(
+            &self.config.quotas,
+            cur_files,
+            cur_bytes,
+            1,
+            source_size as isize,
+        )?;
+
+        let target_id = self.allocator.allocate();
+
+        // CoW clone: share the source blob (ref_count incremented).
+        // The next write to either inode will materialise an independent copy.
+        if !self.blocks.clone_for_inode(source_id, target_id) {
+            self.allocator.release(target_id);
+            return Err(CoreFsError::State(format!(
+                "source has no allocated data block: {from}"
+            )));
+        }
+
+        let mut target = Inode::new(target_id, InodeKind::File, to.to_string(), source_meta);
+        target.size = source_size;
+
+        self.catalog.insert(target);
+        self.hot_paths.record_write(to, source_size);
+        self.journal
+            .record("clone_file", from, format!("to={to}"));
+        Ok(())
+    }
+
+    /// Permanently deletes a soft-deleted file, releasing its blocks.
+    ///
+    /// Unlike `delete_file(…, secure=false)` which keeps the blocks alive for
+    /// potential recovery, `expunge_file` decrements the blob reference count and
+    /// frees the device extent.  If the blob is still referenced by another inode
+    /// (e.g. a CoW clone), only the reference is dropped — the data itself is
+    /// preserved for the remaining owner.
+    ///
+    /// Returns `Err(NotFound)` when `path` is not in the soft-deleted catalog.
+    pub fn expunge_file(&mut self, path: &str) -> CoreFsResult<()> {
+        let inode = self
+            .catalog
+            .remove_from_deleted(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("no soft-deleted file at: {path}")))?;
+
+        self.recovery.forget(path);
+        // Release blocks: decrements blob ref_count; frees blob only if last reference.
+        let _ = self.blocks.remove(inode.id);
+        self.allocator.release(inode.id);
+        self.journal.record("expunge", path, "permanent_delete=true");
+        Ok(())
+    }
+
+    /// Returns a copy-on-write health report for monitoring and diagnostics.
+    pub fn cow_report(&self) -> CowReport {
+        CowReport {
+            copy_on_write_enabled: self.config.performance.copy_on_write,
+            stats: self.blocks.cow_stats(),
+            snapshot_count: self.snapshots.len(),
+        }
     }
 
     pub fn save_image_to_path(&self, path: impl AsRef<Path>) -> CoreFsResult<()> {
@@ -1463,5 +1698,216 @@ mod tests {
             }),
             "expected hot path telemetry to be exported"
         );
+    }
+
+    // ── Copy-on-Write ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn snapshot_captures_file_data_at_creation_time() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/notes.txt", b"hello snapshot", &[])
+            .expect("file");
+
+        let snap = fs.create_snapshot("v1");
+
+        assert!(
+            snap.file_data.contains_key("/notes.txt"),
+            "snapshot must include file_data for every regular file"
+        );
+        assert_eq!(
+            snap.file_data["/notes.txt"],
+            b"hello snapshot".to_vec(),
+            "captured bytes must match what was written"
+        );
+    }
+
+    #[test]
+    fn snapshot_captures_uncompressed_bytes_for_compressed_files() {
+        let config = CoreFsConfig {
+            performance: crate::config::PerformancePolicy {
+                compression_enabled: true,
+                copy_on_write: true,
+                journaling_enabled: true,
+                deduplication_enabled: false,
+                trim_enabled: true,
+            },
+            ..CoreFsConfig::default()
+        };
+        let payload = b"compressible content ".repeat(50);
+        let mut fs = CoreFsService::format(config);
+        fs.create_file("/big.txt", &payload, &[]).expect("file");
+
+        let snap = fs.create_snapshot("compressed-snap");
+
+        assert_eq!(
+            snap.file_data.get("/big.txt").cloned().unwrap_or_default(),
+            payload,
+            "snapshot must store uncompressed bytes"
+        );
+    }
+
+    #[test]
+    fn snapshot_restore_reverts_file_to_captured_state() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/doc.txt", b"original", &[]).expect("file");
+        let snap = fs.create_snapshot("before-change");
+
+        // Modify the file after the snapshot.
+        fs.write_file("/doc.txt", b"modified").expect("write");
+        assert_eq!(fs.read_file("/doc.txt").expect("read"), b"modified".to_vec());
+
+        // Restore the snapshot — file must revert.
+        let report = fs
+            .restore_snapshot(snap.id)
+            .expect("restore should succeed");
+
+        assert_eq!(report.restored_files, 1);
+        assert!(report.skipped_paths.is_empty());
+        assert_eq!(
+            fs.read_file("/doc.txt").expect("read"),
+            b"original".to_vec(),
+            "file must be restored to snapshot state"
+        );
+    }
+
+    #[test]
+    fn snapshot_restore_recreates_deleted_files() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/gone.txt", b"was here", &[]).expect("file");
+        let snap = fs.create_snapshot("before-delete");
+
+        fs.delete_file("/gone.txt", false).expect("delete");
+
+        let report = fs.restore_snapshot(snap.id).expect("restore");
+
+        assert_eq!(report.restored_files, 1, "deleted file must be recreated");
+        assert_eq!(
+            fs.read_file("/gone.txt").expect("read"),
+            b"was here".to_vec()
+        );
+    }
+
+    #[test]
+    fn delete_snapshot_removes_it_from_the_list() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        let snap = fs.create_snapshot("ephemeral");
+        assert_eq!(fs.snapshots().len(), 1);
+
+        fs.delete_snapshot(snap.id).expect("delete should succeed");
+        assert!(fs.snapshots().is_empty());
+    }
+
+    #[test]
+    fn delete_snapshot_returns_error_for_unknown_id() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        assert!(fs.delete_snapshot(999).is_err());
+    }
+
+    #[test]
+    fn restore_snapshot_returns_error_for_unknown_id() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        assert!(fs.restore_snapshot(999).is_err());
+    }
+
+    #[test]
+    fn clone_file_shares_blob_and_allows_independent_divergence() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/src.txt", b"shared data", &[]).expect("file");
+
+        fs.clone_file("/src.txt", "/dst.txt").expect("clone");
+
+        // Both files read the same content immediately after cloning.
+        assert_eq!(
+            fs.read_file("/src.txt").expect("read"),
+            fs.read_file("/dst.txt").expect("read"),
+            "clone must initially equal source"
+        );
+
+        // Overwrite source — clone must remain independent.
+        fs.write_file("/src.txt", b"diverged").expect("write");
+        assert_eq!(
+            fs.read_file("/dst.txt").expect("read"),
+            b"shared data".to_vec(),
+            "clone must not be affected by source write"
+        );
+        assert_eq!(
+            fs.read_file("/src.txt").expect("read"),
+            b"diverged".to_vec()
+        );
+    }
+
+    #[test]
+    fn clone_file_fails_for_nonexistent_source() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        assert!(fs.clone_file("/ghost.txt", "/copy.txt").is_err());
+    }
+
+    #[test]
+    fn clone_file_fails_when_target_already_exists() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/a.txt", b"a", &[]).expect("file");
+        fs.create_file("/b.txt", b"b", &[]).expect("file");
+        assert!(fs.clone_file("/a.txt", "/b.txt").is_err());
+    }
+
+    #[test]
+    fn expunge_file_permanently_removes_soft_deleted_file() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/temp.txt", b"temporary", &[]).expect("file");
+        fs.delete_file("/temp.txt", false).expect("soft delete");
+
+        // File is in deleted catalog, not active.
+        assert!(fs.get_inode("/temp.txt").is_none());
+        assert!(fs.recoverable_paths().contains(&"/temp.txt".to_string()));
+
+        fs.expunge_file("/temp.txt").expect("expunge");
+
+        // File is now gone from both catalogs.
+        assert!(!fs.recoverable_paths().contains(&"/temp.txt".to_string()));
+        assert!(
+            fs.restore_file("/temp.txt").is_err(),
+            "cannot restore expunged file"
+        );
+    }
+
+    #[test]
+    fn expunge_file_returns_error_for_active_or_missing_path() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/active.txt", b"x", &[]).expect("file");
+        // Active files cannot be expunged — only soft-deleted ones.
+        assert!(fs.expunge_file("/active.txt").is_err());
+        assert!(fs.expunge_file("/nonexistent.txt").is_err());
+    }
+
+    #[test]
+    fn cow_report_reflects_sharing_and_config() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/a.txt", b"abc", &[]).expect("file");
+        fs.clone_file("/a.txt", "/b.txt").expect("clone");
+        fs.create_file("/c.txt", b"unique", &[]).expect("file");
+
+        let report = fs.cow_report();
+
+        assert!(report.copy_on_write_enabled);
+        assert_eq!(report.snapshot_count, 0);
+        // At least one shared blob must be detected (a.txt and b.txt share a blob).
+        assert!(
+            report.stats.shared_blobs >= 1,
+            "shared blob must be reported"
+        );
+        assert!(
+            report.stats.bytes_saved_by_sharing > 0,
+            "savings must be nonzero for shared blobs"
+        );
+    }
+
+    #[test]
+    fn cow_report_snapshot_count_matches_live_snapshots() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_snapshot("snap1");
+        fs.create_snapshot("snap2");
+
+        let report = fs.cow_report();
+        assert_eq!(report.snapshot_count, 2);
     }
 }

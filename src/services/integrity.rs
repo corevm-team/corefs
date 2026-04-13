@@ -152,6 +152,7 @@ mod tests {
                 scope_root: "/".to_string(),
                 created_at: SystemTime::now(),
                 paths: vec!["/".to_string()],
+                file_data: std::collections::BTreeMap::new(),
             }],
             next_snapshot_id: 1,
         }
