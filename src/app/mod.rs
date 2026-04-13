@@ -58,6 +58,27 @@ pub struct SnapshotRestoreReport {
     pub skipped_paths: Vec<String>,
 }
 
+/// Report returned by `clone_tree`, describing what was cloned and what was skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloneTreeReport {
+    pub cloned_files: usize,
+    pub cloned_directories: usize,
+    pub skipped_paths: Vec<String>,
+}
+
+/// Diff between two snapshots: which files were added, removed, modified, or unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotDiff {
+    /// Paths present in B but absent in A.
+    pub added: Vec<String>,
+    /// Paths present in A but absent in B.
+    pub removed: Vec<String>,
+    /// Paths present in both but with different content.
+    pub modified: Vec<String>,
+    /// Paths present in both with identical content.
+    pub unchanged: Vec<String>,
+}
+
 /// Top-level copy-on-write health report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CowReport {
@@ -449,23 +470,32 @@ impl CoreFsService {
         Ok(())
     }
 
-    /// Creates a named snapshot of the current filesystem state.
-    ///
-    /// The snapshot captures:
-    /// - The list of all active paths (files, directories, symlinks).
-    /// - The **uncompressed** byte content of every regular file, making the
-    ///   snapshot self-contained and independent of subsequent block mutations.
-    ///
-    /// File content is stored in `Snapshot.file_data`.  On restoration via
-    /// `restore_snapshot`, these bytes are written back through the normal
-    /// write path (quota checks, compression, versioning all apply).
+    /// Shorthand for `create_snapshot_scoped(name, "/")` — captures the entire volume.
     pub fn create_snapshot(&mut self, name: &str) -> Snapshot {
-        self.next_snapshot_id += 1;
-        let paths = self.catalog.list_paths();
+        self.create_snapshot_scoped(name, "/")
+    }
 
-        // Capture uncompressed content for every regular file.  Checks whether
-        // the inode is a file without retaining a borrow, so that read_file can
-        // take an immutable &self borrow in the same iteration.
+    /// Creates a named snapshot limited to `scope_root` and its descendants.
+    ///
+    /// Only paths that equal `scope_root` or begin with `scope_root + "/"` are
+    /// included.  File content is captured uncompressed in `Snapshot.file_data`
+    /// so the snapshot is self-contained and independent of subsequent block
+    /// mutations.
+    pub fn create_snapshot_scoped(&mut self, name: &str, scope_root: &str) -> Snapshot {
+        self.next_snapshot_id += 1;
+        let all_paths = self.catalog.list_paths();
+
+        let paths: Vec<String> = if scope_root == "/" {
+            all_paths
+        } else {
+            let prefix = format!("{scope_root}/");
+            all_paths
+                .into_iter()
+                .filter(|p| p == scope_root || p.starts_with(&prefix))
+                .collect()
+        };
+
+        // Capture uncompressed content for every regular file inside the scope.
         let mut file_data: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for path in &paths {
             let is_file = self
@@ -482,7 +512,7 @@ impl CoreFsService {
         let snapshot = Snapshot {
             id: self.next_snapshot_id,
             name: name.to_string(),
-            scope_root: "/".to_string(),
+            scope_root: scope_root.to_string(),
             created_at: SystemTime::now(),
             paths,
             file_data,
@@ -589,6 +619,12 @@ impl CoreFsService {
     ///
     /// Returns `Err(NotFound)` when `from` does not exist, `Err(AlreadyExists)` when
     /// `to` already exists, and `Err(InvalidInput)` when `from` is not a regular file.
+    /// Creates a copy of the file at `from` under the new path `to`.
+    ///
+    /// When `config.performance.copy_on_write` is **enabled** (default) the clone
+    /// initially shares the underlying blob — no data is physically copied until
+    /// one of the two inodes is written.  When CoW is **disabled** the file is
+    /// eagerly copied (full read + create) so that no blob sharing occurs.
     pub fn clone_file(&mut self, from: &str, to: &str) -> CoreFsResult<()> {
         validate_path(to)?;
 
@@ -608,39 +644,175 @@ impl CoreFsService {
             )));
         }
 
-        let source_id = source.id;
-        let source_size = source.size;
-        let source_meta = source.metadata.clone();
+        if self.config.performance.copy_on_write {
+            // Lazy CoW path: share the blob (ref_count++).
+            let source_id = source.id;
+            let source_size = source.size;
+            let source_meta = source.metadata.clone();
 
-        // Quota: 1 new file, source_size new logical bytes.
-        let (cur_files, cur_bytes) = self.catalog.quota_stats();
-        self.quota.check_stats(
-            &self.config.quotas,
-            cur_files,
-            cur_bytes,
-            1,
-            source_size as isize,
-        )?;
+            let (cur_files, cur_bytes) = self.catalog.quota_stats();
+            self.quota.check_stats(
+                &self.config.quotas,
+                cur_files,
+                cur_bytes,
+                1,
+                source_size as isize,
+            )?;
 
-        let target_id = self.allocator.allocate();
+            let target_id = self.allocator.allocate();
+            if !self.blocks.clone_for_inode(source_id, target_id) {
+                self.allocator.release(target_id);
+                return Err(CoreFsError::State(format!(
+                    "source has no allocated data block: {from}"
+                )));
+            }
 
-        // CoW clone: share the source blob (ref_count incremented).
-        // The next write to either inode will materialise an independent copy.
-        if !self.blocks.clone_for_inode(source_id, target_id) {
-            self.allocator.release(target_id);
-            return Err(CoreFsError::State(format!(
-                "source has no allocated data block: {from}"
+            let mut target =
+                Inode::new(target_id, InodeKind::File, to.to_string(), source_meta);
+            target.size = source_size;
+            self.catalog.insert(target);
+            self.hot_paths.record_write(to, source_size);
+            self.journal
+                .record("clone_file", from, format!("to={to} cow=true"));
+        } else {
+            // Eager copy path: read source bytes, create independent file.
+            let source_tags = source.metadata.tags.clone();
+            let bytes = self.read_file(from)?;
+            self.create_file(to, &bytes, &source_tags)?;
+            self.journal
+                .record("clone_file", from, format!("to={to} cow=false"));
+        }
+
+        Ok(())
+    }
+
+    /// Recursively clones a directory tree from `from` to `to` using CoW
+    /// semantics for each regular file (or eager copy when CoW is disabled).
+    ///
+    /// Directories are created in order from shallowest to deepest so that
+    /// parent directories exist before their children.  Symlinks are
+    /// re-created with the same target path.
+    pub fn clone_tree(&mut self, from: &str, to: &str) -> CoreFsResult<CloneTreeReport> {
+        validate_path(to)?;
+
+        let source_kind = self
+            .catalog
+            .get(from)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {from}")))?
+            .kind;
+
+        if source_kind != InodeKind::Directory {
+            return Err(CoreFsError::InvalidInput(format!(
+                "source is not a directory: {from}"
+            )));
+        }
+        if self.catalog.get(to).is_some() {
+            return Err(CoreFsError::AlreadyExists(format!(
+                "target already exists: {to}"
             )));
         }
 
-        let mut target = Inode::new(target_id, InodeKind::File, to.to_string(), source_meta);
-        target.size = source_size;
+        // Collect all paths under `from` (including `from` itself).
+        let prefix = format!("{from}/");
+        let mut paths: Vec<String> = self
+            .catalog
+            .list_paths()
+            .into_iter()
+            .filter(|p| p == from || p.starts_with(&prefix))
+            .collect();
+        paths.sort(); // Shallowest directories first → parents before children.
 
-        self.catalog.insert(target);
-        self.hot_paths.record_write(to, source_size);
-        self.journal
-            .record("clone_file", from, format!("to={to}"));
-        Ok(())
+        let mut cloned_files = 0usize;
+        let mut cloned_directories = 0usize;
+        let mut skipped_paths: Vec<String> = Vec::new();
+
+        for path in &paths {
+            let target_path = format!("{to}{}", &path[from.len()..]);
+            let kind = self.catalog.get(path).map(|i| i.kind);
+
+            match kind {
+                Some(InodeKind::Directory) => match self.create_directory(&target_path) {
+                    Ok(()) => cloned_directories += 1,
+                    Err(e) => skipped_paths.push(format!("{target_path}: {e}")),
+                },
+                Some(InodeKind::File) => match self.clone_file(path, &target_path) {
+                    Ok(()) => cloned_files += 1,
+                    Err(e) => skipped_paths.push(format!("{target_path}: {e}")),
+                },
+                Some(InodeKind::Symlink) => {
+                    // Symlinks store the target path as raw bytes in the block store.
+                    if let Ok(target_bytes) = self.read_file(path) {
+                        let link_target = String::from_utf8_lossy(&target_bytes);
+                        match self.create_symlink(&target_path, &link_target) {
+                            Ok(()) => cloned_files += 1,
+                            Err(e) => skipped_paths.push(format!("{target_path}: {e}")),
+                        }
+                    } else {
+                        skipped_paths.push(format!("{target_path}: unable to read symlink target"));
+                    }
+                }
+                None => skipped_paths.push(format!("{path}: disappeared during clone")),
+            }
+        }
+
+        self.journal.record(
+            "clone_tree",
+            from,
+            format!(
+                "to={to} files={cloned_files} dirs={cloned_directories} skipped={}",
+                skipped_paths.len()
+            ),
+        );
+
+        Ok(CloneTreeReport {
+            cloned_files,
+            cloned_directories,
+            skipped_paths,
+        })
+    }
+
+    /// Compares two snapshots and returns which files were added, removed,
+    /// modified, or unchanged between snapshot `a_id` (older) and `b_id` (newer).
+    ///
+    /// Only `file_data` entries are compared; directory and symlink paths are
+    /// not included in the diff.
+    pub fn diff_snapshots(&self, a_id: u64, b_id: u64) -> CoreFsResult<SnapshotDiff> {
+        let a = self
+            .snapshots
+            .iter()
+            .find(|s| s.id == a_id)
+            .ok_or_else(|| CoreFsError::NotFound(format!("snapshot {a_id} not found")))?;
+        let b = self
+            .snapshots
+            .iter()
+            .find(|s| s.id == b_id)
+            .ok_or_else(|| CoreFsError::NotFound(format!("snapshot {b_id} not found")))?;
+
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
+        let mut modified = Vec::new();
+        let mut unchanged = Vec::new();
+
+        for path in a.file_data.keys() {
+            if !b.file_data.contains_key(path) {
+                removed.push(path.clone());
+            }
+        }
+
+        for (path, b_bytes) in &b.file_data {
+            match a.file_data.get(path) {
+                None => added.push(path.clone()),
+                Some(a_bytes) if a_bytes == b_bytes => unchanged.push(path.clone()),
+                Some(_) => modified.push(path.clone()),
+            }
+        }
+
+        Ok(SnapshotDiff {
+            added,
+            removed,
+            modified,
+            unchanged,
+        })
     }
 
     /// Permanently deletes a soft-deleted file, releasing its blocks.
@@ -1909,5 +2081,194 @@ mod tests {
 
         let report = fs.cow_report();
         assert_eq!(report.snapshot_count, 2);
+    }
+
+    // ── Config enforcement ──────────────────────────────────────────────────────
+
+    #[test]
+    fn clone_file_with_cow_disabled_creates_independent_copy() {
+        let config = CoreFsConfig {
+            performance: crate::config::PerformancePolicy {
+                copy_on_write: false,
+                compression_enabled: false,
+                journaling_enabled: true,
+                deduplication_enabled: false,
+                trim_enabled: true,
+            },
+            ..CoreFsConfig::default()
+        };
+        let mut fs = CoreFsService::format(config);
+        fs.create_file("/a.txt", b"data", &[]).expect("file");
+
+        fs.clone_file("/a.txt", "/b.txt").expect("clone");
+
+        // Both files exist with the same content.
+        assert_eq!(fs.read_file("/a.txt").unwrap(), b"data".to_vec());
+        assert_eq!(fs.read_file("/b.txt").unwrap(), b"data".to_vec());
+
+        // With CoW disabled there should be no shared blobs (eager full copy).
+        let report = fs.cow_report();
+        assert!(
+            !report.copy_on_write_enabled,
+            "CoW flag should be off"
+        );
+    }
+
+    // ── Recursive directory cloning ─────────────────────────────────────────────
+
+    #[test]
+    fn clone_tree_copies_directory_recursively() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_directory("/src").expect("dir");
+        fs.create_directory("/src/sub").expect("sub");
+        fs.create_file("/src/a.txt", b"alpha", &[]).expect("file");
+        fs.create_file("/src/sub/b.txt", b"beta", &[]).expect("file");
+
+        let report = fs.clone_tree("/src", "/dst").expect("clone_tree");
+
+        assert_eq!(report.cloned_directories, 2, "root + sub");
+        assert_eq!(report.cloned_files, 2, "two regular files");
+        assert!(report.skipped_paths.is_empty());
+
+        assert_eq!(fs.read_file("/dst/a.txt").unwrap(), b"alpha".to_vec());
+        assert_eq!(fs.read_file("/dst/sub/b.txt").unwrap(), b"beta".to_vec());
+    }
+
+    #[test]
+    fn clone_tree_diverges_independently() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_directory("/orig").expect("dir");
+        fs.create_file("/orig/data.bin", b"shared", &[]).expect("file");
+        fs.clone_tree("/orig", "/copy").expect("clone_tree");
+
+        // Modify the copy — original must not change.
+        fs.write_file("/copy/data.bin", b"changed").expect("write");
+        assert_eq!(fs.read_file("/orig/data.bin").unwrap(), b"shared".to_vec());
+        assert_eq!(fs.read_file("/copy/data.bin").unwrap(), b"changed".to_vec());
+    }
+
+    #[test]
+    fn clone_tree_rejects_non_directory_source() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/file.txt", b"x", &[]).expect("file");
+        assert!(fs.clone_tree("/file.txt", "/copy").is_err());
+    }
+
+    #[test]
+    fn clone_tree_rejects_existing_target() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_directory("/a").expect("dir");
+        fs.create_directory("/b").expect("dir");
+        assert!(fs.clone_tree("/a", "/b").is_err());
+    }
+
+    #[test]
+    fn clone_tree_handles_symlinks() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_directory("/src").expect("dir");
+        fs.create_symlink("/src/link", "/some/target").expect("symlink");
+
+        let report = fs.clone_tree("/src", "/dst").expect("clone_tree");
+
+        // Symlink counts as a cloned file.
+        assert_eq!(report.cloned_files, 1);
+        assert_eq!(report.cloned_directories, 1);
+    }
+
+    // ── Scoped snapshots ────────────────────────────────────────────────────────
+
+    #[test]
+    fn scoped_snapshot_captures_only_subtree() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_directory("/docs").expect("dir");
+        fs.create_file("/docs/readme.md", b"hello", &[]).expect("file");
+        fs.create_file("/root.txt", b"root", &[]).expect("file");
+
+        let snap = fs.create_snapshot_scoped("docs-only", "/docs");
+
+        assert!(
+            snap.file_data.contains_key("/docs/readme.md"),
+            "scoped file must be captured"
+        );
+        assert!(
+            !snap.file_data.contains_key("/root.txt"),
+            "out-of-scope file must not be captured"
+        );
+        assert_eq!(snap.scope_root, "/docs");
+    }
+
+    #[test]
+    fn scoped_snapshot_restore_only_restores_scoped_files() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_directory("/proj").expect("dir");
+        fs.create_file("/proj/code.rs", b"fn main() {}", &[]).expect("file");
+        fs.create_file("/unrelated.txt", b"keep", &[]).expect("file");
+        let snap = fs.create_snapshot_scoped("proj-snap", "/proj");
+
+        // Modify both files.
+        fs.write_file("/proj/code.rs", b"fn changed() {}").expect("write");
+        fs.write_file("/unrelated.txt", b"also changed").expect("write");
+
+        let report = fs.restore_snapshot(snap.id).expect("restore");
+
+        assert_eq!(report.restored_files, 1);
+        assert_eq!(
+            fs.read_file("/proj/code.rs").unwrap(),
+            b"fn main() {}".to_vec(),
+            "scoped file must be restored"
+        );
+        assert_eq!(
+            fs.read_file("/unrelated.txt").unwrap(),
+            b"also changed".to_vec(),
+            "out-of-scope file must remain unchanged"
+        );
+    }
+
+    // ── Snapshot diff ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn diff_snapshots_detects_all_change_categories() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/stable.txt", b"same", &[]).expect("file");
+        fs.create_file("/changed.txt", b"old", &[]).expect("file");
+        fs.create_file("/removed.txt", b"gone", &[]).expect("file");
+
+        let snap_a = fs.create_snapshot("before");
+
+        // Modify, delete, and add between snapshots.
+        fs.write_file("/changed.txt", b"new").expect("write");
+        fs.delete_file("/removed.txt", false).expect("delete");
+        fs.create_file("/added.txt", b"fresh", &[]).expect("file");
+
+        let snap_b = fs.create_snapshot("after");
+
+        let diff = fs.diff_snapshots(snap_a.id, snap_b.id).expect("diff");
+
+        assert_eq!(diff.added, vec!["/added.txt".to_string()]);
+        assert_eq!(diff.removed, vec!["/removed.txt".to_string()]);
+        assert_eq!(diff.modified, vec!["/changed.txt".to_string()]);
+        assert_eq!(diff.unchanged, vec!["/stable.txt".to_string()]);
+    }
+
+    #[test]
+    fn diff_snapshots_returns_error_for_unknown_snapshot() {
+        let fs = CoreFsService::format(CoreFsConfig::default());
+        assert!(fs.diff_snapshots(1, 2).is_err());
+    }
+
+    #[test]
+    fn diff_snapshots_identical_snapshots_shows_all_unchanged() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/x.txt", b"data", &[]).expect("file");
+
+        let a = fs.create_snapshot("a");
+        let b = fs.create_snapshot("b");
+
+        let diff = fs.diff_snapshots(a.id, b.id).expect("diff");
+
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+        assert!(diff.modified.is_empty());
+        assert_eq!(diff.unchanged.len(), 1);
     }
 }

@@ -1986,6 +1986,78 @@ impl Filesystem for CoreFsFuseMountRw {
         }
     }
 
+    fn copy_file_range(
+        &mut self,
+        _req: &Request<'_>,
+        ino_in: u64,
+        fh_in: u64,
+        offset_in: i64,
+        ino_out: u64,
+        fh_out: u64,
+        offset_out: i64,
+        len: u64,
+        _flags: u32,
+        reply: ReplyWrite,
+    ) {
+        // Virtual (read-only) nodes cannot be copy destinations.
+        if self.virt_files.contains_key(&ino_out)
+            || self.virt_dirs.contains_key(&ino_out)
+        {
+            reply.error(libc::EROFS);
+            return;
+        }
+
+        // Read the requested range from the source handle.
+        let src_data = match self.open_files.get(&fh_in) {
+            Some(handle) => {
+                let start = offset_in.max(0) as usize;
+                let end = (start.saturating_add(len as usize)).min(handle.data.len());
+                if start >= handle.data.len() {
+                    Vec::new()
+                } else {
+                    handle.data[start..end].to_vec()
+                }
+            }
+            None => {
+                // Source handle missing — try reading from a virtual file node.
+                if let Some(vf) = self.virt_files.get(&ino_in) {
+                    let start = offset_in.max(0) as usize;
+                    let end = (start.saturating_add(len as usize)).min(vf.bytes.len());
+                    if start >= vf.bytes.len() {
+                        Vec::new()
+                    } else {
+                        vf.bytes[start..end].to_vec()
+                    }
+                } else {
+                    reply.error(libc::EBADF);
+                    return;
+                }
+            }
+        };
+
+        if src_data.is_empty() {
+            reply.written(0);
+            return;
+        }
+
+        // Write the range into the destination handle.
+        match self.open_files.get_mut(&fh_out) {
+            Some(handle) => {
+                let start = offset_out.max(0) as usize;
+                let end = start.saturating_add(src_data.len());
+                if end > handle.data.len() {
+                    handle.data.resize(end, 0);
+                }
+                handle.data[start..end].copy_from_slice(&src_data);
+                self.dirty = true;
+                reply.written(src_data.len() as u32);
+            }
+            None => {
+                reply.error(libc::EBADF);
+            }
+        }
+    }
+
     fn readdir(
         &mut self,
         _req: &Request<'_>,
