@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `106/106` Tests erfolgreich  
+**Test-Status:** `108/108` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -43,6 +43,7 @@
 - persistente physische Volume-Allokation pro Dateiinhalt mit stabilen `device_block`-/`allocated_blocks`-Metadaten
 - freie Extent-Wiederverwendung mit Gap-Reuse, Freigabe überschüssiger Blöcke bei Shrinks und Tail-Trim im Storage-Layer
 - persistentes `FREE`-Segment mit Free-List-Metadaten und persistenter Allocator-Policy
+- aktive Defragmentierung/Compaction fuer belegte Extents inklusive Service- und CLI-Pfad
 - integriertes Pending-WAL im Volume-Image fuer RW-Sessions
 - extent- und device-blockadressierte WAL-Records ueber `inode + device_block + block_offset + inode_offset` fuer partielle File-Patches und Truncates
 - automatische Versionierung im Basismodell
@@ -169,7 +170,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 - blockorientiertes On-Disk-Format definieren
 - Metadaten-Layout festlegen
 - die aktuellen binären Segment-Frames schrittweise in ein noch stärker blockorientiertes und spezialisierteres On-Disk-Format überführen
-- die persistente Free-List/Allocator-Schicht um staerkere Fragmentierungssteuerung, Reuse-Policies und spaeter echte Device-Segmentadressierung weiterentwickeln
+- die Defragmentierungs- und Allocator-Schicht um intelligentere Reallocation-Policies, Hintergrund-Compaction und spaeter Copy-on-Write-orientierte Extent-Moves weiterentwickeln
 - Performance-Baseline für zukünftige Persistenzumstellungen fortlaufend protokollieren
 
 ### Phase 2: Systemkern
@@ -197,7 +198,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 ## Wichtige Hinweise
 
 - Das Projekt ist aktuell ein strukturierter, getesteter Kern-, Persistenz- und Volume-Layout-Prototyp und noch kein produktionsreifes Dateisystem.
-- Der Linux-Mountpfad unterstützt inzwischen read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung, transaktionales Journal-Writeback, persistente physische Volume-Allokation, freie Extent-Wiederverwendung, ein persistentes `FREE`-Segment mit Allocator-Policy und ein integriertes extent- und device-blockadressiertes Pending-WAL im Volume, ist aber noch kein vollständiges produktionsnahes Device-WAL mit fortgeschrittener Fragmentierungssteuerung.
+- Der Linux-Mountpfad unterstützt inzwischen read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung, transaktionales Journal-Writeback, persistente physische Volume-Allokation, freie Extent-Wiederverwendung, ein persistentes `FREE`-Segment mit Allocator-Policy, aktive Defragmentierung und ein integriertes extent- und device-blockadressiertes Pending-WAL im Volume, ist aber noch kein vollständiges produktionsnahes Device-WAL mit Hintergrund-Compaction oder Copy-on-Write-Moves.
 - Performance-Messungen werden jetzt über `benchmark` und `benchmark-log` reproduzierbar ausführbar.
 - Die vorhandene Testsuite ist stark für die aktuelle In-Memory-Implementierung, aber keine Garantie für `100%` messbare Coverage, da in der Umgebung keine Coverage-Tools installiert sind.
 - `.codex` ist inzwischen als projektinterne Vorgabedatei befüllt.

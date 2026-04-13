@@ -58,6 +58,13 @@ where
                 report.checked_paths, report.valid_blocks, report.invalid_blocks
             );
         }
+        "defrag" => {
+            let report = fs.defragment();
+            println!(
+                "defrag moved_entries={} reclaimed_gaps={} final_device_blocks={}",
+                report.moved_entries, report.reclaimed_gaps, report.final_device_blocks
+            );
+        }
         "delete" => {
             let path = args.get(2).ok_or_else(|| {
                 CoreFsError::InvalidCommand("missing path for delete".to_string())
@@ -167,6 +174,19 @@ where
                 );
                 println!("block_descriptors: {}", report.block_descriptors);
             }
+        }
+        "defrag-image" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for defrag-image".to_string())
+            })?;
+            let mut loaded = CoreFsService::load_image_from_path(path)?;
+            let report = loaded.defragment();
+            loaded.save_image_to_path(path)?;
+            println!("defrag-image ok: {path}");
+            println!(
+                "moved_entries={} reclaimed_gaps={} final_device_blocks={}",
+                report.moved_entries, report.reclaimed_gaps, report.final_device_blocks
+            );
         }
         "mount-image" => {
             let image_path = args.get(2).ok_or_else(|| {
@@ -294,6 +314,7 @@ fn print_usage() {
     println!("  ls");
     println!("  snapshot [name]");
     println!("  scrub");
+    println!("  defrag");
     println!("  delete <path> [--secure]");
     println!("  restore <path>");
     println!("  write <path> <payload>");
@@ -302,6 +323,7 @@ fn print_usage() {
     println!("  mkfs-image <path> [--demo]");
     println!("  load-image <path>");
     println!("  fsck-image <path> [--repair]");
+    println!("  defrag-image <path>");
     println!("  mount-image <image-path> <mount-point>");
     println!("  mount-image-rw <image-path> <mount-point>");
     println!("  diagnose-mount <image-path> <mount-point> [--create]");
@@ -432,6 +454,7 @@ mod tests {
                 "nightly".to_string(),
             ],
             vec!["corefs".to_string(), "scrub".to_string()],
+            vec!["corefs".to_string(), "defrag".to_string()],
             vec![
                 "corefs".to_string(),
                 "write".to_string(),
@@ -464,6 +487,11 @@ mod tests {
                 "fsck-image".to_string(),
                 repair_image_path.clone(),
                 "--repair".to_string(),
+            ],
+            vec![
+                "corefs".to_string(),
+                "defrag-image".to_string(),
+                fsck_image_path.clone(),
             ],
             vec![
                 "corefs".to_string(),
@@ -562,6 +590,9 @@ mod tests {
 
         let fsck_image = run(vec!["corefs".to_string(), "fsck-image".to_string()]);
         assert!(matches!(fsck_image, Err(CoreFsError::InvalidCommand(_))));
+
+        let defrag_image = run(vec!["corefs".to_string(), "defrag-image".to_string()]);
+        assert!(matches!(defrag_image, Err(CoreFsError::InvalidCommand(_))));
 
         let mount_image = run(vec!["corefs".to_string(), "mount-image".to_string()]);
         assert!(matches!(mount_image, Err(CoreFsError::InvalidCommand(_))));

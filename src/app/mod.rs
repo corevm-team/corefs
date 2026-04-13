@@ -15,7 +15,9 @@ use crate::services::security::SecurityService;
 use crate::services::sync::SyncService;
 use crate::services::versioning::VersioningService;
 use crate::storage::allocator::InodeAllocator;
-use crate::storage::block_store::{AllocatorPolicy, BlockStore, FreeExtentRecord};
+use crate::storage::block_store::{
+    AllocatorPolicy, BlockStore, DefragmentationReport, FreeExtentRecord,
+};
 use crate::storage::catalog::Catalog;
 use crate::storage::volume_image;
 use crate::storage::volume_wal::{self, VolumeWal};
@@ -353,6 +355,19 @@ impl CoreFsService {
 
     pub fn export_state(&self) -> PersistedState {
         self.persisted_state()
+    }
+
+    pub fn defragment(&mut self) -> DefragmentationReport {
+        let report = self.blocks.defragment();
+        self.journal.record(
+            "defragment",
+            "/",
+            format!(
+                "moved_entries={} reclaimed_gaps={} final_device_blocks={}",
+                report.moved_entries, report.reclaimed_gaps, report.final_device_blocks
+            ),
+        );
+        report
     }
 
     pub fn begin_write_transaction(&mut self, label: &str) -> u64 {
@@ -1091,5 +1106,33 @@ mod tests {
         assert_eq!(extents[2].device_block, 2);
         assert_eq!(extents[2].inode_offset, 8);
         assert_eq!(extents[2].length, 2);
+    }
+
+    #[test]
+    fn defragment_compacts_device_blocks_and_records_journal_entry() {
+        let mut fs = CoreFsService::format(CoreFsConfig {
+            block_size: 4,
+            ..CoreFsConfig::default()
+        });
+        fs.create_file("/a", b"aaaa", &[]).expect("file");
+        fs.create_file("/b", b"bbbb", &[]).expect("file");
+        fs.create_file("/c", b"cccc", &[]).expect("file");
+        fs.delete_file("/b", true).expect("delete");
+
+        let before = fs
+            .inode_for_path("/c")
+            .and_then(|inode| fs.data_layout_for_inode(inode))
+            .expect("layout")
+            .data_offset;
+        let report = fs.defragment();
+        let after = fs
+            .inode_for_path("/c")
+            .and_then(|inode| fs.data_layout_for_inode(inode))
+            .expect("layout")
+            .data_offset;
+
+        assert!(report.moved_entries >= 1);
+        assert!(after < before);
+        assert!(fs.journal_entries() >= 1);
     }
 }

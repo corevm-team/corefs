@@ -67,6 +67,13 @@ pub struct DedupeStats {
     pub deduplicated_blocks: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefragmentationReport {
+    pub moved_entries: usize,
+    pub reclaimed_gaps: usize,
+    pub final_device_blocks: u64,
+}
+
 #[derive(Debug)]
 pub struct BlockStore {
     block_size: usize,
@@ -246,6 +253,40 @@ impl BlockStore {
             logical_blocks: self.blocks.len(),
             unique_blobs: self.blobs.len(),
             deduplicated_blocks: self.blocks.len().saturating_sub(self.blobs.len()),
+        }
+    }
+
+    pub fn defragment(&mut self) -> DefragmentationReport {
+        let mut entries: Vec<_> = self
+            .blocks
+            .iter()
+            .map(|(inode, entry)| (*inode, entry.clone()))
+            .collect();
+        entries.sort_by_key(|(_, entry)| entry.device_block);
+
+        let original_free = self.free_extents.len();
+        let mut cursor = 0u64;
+        let mut moved_entries = 0usize;
+
+        for (_, entry) in &mut entries {
+            if entry.device_block != cursor {
+                entry.device_block = cursor;
+                moved_entries += 1;
+            }
+            cursor = cursor.saturating_add(entry.allocated_blocks);
+        }
+
+        self.blocks = entries
+            .into_iter()
+            .map(|(inode, entry)| (inode, entry))
+            .collect();
+        self.free_extents.clear();
+        self.next_device_block = cursor;
+
+        DefragmentationReport {
+            moved_entries,
+            reclaimed_gaps: original_free,
+            final_device_blocks: cursor,
         }
     }
 
@@ -620,5 +661,43 @@ mod tests {
 
         assert_eq!(store.allocator_policy(), &policy);
         assert_eq!(store.free_extents(), free_extents);
+    }
+
+    #[test]
+    fn defragment_compacts_entries_and_clears_gaps() {
+        let records = vec![
+            BlockRecord {
+                inode: InodeId(1),
+                bytes: b"aa".to_vec(),
+                checksum: checksum(b"aa"),
+                device_block: 0,
+                allocated_blocks: 1,
+            },
+            BlockRecord {
+                inode: InodeId(2),
+                bytes: b"bb".to_vec(),
+                checksum: checksum(b"bb"),
+                device_block: 3,
+                allocated_blocks: 1,
+            },
+        ];
+        let free_extents = vec![FreeExtentRecord {
+            device_block: 1,
+            allocated_blocks: 2,
+        }];
+        let mut store = BlockStore::from_records_with_allocator(
+            records,
+            4,
+            AllocatorPolicy::default(),
+            free_extents,
+        );
+
+        let report = store.defragment();
+
+        assert_eq!(report.moved_entries, 1);
+        assert_eq!(report.reclaimed_gaps, 1);
+        assert_eq!(report.final_device_blocks, 2);
+        assert!(store.free_extents().is_empty());
+        assert_eq!(store.read(InodeId(2)).expect("record").device_block, 1);
     }
 }
