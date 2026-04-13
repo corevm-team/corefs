@@ -369,6 +369,16 @@ struct CoreFsFuseMountRw {
     nodes_by_ino: HashMap<u64, FuseNode>,
     ino_by_path: HashMap<String, u64>,
     children: BTreeMap<String, Vec<String>>,
+    next_handle: u64,
+    open_files: HashMap<u64, OpenFileHandle>,
+    dirty: bool,
+}
+
+#[derive(Debug, Clone)]
+struct OpenFileHandle {
+    ino: u64,
+    path: String,
+    data: Vec<u8>,
     dirty: bool,
 }
 
@@ -381,6 +391,8 @@ impl CoreFsFuseMountRw {
             nodes_by_ino: HashMap::new(),
             ino_by_path: HashMap::new(),
             children: BTreeMap::new(),
+            next_handle: 1,
+            open_files: HashMap::new(),
             dirty: false,
         };
         mount.rebuild_indexes();
@@ -541,6 +553,9 @@ impl CoreFsFuseMountRw {
 
     /// Save the volume image to disk. Returns true on success.
     fn persist(&mut self) -> bool {
+        if self.flush_dirty_open_files().is_err() {
+            return false;
+        }
         self.service.commit_write_transaction();
         self.service.mark_clean_shutdown();
         match self.service.save_image_to_path(&self.image_path) {
@@ -627,6 +642,145 @@ impl CoreFsFuseMountRw {
 
         Ok(())
     }
+
+    fn open_file_handle(&mut self, ino: u64, flags: i32) -> CoreFsResult<u64> {
+        let Some(node) = self.nodes_by_ino.get(&ino) else {
+            return Err(CoreFsError::NotFound(format!("inode not found: {ino}")));
+        };
+        if !matches!(node.kind(), InodeKind::File) {
+            return Err(CoreFsError::InvalidInput(format!(
+                "inode is not a file: {ino}"
+            )));
+        }
+
+        let mut handle = OpenFileHandle {
+            ino,
+            path: node.path.clone(),
+            data: node.data.clone(),
+            dirty: false,
+        };
+        if flags & libc::O_TRUNC != 0 {
+            handle.data.clear();
+            handle.dirty = true;
+            if let Some(node) = self.nodes_by_ino.get_mut(&ino) {
+                node.data.clear();
+                if let Some(ref mut inode) = node.inode {
+                    inode.size = 0;
+                    inode.modified_at = SystemTime::now();
+                }
+            }
+            self.dirty = true;
+        }
+
+        let fh = self.next_handle;
+        self.next_handle = self.next_handle.saturating_add(1);
+        self.open_files.insert(fh, handle);
+        Ok(fh)
+    }
+
+    fn read_from_handle(&self, ino: u64, fh: u64, offset: i64, size: u32) -> CoreFsResult<Vec<u8>> {
+        let data = if let Some(handle) = self.open_files.get(&fh) {
+            if handle.ino != ino {
+                return Err(CoreFsError::State(format!(
+                    "file handle {fh} does not match inode {ino}"
+                )));
+            }
+            &handle.data
+        } else {
+            &self
+                .nodes_by_ino
+                .get(&ino)
+                .ok_or_else(|| CoreFsError::NotFound(format!("inode not found: {ino}")))?
+                .data
+        };
+
+        let start = offset.max(0) as usize;
+        let end = start.saturating_add(size as usize).min(data.len());
+        Ok(data.get(start..end).unwrap_or(&[]).to_vec())
+    }
+
+    fn write_to_handle(
+        &mut self,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+    ) -> CoreFsResult<u32> {
+        let handle = self
+            .open_files
+            .get_mut(&fh)
+            .ok_or_else(|| CoreFsError::State(format!("unknown file handle: {fh}")))?;
+        if handle.ino != ino {
+            return Err(CoreFsError::State(format!(
+                "file handle {fh} does not match inode {ino}"
+            )));
+        }
+
+        let start = offset.max(0) as usize;
+        let end = start.saturating_add(data.len());
+        if handle.data.len() < end {
+            handle.data.resize(end, 0);
+        }
+        handle.data[start..end].copy_from_slice(data);
+        handle.dirty = true;
+
+        if let Some(node) = self.nodes_by_ino.get_mut(&ino) {
+            node.data = handle.data.clone();
+            if let Some(ref mut inode) = node.inode {
+                inode.size = node.data.len();
+                inode.modified_at = SystemTime::now();
+            }
+        }
+        self.dirty = true;
+        Ok(data.len() as u32)
+    }
+
+    fn flush_file_handle(&mut self, fh: u64) -> CoreFsResult<bool> {
+        let Some(handle) = self.open_files.get(&fh).cloned() else {
+            return Ok(false);
+        };
+        if !handle.dirty {
+            return Ok(false);
+        }
+
+        let inode_id = self
+            .nodes_by_ino
+            .get(&handle.ino)
+            .and_then(|node| node.inode.as_ref().map(|inode| inode.id))
+            .ok_or_else(|| CoreFsError::State(format!("missing inode metadata for handle {fh}")))?;
+        self.ensure_mutation_session("write-cache-flush")?;
+        self.service.write_file(&handle.path, &handle.data)?;
+        if handle.data.is_empty() {
+            self.record_wal_operation(WalOperation::TruncateInode {
+                inode: inode_id,
+                size: 0,
+            })?;
+        } else {
+            self.record_extent_patch(inode_id, 0, &handle.data, handle.data.len())?;
+        }
+        if let Some(open) = self.open_files.get_mut(&fh) {
+            open.dirty = false;
+        }
+        Ok(true)
+    }
+
+    fn flush_dirty_open_files(&mut self) -> CoreFsResult<()> {
+        let handles: Vec<u64> = self
+            .open_files
+            .iter()
+            .filter_map(|(fh, handle)| handle.dirty.then_some(*fh))
+            .collect();
+        for fh in handles {
+            self.flush_file_handle(fh)?;
+        }
+        Ok(())
+    }
+
+    fn release_file_handle(&mut self, fh: u64) -> CoreFsResult<()> {
+        self.flush_file_handle(fh)?;
+        self.open_files.remove(&fh);
+        Ok(())
+    }
 }
 
 impl Filesystem for CoreFsFuseMountRw {
@@ -677,26 +831,41 @@ impl Filesystem for CoreFsFuseMountRw {
                 .map(|inode| inode.id)
                 .unwrap_or(InodeId(0));
             let path = node.path.clone();
-            if self.ensure_mutation_session("setattr").is_err() {
-                reply.error(EIO);
-                return;
-            }
-            let current = self.service.read_file(&path).unwrap_or_default();
-            let mut buf = current;
+            let mut buf = if let Some(fh) = _fh {
+                self.open_files
+                    .get(&fh)
+                    .map(|handle| handle.data.clone())
+                    .unwrap_or_else(|| self.service.read_file(&path).unwrap_or_default())
+            } else {
+                self.service.read_file(&path).unwrap_or_default()
+            };
             buf.resize(new_size as usize, 0);
-            if let Err(_) = self.service.write_file(&path, &buf) {
-                reply.error(EIO);
-                return;
-            }
-            if self
-                .record_wal_operation(WalOperation::TruncateInode {
-                    inode: inode_id,
-                    size: new_size as usize,
-                })
-                .is_err()
-            {
-                reply.error(EIO);
-                return;
+            if let Some(fh) = _fh {
+                if let Some(handle) = self.open_files.get_mut(&fh) {
+                    handle.data = buf.clone();
+                    handle.dirty = true;
+                }
+                self.dirty = true;
+            } else {
+                if self.ensure_mutation_session("setattr").is_err() {
+                    reply.error(EIO);
+                    return;
+                }
+                if let Err(_) = self.service.write_file(&path, &buf) {
+                    reply.error(EIO);
+                    return;
+                }
+                if self
+                    .record_wal_operation(WalOperation::TruncateInode {
+                        inode: inode_id,
+                        size: new_size as usize,
+                    })
+                    .is_err()
+                {
+                    reply.error(EIO);
+                    return;
+                }
+                self.dirty = true;
             }
             if let Some(n) = self.nodes_by_ino.get_mut(&ino) {
                 n.data = buf;
@@ -705,7 +874,6 @@ impl Filesystem for CoreFsFuseMountRw {
                     inode.size = new_size as usize;
                 }
             }
-            self.dirty = true;
         }
         match self.nodes_by_ino.get(&ino) {
             Some(node) => reply.attr(&TTL, &node.attr()),
@@ -722,52 +890,11 @@ impl Filesystem for CoreFsFuseMountRw {
     }
 
     fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
-        let file_path = self.node(ino).and_then(|node| {
-            if matches!(node.kind(), InodeKind::File) {
-                Some(node.path.clone())
-            } else {
-                None
-            }
-        });
-        match file_path {
-            Some(path) => {
-                let inode_id = self
-                    .node(ino)
-                    .and_then(|node| node.inode.as_ref().map(|inode| inode.id))
-                    .unwrap_or(InodeId(0));
-                // truncate on open with O_TRUNC
-                if flags & libc::O_TRUNC != 0 {
-                    if self.ensure_mutation_session("truncate").is_err() {
-                        reply.error(EIO);
-                        return;
-                    }
-                    if self.service.write_file(&path, b"").is_err() {
-                        reply.error(EIO);
-                        return;
-                    }
-                    if self
-                        .record_wal_operation(WalOperation::TruncateInode {
-                            inode: inode_id,
-                            size: 0,
-                        })
-                        .is_err()
-                    {
-                        reply.error(EIO);
-                        return;
-                    }
-                    if let Some(n) = self.nodes_by_ino.get_mut(&ino) {
-                        n.data.clear();
-                        if let Some(ref mut inode) = n.inode {
-                            inode.size = 0;
-                            inode.modified_at = SystemTime::now();
-                        }
-                    }
-                    self.dirty = true;
-                }
-                reply.opened(0, 0);
-            }
-            None if self.node(ino).is_some() => reply.error(EIO),
-            None => reply.error(ENOENT),
+        match self.open_file_handle(ino, flags) {
+            Ok(fh) => reply.opened(fh, 0),
+            Err(CoreFsError::InvalidInput(_)) => reply.error(EIO),
+            Err(CoreFsError::NotFound(_)) => reply.error(ENOENT),
+            Err(_) => reply.error(EIO),
         }
     }
 
@@ -782,14 +909,10 @@ impl Filesystem for CoreFsFuseMountRw {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        match self.nodes_by_ino.get(&ino) {
-            Some(node) if matches!(node.kind(), InodeKind::File) => {
-                let start = offset.max(0) as usize;
-                let end = start.saturating_add(size as usize).min(node.data.len());
-                reply.data(node.data.get(start..end).unwrap_or(&[]));
-            }
-            Some(_) => reply.error(EIO),
-            None => reply.error(ENOENT),
+        match self.read_from_handle(ino, _fh, offset, size) {
+            Ok(bytes) => reply.data(&bytes),
+            Err(CoreFsError::NotFound(_)) => reply.error(ENOENT),
+            Err(_) => reply.error(EIO),
         }
     }
 
@@ -813,47 +936,11 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EISDIR);
             return;
         }
-        let inode_id = node
-            .inode
-            .as_ref()
-            .map(|inode| inode.id)
-            .unwrap_or(InodeId(0));
-        let path = node.path.clone();
-        let start = offset.max(0) as usize;
-        let end = start + data.len();
-
-        // read-modify-write: splice new bytes into existing content
-        if self.ensure_mutation_session("write").is_err() {
-            reply.error(EIO);
-            return;
+        match self.write_to_handle(ino, _fh, offset, data) {
+            Ok(written) => reply.written(written),
+            Err(CoreFsError::State(_)) => reply.error(EIO),
+            Err(_) => reply.error(EIO),
         }
-        let mut buf = self.service.read_file(&path).unwrap_or_default();
-        if buf.len() < end {
-            buf.resize(end, 0);
-        }
-        buf[start..end].copy_from_slice(data);
-
-        if let Err(_) = self.service.write_file(&path, &buf) {
-            reply.error(EIO);
-            return;
-        }
-        if self
-            .record_extent_patch(inode_id, start, data, buf.len())
-            .is_err()
-        {
-            reply.error(EIO);
-            return;
-        }
-        let written = data.len() as u32;
-        if let Some(n) = self.nodes_by_ino.get_mut(&ino) {
-            n.data = buf;
-            if let Some(ref mut inode) = n.inode {
-                inode.size = n.data.len();
-                inode.modified_at = SystemTime::now();
-            }
-        }
-        self.dirty = true;
-        reply.written(written);
     }
 
     fn create(
@@ -1153,6 +1240,10 @@ impl Filesystem for CoreFsFuseMountRw {
         _lock_owner: u64,
         reply: ReplyEmpty,
     ) {
+        if self.flush_file_handle(_fh).is_err() {
+            reply.error(EIO);
+            return;
+        }
         if (self.dirty || self.service.had_unclean_shutdown()) && !self.persist() {
             reply.error(EIO);
         } else {
@@ -1168,10 +1259,30 @@ impl Filesystem for CoreFsFuseMountRw {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
+        if self.flush_file_handle(_fh).is_err() {
+            reply.error(EIO);
+            return;
+        }
         if self.persist() {
             reply.ok();
         } else {
             reply.error(EIO);
+        }
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        match self.release_file_handle(fh) {
+            Ok(()) => reply.ok(),
+            Err(_) => reply.error(EIO),
         }
     }
 
@@ -1402,6 +1513,75 @@ mod tests {
                 .map(|n| n.data.as_slice()),
             Some(b"world".as_slice())
         );
+    }
+
+    #[test]
+    fn rw_mount_write_cache_defers_service_write_until_handle_flush() {
+        let mut mount = rw_mount_from_demo();
+        let docs_ino = mount
+            .lookup_child(ROOT_INO, OsStr::new("docs"))
+            .expect("docs")
+            .ino();
+        let readme_ino = mount
+            .lookup_child(docs_ino, OsStr::new("readme.txt"))
+            .expect("readme")
+            .ino();
+
+        let fh = mount
+            .open_file_handle(readme_ino, libc::O_RDWR)
+            .expect("open");
+        mount
+            .write_to_handle(readme_ino, fh, 0, b"world")
+            .expect("write cache");
+
+        assert_eq!(
+            mount
+                .service
+                .read_file("/docs/readme.txt")
+                .expect("service read"),
+            b"hello".to_vec(),
+            "service should not see write-back cache before flush"
+        );
+        assert_eq!(
+            mount.nodes_by_ino.get(&readme_ino).map(|n| n.data.clone()),
+            Some(b"world".to_vec())
+        );
+
+        mount.flush_file_handle(fh).expect("flush");
+
+        assert_eq!(
+            mount
+                .service
+                .read_file("/docs/readme.txt")
+                .expect("service read"),
+            b"world".to_vec()
+        );
+    }
+
+    #[test]
+    fn rw_mount_read_uses_open_handle_cache_contents() {
+        let mut mount = rw_mount_from_demo();
+        let docs_ino = mount
+            .lookup_child(ROOT_INO, OsStr::new("docs"))
+            .expect("docs")
+            .ino();
+        let readme_ino = mount
+            .lookup_child(docs_ino, OsStr::new("readme.txt"))
+            .expect("readme")
+            .ino();
+
+        let fh = mount
+            .open_file_handle(readme_ino, libc::O_RDWR)
+            .expect("open");
+        mount
+            .write_to_handle(readme_ino, fh, 0, b"world")
+            .expect("write cache");
+
+        let bytes = mount
+            .read_from_handle(readme_ino, fh, 0, 16)
+            .expect("read from cache");
+
+        assert_eq!(bytes, b"world".to_vec());
     }
 
     #[test]
