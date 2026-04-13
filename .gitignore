@@ -7,6 +7,9 @@ mnt/
 dist/**
 scripts/*.bin
 scripts/*.log
+scripts/testing/suites/
+scripts/testing/results/
+scripts/testing/.xfstests-helpers/
 .codex/
 corefs_brainstorming.txt
 CLAUDE.md
