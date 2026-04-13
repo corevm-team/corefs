@@ -17,42 +17,121 @@ warn()  { echo -e "${COLOR_YELLOW}[WARN]${COLOR_RESET}  $*"; }
 error() { echo -e "${COLOR_RED}[ERROR]${COLOR_RESET} $*" >&2; }
 
 # --------------------------------------------------------------------------
-# Abhaengigkeiten pruefen
+# Paketlisten
+# --------------------------------------------------------------------------
+DEBIAN_PKGS=(
+  build-essential git automake autoconf pkg-config libtool
+  fuse3 libfuse3-dev libacl1-dev attr libaio-dev uuid-dev
+  xfsprogs xfslibs-dev e2fsprogs btrfs-progs dump
+  perl
+)
+
+FEDORA_PKGS=(
+  gcc make git automake autoconf pkgconfig libtool
+  fuse3 fuse3-devel libacl-devel attr libaio-devel uuid-devel
+  xfsprogs xfsprogs-devel e2fsprogs btrfs-progs dump
+  perl-Test-Harness
+)
+
+# --------------------------------------------------------------------------
+# Distro erkennen
+# --------------------------------------------------------------------------
+detect_distro() {
+  if [[ -f /etc/os-release ]]; then
+    . /etc/os-release
+    case "${ID:-}" in
+      ubuntu|debian|linuxmint|pop) echo "debian" ;;
+      fedora|rhel|centos|rocky|alma) echo "fedora" ;;
+      *) echo "unknown" ;;
+    esac
+  else
+    echo "unknown"
+  fi
+}
+
+# --------------------------------------------------------------------------
+# Abhaengigkeiten pruefen und optional installieren
 # --------------------------------------------------------------------------
 check_system_deps() {
   info "Pruefe System-Abhaengigkeiten ..."
 
-  local missing=()
+  local missing_cmds=()
+  local missing_libs=()
 
   # Basis-Build-Tools
-  for cmd in git make gcc automake autoconf pkg-config; do
+  for cmd in git make gcc automake autoconf pkg-config libtool; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
-      missing+=("$cmd")
+      missing_cmds+=("$cmd")
     fi
   done
 
   # FUSE-Userspace
   if ! command -v fusermount3 >/dev/null 2>&1 && \
      ! command -v fusermount >/dev/null 2>&1; then
-    missing+=("fuse3 / fuse")
+    missing_cmds+=("fuse3")
   fi
 
-  if (( ${#missing[@]} > 0 )); then
-    error "Fehlende Pakete: ${missing[*]}"
-    echo ""
-    echo "Unter Debian/Ubuntu:"
-    echo "  sudo apt install build-essential git automake autoconf pkg-config \\"
-    echo "    fuse3 libfuse3-dev libacl1-dev attr libaio-dev uuid-dev \\"
-    echo "    xfsprogs e2fsprogs btrfs-progs dump xfslibs-dev"
-    echo ""
-    echo "Unter Fedora/RHEL:"
-    echo "  sudo dnf install gcc make git automake autoconf pkgconfig \\"
-    echo "    fuse3 fuse3-devel libacl-devel attr libaio-devel uuid-devel \\"
-    echo "    xfsprogs e2fsprogs btrfs-progs dump xfsprogs-devel"
-    exit 1
+  # Header-Bibliotheken (xfstests benoetigt xfs/xfs.h, uuid/uuid.h, etc.)
+  for header in xfs/xfs.h uuid/uuid.h acl/libacl.h libaio.h; do
+    if ! echo "#include <${header}>" | gcc -E -x c - >/dev/null 2>&1; then
+      missing_libs+=("${header}")
+    fi
+  done
+
+  local has_missing=0
+  if (( ${#missing_cmds[@]} > 0 )); then
+    warn "Fehlende Kommandos: ${missing_cmds[*]}"
+    has_missing=1
+  fi
+  if (( ${#missing_libs[@]} > 0 )); then
+    warn "Fehlende Header: ${missing_libs[*]}"
+    has_missing=1
   fi
 
-  info "Alle Basis-Abhaengigkeiten vorhanden."
+  if (( has_missing )); then
+    local distro
+    distro="$(detect_distro)"
+
+    echo ""
+    if [[ "${distro}" == "debian" ]]; then
+      info "Debian/Ubuntu erkannt — installiere fehlende Pakete automatisch ..."
+      echo "  sudo apt install -y ${DEBIAN_PKGS[*]}"
+      echo ""
+      sudo apt install -y "${DEBIAN_PKGS[@]}"
+    elif [[ "${distro}" == "fedora" ]]; then
+      info "Fedora/RHEL erkannt — installiere fehlende Pakete automatisch ..."
+      echo "  sudo dnf install -y ${FEDORA_PKGS[*]}"
+      echo ""
+      sudo dnf install -y "${FEDORA_PKGS[@]}"
+    else
+      error "Unbekannte Distribution — bitte manuell installieren:"
+      echo ""
+      echo "Unter Debian/Ubuntu:"
+      echo "  sudo apt install ${DEBIAN_PKGS[*]}"
+      echo ""
+      echo "Unter Fedora/RHEL:"
+      echo "  sudo dnf install ${FEDORA_PKGS[*]}"
+      exit 1
+    fi
+
+    # Nochmal pruefen ob alles da ist
+    for cmd in git make gcc automake autoconf pkg-config libtool; do
+      if ! command -v "$cmd" >/dev/null 2>&1; then
+        error "Kommando '${cmd}' nach Installation immer noch nicht gefunden."
+        exit 1
+      fi
+    done
+    for header in xfs/xfs.h uuid/uuid.h; do
+      if ! echo "#include <${header}>" | gcc -E -x c - >/dev/null 2>&1; then
+        error "Header '${header}' nach Installation immer noch nicht gefunden."
+        exit 1
+      fi
+    done
+
+    info "Alle Abhaengigkeiten erfolgreich installiert."
+  else
+    info "Alle Abhaengigkeiten vorhanden."
+  fi
 }
 
 # --------------------------------------------------------------------------
