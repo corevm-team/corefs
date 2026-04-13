@@ -45,13 +45,24 @@ impl FuseNode {
 
     fn attr(&self) -> FileAttr {
         let now = SystemTime::now();
-        let uid = current_uid();
-        let gid = current_gid();
-        let perm = match self.kind() {
+        let default_perm = match self.kind() {
             InodeKind::File => 0o644,
             InodeKind::Directory => 0o755,
             InodeKind::Symlink => 0o777,
         };
+        let (uid, gid, perm) = self
+            .inode
+            .as_ref()
+            .map(|inode| {
+                let m = &inode.metadata;
+                let mode: u16 = if m.mode == 0 {
+                    default_perm
+                } else {
+                    (m.mode & 0o7777) as u16
+                };
+                (m.uid, m.gid, mode)
+            })
+            .unwrap_or((current_uid(), current_gid(), default_perm));
         let size = match self.kind() {
             InodeKind::File | InodeKind::Symlink => {
                 // Prefer inode.size (always the logical/uncompressed size) over
@@ -1466,9 +1477,9 @@ impl Filesystem for CoreFsFuseMountRw {
         &mut self,
         _req: &Request<'_>,
         ino: u64,
-        _mode: Option<u32>,
-        _uid: Option<u32>,
-        _gid: Option<u32>,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
         size: Option<u64>,
         _atime: Option<TimeOrNow>,
         _mtime: Option<TimeOrNow>,
@@ -1493,17 +1504,75 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(ENOENT);
             return;
         };
-        if !matches!(node.kind(), InodeKind::File) {
-            reply.attr(&TTL, &node.attr());
+        let path = node.path.clone();
+        let is_file = matches!(node.kind(), InodeKind::File);
+
+        // Handle chown (uid/gid).
+        if uid.is_some() || gid.is_some() {
+            if self.ensure_mutation_session("chown").is_err() {
+                reply.error(EIO);
+                return;
+            }
+            if self.service.set_owner(&path, uid, gid).is_err() {
+                reply.error(EIO);
+                return;
+            }
+            if let Some(n) = self.nodes_by_ino.get_mut(&ino) {
+                if let Some(ref mut inode) = n.inode {
+                    if let Some(u) = uid {
+                        inode.metadata.uid = u;
+                    }
+                    if let Some(g) = gid {
+                        inode.metadata.gid = g;
+                    }
+                    inode.modified_at = SystemTime::now();
+                }
+            }
+            self.dirty = true;
+            if self.persist().is_err() {
+                reply.error(EIO);
+                return;
+            }
+        }
+
+        // Handle chmod (mode).
+        if let Some(new_mode) = mode {
+            if self.ensure_mutation_session("chmod").is_err() {
+                reply.error(EIO);
+                return;
+            }
+            if self.service.set_mode(&path, new_mode).is_err() {
+                reply.error(EIO);
+                return;
+            }
+            if let Some(n) = self.nodes_by_ino.get_mut(&ino) {
+                if let Some(ref mut inode) = n.inode {
+                    inode.metadata.mode = new_mode & 0o7777;
+                    inode.modified_at = SystemTime::now();
+                }
+            }
+            self.dirty = true;
+            if self.persist().is_err() {
+                reply.error(EIO);
+                return;
+            }
+        }
+
+        if !is_file {
+            // Directories and symlinks: no size handling needed.
+            match self.nodes_by_ino.get(&ino) {
+                Some(node) => reply.attr(&TTL, &node.attr()),
+                None => reply.error(ENOENT),
+            }
             return;
         }
+
         if let Some(new_size) = size {
-            let inode_id = node
-                .inode
-                .as_ref()
-                .map(|inode| inode.id)
+            let inode_id = self
+                .nodes_by_ino
+                .get(&ino)
+                .and_then(|n| n.inode.as_ref().map(|i| i.id))
                 .unwrap_or(InodeId(0));
-            let path = node.path.clone();
             let mut buf = if let Some(fh) = _fh {
                 self.open_files
                     .get(&fh)
@@ -1675,6 +1744,9 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EEXIST);
             return;
         }
+        let req_uid = _req.uid();
+        let req_gid = _req.gid();
+        let req_mode = if _mode == 0 { 0o644 } else { _mode & !_umask & 0o7777 };
         if self.ensure_mutation_session("create").is_err() {
             reply.error(EIO);
             return;
@@ -1683,6 +1755,9 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EIO);
             return;
         }
+        // Apply initial ownership and mode from the caller's credentials.
+        let _ = self.service.set_owner(&path, Some(req_uid), Some(req_gid));
+        let _ = self.service.set_mode(&path, req_mode);
         let Some(inode_id) = self.service.inode_for_path(&path) else {
             reply.error(EIO);
             return;
@@ -1741,6 +1816,9 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EEXIST);
             return;
         }
+        let req_uid = _req.uid();
+        let req_gid = _req.gid();
+        let req_mode = if _mode == 0 { 0o755 } else { _mode & !_umask & 0o7777 };
         if self.ensure_mutation_session("mkdir").is_err() {
             reply.error(EIO);
             return;
@@ -1749,6 +1827,9 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EIO);
             return;
         }
+        // Apply initial ownership and mode from the caller's credentials.
+        let _ = self.service.set_owner(&path, Some(req_uid), Some(req_gid));
+        let _ = self.service.set_mode(&path, req_mode);
         let Some(inode_id) = self.service.inode_for_path(&path) else {
             reply.error(EIO);
             return;

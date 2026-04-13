@@ -123,15 +123,7 @@ mod tests {
             size,
             created_at: SystemTime::now(),
             modified_at: SystemTime::now(),
-            metadata: FileMetadata {
-                tags: Vec::new(),
-                attributes: Vec::new(),
-                content_class: ContentClass::Unknown,
-                storage_tier: StorageTier::Warm,
-                acl: Vec::new(),
-                encrypted: false,
-                compressed: false,
-            },
+            metadata: FileMetadata::default(),
         }
     }
 

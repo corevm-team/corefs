@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `294/294` Tests erfolgreich  
+**Test-Status:** `298/298` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -101,6 +101,7 @@
 - Fake-Stick-Erkennung: `sanity_check_writable()` probiert 6 verteilte Offsets (10/25/50/75/90/99% der Kapazität) mit deterministischen Testmustern, liest zurück und zero-fillt — läuft automatisch nach `mkfs-device` (überspringbar mit `--skip-check`); `verify_device_capacity()` führt destruktiven Vollscan mit konfigurierbarer Chunk-Anzahl durch, exponiert als `verify-device --destructive` CLI-Kommando mit `fake_ratio_percent`-Verdict
 - Permission-Checks: `check_device_permissions()` prüft Root/Write-Access vor Device-Zugriff mit hilfreicher `sudo`-Fehlermeldung; eingebaut in `mkfs-device`, `mount-device-rw`, `verify-device`
 - CLI-Integritätsprüfung auf Blockgeräten: `fsck-device <path>` via `inspect_device()` ohne Schreibzugriff (Magic, Format-Version, Superblock-Redundanz, Checksummen, Segmentvollständigkeit, Block-Deskriptoren)
+- POSIX-Besitzer und -Berechtigungen: `FileMetadata.uid`, `.gid`, `.mode` pro Inode persistent gespeichert; `CoreFsService::set_owner()` und `set_mode()` API; FUSE `setattr` handled `chown`/`chmod` korrekt für Dateien und Verzeichnisse; `create`/`mkdir` übernehmen UID/GID/Mode aus der FUSE-Request (umask-respektierend); Format-Version auf 5 gebumpt
 
 ### Plattform- und Integrationsmodell
 

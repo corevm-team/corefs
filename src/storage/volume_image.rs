@@ -20,7 +20,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAGIC: &[u8; 8] = b"COREFS01";
-const FORMAT_VERSION: u32 = 4;
+const FORMAT_VERSION: u32 = 5;
 const SEGMENT_ALIGNMENT: usize = 64;
 const SEGMENT_ENTRY_SIZE: usize = 24;
 const HEADER_SIZE: usize = 16;
@@ -817,6 +817,9 @@ fn push_metadata(bytes: &mut Vec<u8>, metadata: &FileMetadata) -> Result<(), Str
     }
     push_bool(bytes, metadata.encrypted);
     push_bool(bytes, metadata.compressed);
+    push_u32(bytes, metadata.uid);
+    push_u32(bytes, metadata.gid);
+    push_u32(bytes, metadata.mode);
     Ok(())
 }
 
@@ -841,14 +844,22 @@ fn read_metadata(bytes: &[u8], cursor: &mut usize) -> Result<FileMetadata, Strin
         acl.push(read_acl_entry(bytes, cursor)?);
     }
 
+    let encrypted = read_bool(bytes, cursor)?;
+    let compressed = read_bool(bytes, cursor)?;
+    let uid = read_u32(bytes, cursor)?;
+    let gid = read_u32(bytes, cursor)?;
+    let mode = read_u32(bytes, cursor)?;
     Ok(FileMetadata {
         tags,
         attributes,
         content_class,
         storage_tier,
         acl,
-        encrypted: read_bool(bytes, cursor)?,
-        compressed: read_bool(bytes, cursor)?,
+        encrypted,
+        compressed,
+        uid,
+        gid,
+        mode,
     })
 }
 

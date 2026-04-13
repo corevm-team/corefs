@@ -1237,6 +1237,38 @@ impl CoreFsService {
         self.catalog.get(path)
     }
 
+    /// Updates the POSIX owner (uid/gid) of a path.  Either value can be
+    /// `None` to leave it unchanged (matching `chown`/`lchown` semantics).
+    pub fn set_owner(
+        &mut self,
+        path: &str,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> CoreFsResult<()> {
+        let inode = self.catalog.get_mut(path).ok_or_else(|| {
+            CoreFsError::NotFound(format!("path not found: {path}"))
+        })?;
+        if let Some(u) = uid {
+            inode.metadata.uid = u;
+        }
+        if let Some(g) = gid {
+            inode.metadata.gid = g;
+        }
+        inode.modified_at = SystemTime::now();
+        Ok(())
+    }
+
+    /// Updates the POSIX mode bits of a path (permissions only; `0o7777` mask
+    /// — type bits are derived from `InodeKind`).
+    pub fn set_mode(&mut self, path: &str, mode: u32) -> CoreFsResult<()> {
+        let inode = self.catalog.get_mut(path).ok_or_else(|| {
+            CoreFsError::NotFound(format!("path not found: {path}"))
+        })?;
+        inode.metadata.mode = mode & 0o7777;
+        inode.modified_at = SystemTime::now();
+        Ok(())
+    }
+
     /// Rename `from` to `to`, cascading to all descendants.
     /// If `to` already exists it is soft-deleted before the rename.
     pub fn rename_entry(&mut self, from: &str, to: &str) -> CoreFsResult<()> {
@@ -2533,5 +2565,80 @@ mod tests {
             report.missing_blocks.contains(&"/orphan.txt".to_string()),
             "fsck must detect missing blocks"
         );
+    }
+
+    #[test]
+    fn set_owner_updates_uid_and_gid_independently() {
+        let mut fs = test_fs();
+        fs.create_file("/a.txt", b"x", &[]).expect("file");
+
+        // Set both
+        fs.set_owner("/a.txt", Some(1000), Some(1000)).expect("chown");
+        let inode = fs.get_inode("/a.txt").expect("inode");
+        assert_eq!(inode.metadata.uid, 1000);
+        assert_eq!(inode.metadata.gid, 1000);
+
+        // Update only uid
+        fs.set_owner("/a.txt", Some(2000), None).expect("chown uid");
+        let inode = fs.get_inode("/a.txt").expect("inode");
+        assert_eq!(inode.metadata.uid, 2000);
+        assert_eq!(inode.metadata.gid, 1000);
+
+        // Update only gid
+        fs.set_owner("/a.txt", None, Some(2500)).expect("chown gid");
+        let inode = fs.get_inode("/a.txt").expect("inode");
+        assert_eq!(inode.metadata.uid, 2000);
+        assert_eq!(inode.metadata.gid, 2500);
+    }
+
+    #[test]
+    fn set_owner_rejects_missing_path() {
+        let mut fs = test_fs();
+        let err = fs.set_owner("/missing", Some(1000), Some(1000)).unwrap_err();
+        assert!(matches!(err, CoreFsError::NotFound(_)));
+    }
+
+    #[test]
+    fn set_mode_masks_to_permission_bits() {
+        let mut fs = test_fs();
+        fs.create_file("/b.txt", b"x", &[]).expect("file");
+
+        fs.set_mode("/b.txt", 0o755).expect("chmod");
+        let inode = fs.get_inode("/b.txt").expect("inode");
+        assert_eq!(inode.metadata.mode, 0o755);
+
+        // Higher bits outside 0o7777 get masked away.
+        fs.set_mode("/b.txt", 0o177777).expect("chmod");
+        let inode = fs.get_inode("/b.txt").expect("inode");
+        assert_eq!(inode.metadata.mode, 0o7777);
+    }
+
+    #[test]
+    fn owner_and_mode_persist_through_image_roundtrip() {
+        use crate::storage::volume_image;
+        let path = std::env::temp_dir().join(format!(
+            "corefs-chown-roundtrip-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+
+        let mut fs = test_fs();
+        fs.create_file("/persist.txt", b"hello", &[]).expect("file");
+        fs.set_owner("/persist.txt", Some(1234), Some(5678))
+            .expect("chown");
+        fs.set_mode("/persist.txt", 0o600).expect("chmod");
+        fs.save_image_to_path(&path).expect("save");
+
+        let loaded = CoreFsService::load_image_from_path(&path).expect("load");
+        let inode = loaded.get_inode("/persist.txt").expect("inode");
+        assert_eq!(inode.metadata.uid, 1234);
+        assert_eq!(inode.metadata.gid, 5678);
+        assert_eq!(inode.metadata.mode, 0o600);
+
+        let _ = std::fs::remove_file(path);
+        let _ = volume_image::build_volume_image_bytes; // keep import alive
     }
 }
