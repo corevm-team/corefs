@@ -85,6 +85,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Dateien, Verzeichnisse und symbolische Links
 - Lesen und Schreiben von Inhalten
 - Linux-FUSE-Adapter mit `.img`-Dateien als Mount-Backend (read-only und read-write mit Writeback)
+- direkte Block-Device-Nutzung (USB-Stick, Partition, Raw Device): `probe-device`, `mkfs-device`, `fsck-device`, `verify-device`, `mount-device-rw` mit sektorausgerichtetem I/O, Permission-Checks und Fake-Stick-Erkennung (Sanity-Check an 6 verteilten Offsets automatisch bei `mkfs-device`; vollständiger destruktiver Scan via `verify-device`)
 - Linux-FUSE-Read-/Write-Caching auf File-Handle-Ebene mit Write-Back-Flush ueber `flush`/`fsync`/`release`
 - Streaming-Writes: sequentielle Schreibzugriffe ab 32 MiB werden als Zwischenflushes delegiert, Peak-RAM bleibt auf O(32 MiB) begrenzt statt O(Dateigrösse)
 - FUSE-Durchsatz-Optimierungen: `FUSE_WRITEBACK_CACHE` (Kernel-seitiges Schreib-Batching) und `max_write = 1 MiB` für weniger Roundtrips
@@ -288,6 +289,18 @@ Image beschreibbar mounten (Writeback in .img):
 cargo run -- mount-image-rw ./corefs-linux.img /tmp/corefs-mnt
 ```
 
+Blockgerät (USB-Stick, Partition) analysieren, formatieren, prüfen und mounten:
+
+```bash
+sudo cargo run --release -- probe-device /dev/sdb1
+sudo cargo run --release -- mkfs-device /dev/sdb1
+sudo cargo run --release -- fsck-device /dev/sdb1
+sudo cargo run --release -- mount-device-rw /dev/sdb1 /mnt/usb
+sudo cargo run --release -- verify-device /dev/sdb1 --destructive
+```
+
+Details und vollständiger Workflow unter [Block-Device-Nutzung](#block-device-nutzung-usb-stick-partition-raw-device).
+
 Datei schreiben:
 
 ```bash
@@ -413,6 +426,158 @@ Diese Time-Travel-Dateien sind ebenfalls Read-only (`EROFS` bei Schreibversuchen
 | `datei@<spec>` lesen | historische Dateiversion per Datum oder ID (Read-only) |
 
 > **Hinweis:** Der FUSE-Adapter ist ein Integrations- und Testpfad, kein produktionsreifes Dateisystem. Er steht nur auf Linux-Builds zur Verfügung.
+
+## Block-Device-Nutzung (USB-Stick, Partition, Raw Device)
+
+CoreFS kann direkt auf einem Linux-Blockgerät (`/dev/sdX1`, `/dev/nvmeXnYpZ`, …) formatiert und gemountet werden — ohne Umweg über eine `.img`-Datei auf einem Fremdsystem.
+
+Alle Device-Kommandos erfordern Root-Rechte (Schreibzugriff auf den Device-Node).
+
+### Gerät analysieren
+
+Bevor du etwas zerstörst, prüfe den Zustand:
+
+```bash
+sudo ./target/release/corefs probe-device /dev/sdb1
+```
+
+Ausgabe umfasst:
+- Kapazität in Bytes
+- logische und physische Sektorgrösse
+- Read-only-Status
+- Mount-Status (`/proc/mounts`-Abgleich)
+- Ganz-Disk-Erkennung (verweigert Formatierung ohne Partitionstabelle)
+- `safe_to_format`-Verdict mit Liste der Blocker
+
+### Formatieren
+
+```bash
+sudo ./target/release/corefs mkfs-device /dev/sdb1
+```
+
+Das Kommando:
+1. Prüft Permissions (`sudo`/Root erforderlich)
+2. Ruft `probe-device`-Sicherheits-Check auf — bricht ab bei gemountetem Gerät, Ganz-Disk ohne Partitionstabelle oder Read-only-Status
+3. Schreibt ein leeres CoreFS-Volume sektorausgerichtet auf das Gerät
+4. **Führt automatisch einen Fake-Stick-Sanity-Check durch** — probiert an 6 verteilten Offsets (10/25/50/75/90/99% der Kapazität) Schreibzugriffe, liest sie zurück und verifiziert. Bricht ab mit klarer Diagnose wenn das Gerät betrügerisch mehr Kapazität vortäuscht als tatsächlich vorhanden.
+
+Mit `--skip-check` lässt sich der Sanity-Check überspringen (nicht empfohlen).
+
+### Fake-/Counterfeit-Stick-Erkennung
+
+Billige USB-Sticks aus unseriösen Quellen melden oft eine höhere Kapazität (z.B. 64 GB) als tatsächlich beschreibbar ist (oft nur wenige MB echter Flash). Writes über das echte Limit hinaus werden entweder stillschweigend verworfen (Datenverlust!) oder mit SCSI Sense Key "Data Protect" abgelehnt.
+
+Für einen gründlichen Test:
+
+```bash
+# Schnell-Scan (200 Chunks × 64 KiB, wenige Sekunden)
+sudo ./target/release/corefs verify-device /dev/sdb1 --destructive
+
+# Gründlicher Scan (1000 Chunks)
+sudo ./target/release/corefs verify-device /dev/sdb1 --destructive --chunks 1000
+
+# Feinkörniger Scan mit grösseren Chunks
+sudo ./target/release/corefs verify-device /dev/sdb1 --destructive \
+    --chunks 500 --chunk-size 1048576
+```
+
+> **Warnung:** `verify-device --destructive` überschreibt alle Daten auf dem Gerät. Das Flag `--destructive` ist zwingend, ohne es verweigert das Kommando die Ausführung.
+
+Ausgabe bei einem ehrlichen Stick:
+
+```
+verdict: ok — device appears to be honest
+```
+
+Ausgabe bei einem Fake-Stick:
+
+```
+verdict: FAKE — roughly 98% of advertised capacity is unusable
+```
+
+### Mounten (Read-Write)
+
+```bash
+sudo mkdir -p /mnt/usb-corefs
+sudo ./target/release/corefs mount-device-rw /dev/sdb1 /mnt/usb-corefs &
+```
+
+Der Mount läuft im Vordergrund (FUSE-typisch). Danach stehen die üblichen Linux-Dateisystemoperationen zur Verfügung:
+
+```bash
+echo "Hallo CoreFS" | sudo tee /mnt/usb-corefs/hello.txt
+sudo mkdir /mnt/usb-corefs/docs
+sudo cp /etc/os-release /mnt/usb-corefs/docs/
+ls -R /mnt/usb-corefs
+```
+
+### Unmounten
+
+```bash
+sudo fusermount -u /mnt/usb-corefs
+```
+
+Beim Unmount wird der Volume-Zustand sauber auf das Gerät zurückgeschrieben. Der Stick kann danach ausgesteckt und später wieder gemountet werden — die Daten sind persistent.
+
+### Dateisystemprüfung (fsck) auf Blockgeräten
+
+```bash
+sudo ./target/release/corefs fsck-device /dev/sdb1
+```
+
+Prüft ohne Schreibzugriff:
+- CoreFS-Magic (`COREFS01`) und Format-Version
+- Redundanz beider Superblock-Kopien (`SUPR` + `SUP2`)
+- Directory-Checksumme (FNV1a-Hash über die Segmenttabelle)
+- Payload-Checksumme über alle Segment-Frames
+- Vollständigkeit der 15 Pflichtsegmente (`CNFG`, `VOLM`, `AINO`, `DINO`, `JOUR`, `VERS`, `SYNC`, `HOTP`, `SNAP`, `TXNJ`, `FREE`, `BLKD`, `DATA`)
+- Block-Deskriptor-Konsistenz
+
+Bei Fehlschlag liefert das Kommando Exit-Code ≠ 0 — geeignet für Scripts und Monitoring.
+
+### Vollständiger USB-Stick-Workflow
+
+```bash
+# 1. Gerät analysieren
+sudo ./target/release/corefs probe-device /dev/sdb1
+
+# 2. Optional: Fake-Stick-Check
+sudo ./target/release/corefs verify-device /dev/sdb1 --destructive
+
+# 3. Formatieren (mit automatischem Sanity-Check)
+sudo ./target/release/corefs mkfs-device /dev/sdb1
+
+# 4. Integrität prüfen
+sudo ./target/release/corefs fsck-device /dev/sdb1
+
+# 5. Mounten
+sudo mkdir -p /mnt/usb-corefs
+sudo ./target/release/corefs mount-device-rw /dev/sdb1 /mnt/usb-corefs &
+
+# 6. Benutzen
+ls /mnt/usb-corefs
+echo "test" | sudo tee /mnt/usb-corefs/file.txt
+cat /mnt/usb-corefs/file.txt
+
+# 7. Unmounten
+sudo fusermount -u /mnt/usb-corefs
+
+# 8. Persistenz verifizieren
+sudo ./target/release/corefs fsck-device /dev/sdb1
+sudo ./target/release/corefs mount-device-rw /dev/sdb1 /mnt/usb-corefs &
+cat /mnt/usb-corefs/file.txt
+sudo fusermount -u /mnt/usb-corefs
+```
+
+### Architektur-Hinweise und Grenzen
+
+- **Das Binärformat** auf dem Gerät ist identisch zum `.img`-Datei-Format — mehrsegmentiges Layout mit 64-Byte-Alignment, redundanten Superblocks, Generation-Counter-basierter Crash-Recovery und Checksummen.
+- **Aktueller Mount-Pfad** lädt das komplette Volume-Image in den RAM und schreibt es bei jedem FUSE-Flush vollständig zurück. Für kleine Datenmengen (< einige GB) ist das funktional ausreichend.
+- **Für grosse Volumes** existiert bereits die `DeviceVolume`-Abstraktion ([src/storage/device_volume.rs](src/storage/device_volume.rs)) mit On-Demand-Segment-I/O und Read-Cache/Write-Buffer. Die Integration in den FUSE-Mount ist vorgesehen, aber noch nicht produktiv aktiviert.
+- **Device-Journal**: `DeviceJournal` verwaltet eine 256-KiB-Region nach dem Volume-Image für barrier-safe WAL-Einträge mit `fdatasync()`.
+- **TRIM/Discard** wird beim Freigeben von Extents protokolliert und (optional, hinter Config-Flag) an den RawBlockDevice via `ioctl(BLKDISCARD)` weitergereicht.
+
+> **Hinweis:** CoreFS auf Blockgeräten ist funktionsfähig, aber weiterhin ein Prototyp. Für produktive Daten sollte zusätzlich extern gesichert werden.
 
 ## Dokumentationsquellen im Repository
 

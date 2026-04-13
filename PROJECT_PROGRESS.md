@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `283/283` Tests erfolgreich  
+**Test-Status:** `294/294` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -98,6 +98,9 @@
 - FUSE-Mount von Block-Devices: `mount_device_rw()` lädt Volume vom Device, dient über bestehende FUSE-RW-Infrastruktur, schreibt bei Unmount zurück auf das Device; `format_device()` formatiert ein Device mit leerem CoreFS-Volume
 - On-Demand Sektor-I/O: `DeviceVolume` liest beim Öffnen nur Header und Segment-Directory (~400 Bytes) vom Device; individuelle Segmente werden bei Bedarf sektorausgerichtet geladen und im Read-Cache gehalten; Write-Buffer akkumuliert Änderungen pro Segment; `flush()` schreibt nur geänderte Segmente; `invalidate_cache()` erzwingt Device-Reads
 - Device-Journal: `DeviceJournal` verwaltet eine reservierte 256-KiB-Region nach dem Volume-Image; `commit()` serialisiert `VolumeWal` mit Checksumme und `fdatasync()`-Barrier (Header → Payload → Sync); `clear()` markiert Journal als leer nach erfolgreichem Image-Update; Generation-Counter für Crash-Ordering; korrupte Journals werden bei `open()` erkannt und verworfen
+- Fake-Stick-Erkennung: `sanity_check_writable()` probiert 6 verteilte Offsets (10/25/50/75/90/99% der Kapazität) mit deterministischen Testmustern, liest zurück und zero-fillt — läuft automatisch nach `mkfs-device` (überspringbar mit `--skip-check`); `verify_device_capacity()` führt destruktiven Vollscan mit konfigurierbarer Chunk-Anzahl durch, exponiert als `verify-device --destructive` CLI-Kommando mit `fake_ratio_percent`-Verdict
+- Permission-Checks: `check_device_permissions()` prüft Root/Write-Access vor Device-Zugriff mit hilfreicher `sudo`-Fehlermeldung; eingebaut in `mkfs-device`, `mount-device-rw`, `verify-device`
+- CLI-Integritätsprüfung auf Blockgeräten: `fsck-device <path>` via `inspect_device()` ohne Schreibzugriff (Magic, Format-Version, Superblock-Redundanz, Checksummen, Segmentvollständigkeit, Block-Deskriptoren)
 
 ### Plattform- und Integrationsmodell
 
