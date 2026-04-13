@@ -5,3 +5,5 @@ Cargo.lock
 *.img
 mnt/
 dist/**
+scripts/*.bin
+scripts/*.log
