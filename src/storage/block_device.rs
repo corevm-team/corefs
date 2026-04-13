@@ -129,6 +129,222 @@ fn check_write_permission(read_only: bool) -> CoreFsResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Fake-stick detection helpers
+// ---------------------------------------------------------------------------
+
+/// Result of a writability verification run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceVerificationReport {
+    /// Total device capacity as reported by the device.
+    pub advertised_bytes: u64,
+    /// Byte offsets that were probed.
+    pub probed_offsets: Vec<u64>,
+    /// Byte offsets where the write-and-read-back check failed.
+    pub failed_offsets: Vec<u64>,
+    /// Highest byte offset that was successfully written and verified.
+    pub highest_verified_offset: u64,
+    /// Estimated actually usable capacity (bytes) based on the last
+    /// successfully verified offset.  May underestimate on partial failure.
+    pub estimated_usable_bytes: u64,
+}
+
+impl DeviceVerificationReport {
+    pub fn is_honest(&self) -> bool {
+        self.failed_offsets.is_empty()
+    }
+
+    pub fn fake_ratio_percent(&self) -> u8 {
+        if self.advertised_bytes == 0 {
+            return 100;
+        }
+        let usable_ratio =
+            (self.estimated_usable_bytes as f64 / self.advertised_bytes as f64).clamp(0.0, 1.0);
+        ((1.0 - usable_ratio) * 100.0).round() as u8
+    }
+}
+
+/// Generates a unique 4-KiB test pattern for a given offset.
+/// The pattern is the little-endian offset repeated, XORed with a rolling
+/// counter.  Different offsets therefore produce different patterns.
+fn generate_test_pattern(offset: u64, length: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(length);
+    let seed = offset.wrapping_mul(0x9E3779B97F4A7C15);
+    for i in 0..length {
+        let byte = (seed.wrapping_add(i as u64).wrapping_mul(0x100000001B3))
+            .wrapping_shr((i % 8 * 8) as u32) as u8;
+        buf.push(byte);
+    }
+    buf
+}
+
+/// Performs a quick sampled write-and-read-back check at several offsets
+/// distributed across the device.  Used to detect fake/counterfeit flash
+/// devices that advertise more capacity than they actually have.
+///
+/// `skip_below`: offsets below this byte position are not probed (useful
+/// to preserve a freshly written volume image at the start of the device).
+///
+/// On success, zero-fills the probed sectors to leave the device in a
+/// known state.  On failure, returns a report listing which offsets could
+/// not be written.
+pub fn sanity_check_writable(
+    device: &mut dyn BlockDevice,
+    skip_below: u64,
+) -> CoreFsResult<DeviceVerificationReport> {
+    let capacity = device.capacity();
+    let sector_size = device.sector_size() as u64;
+    let pattern_len = (4096u64.max(sector_size) as usize).min(65536);
+    let pattern_len = (pattern_len as u64 / sector_size * sector_size) as usize;
+
+    // Place probes at 10%, 25%, 50%, 75%, 90%, 99% of capacity (sector-aligned).
+    let probe_ratios = [10, 25, 50, 75, 90, 99];
+    let mut offsets: Vec<u64> = probe_ratios
+        .iter()
+        .map(|pct| {
+            let raw = (capacity / 100) * *pct;
+            let aligned = (raw / sector_size) * sector_size;
+            aligned.max(skip_below.div_ceil(sector_size) * sector_size)
+        })
+        .filter(|o| *o + pattern_len as u64 <= capacity)
+        .collect();
+    offsets.sort();
+    offsets.dedup();
+
+    let mut failed = Vec::new();
+    let mut highest_verified = 0u64;
+
+    for &offset in &offsets {
+        let pattern = generate_test_pattern(offset, pattern_len);
+
+        if device.write_at(offset, &pattern).is_err() {
+            failed.push(offset);
+            continue;
+        }
+        if device.sync().is_err() {
+            failed.push(offset);
+            continue;
+        }
+
+        match device.read_at(offset, pattern_len as u64) {
+            Ok(read_back) => {
+                if read_back != pattern {
+                    failed.push(offset);
+                } else {
+                    highest_verified = highest_verified.max(offset + pattern_len as u64);
+                    // Zero-fill the probe region to leave no stale test data.
+                    let zeros = vec![0u8; pattern_len];
+                    let _ = device.write_at(offset, &zeros);
+                }
+            }
+            Err(_) => failed.push(offset),
+        }
+    }
+
+    let _ = device.sync();
+
+    let estimated_usable = if failed.is_empty() {
+        capacity
+    } else {
+        highest_verified
+    };
+
+    Ok(DeviceVerificationReport {
+        advertised_bytes: capacity,
+        probed_offsets: offsets,
+        failed_offsets: failed,
+        highest_verified_offset: highest_verified,
+        estimated_usable_bytes: estimated_usable,
+    })
+}
+
+/// Progressive destructive capacity test: writes unique patterns in chunks
+/// across the entire device and reads each back to verify.  Detects fake
+/// sticks by finding the actual writable capacity.
+///
+/// **Destroys all data on the device.**  Intended for use on a freshly
+/// formatted or empty device, or via an explicit `--destructive` flag.
+///
+/// `chunk_size`: bytes per probe chunk (rounded up to sector size).
+/// `chunk_count`: number of chunks to probe, evenly spaced.  Use 100 for
+/// a fast rough scan, 1000+ for a thorough scan.
+pub fn verify_device_capacity(
+    device: &mut dyn BlockDevice,
+    chunk_size: u64,
+    chunk_count: u64,
+) -> CoreFsResult<DeviceVerificationReport> {
+    check_write_permission(device.is_read_only())?;
+
+    let capacity = device.capacity();
+    let sector_size = device.sector_size() as u64;
+    let chunk_size = chunk_size.div_ceil(sector_size) * sector_size;
+    let chunk_size = chunk_size.max(sector_size);
+
+    if chunk_count == 0 {
+        return Err(CoreFsError::InvalidInput(
+            "chunk_count must be greater than zero".to_string(),
+        ));
+    }
+
+    // Space probes evenly.  First probe at offset 0, last at capacity - chunk_size.
+    let max_offset = capacity.saturating_sub(chunk_size);
+    let mut offsets: Vec<u64> = if chunk_count == 1 {
+        vec![0]
+    } else {
+        (0..chunk_count)
+            .map(|i| {
+                let raw = max_offset * i / (chunk_count - 1);
+                (raw / sector_size) * sector_size
+            })
+            .collect()
+    };
+    offsets.sort();
+    offsets.dedup();
+
+    let mut failed = Vec::new();
+    let mut highest_verified = 0u64;
+
+    for &offset in &offsets {
+        let pattern = generate_test_pattern(offset, chunk_size as usize);
+
+        if device.write_at(offset, &pattern).is_err() {
+            failed.push(offset);
+            continue;
+        }
+        if device.sync().is_err() {
+            failed.push(offset);
+            continue;
+        }
+
+        match device.read_at(offset, chunk_size) {
+            Ok(read_back) => {
+                if read_back != pattern {
+                    failed.push(offset);
+                } else {
+                    highest_verified = highest_verified.max(offset + chunk_size);
+                }
+            }
+            Err(_) => failed.push(offset),
+        }
+    }
+
+    let _ = device.sync();
+
+    let estimated_usable = if failed.is_empty() {
+        capacity
+    } else {
+        highest_verified
+    };
+
+    Ok(DeviceVerificationReport {
+        advertised_bytes: capacity,
+        probed_offsets: offsets,
+        failed_offsets: failed,
+        highest_verified_offset: highest_verified,
+        estimated_usable_bytes: estimated_usable,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // FileImageDevice — file-backed .img storage
 // ---------------------------------------------------------------------------
 
@@ -1672,5 +1888,173 @@ mod tests {
         let dev = MemoryDevice::new(FOUR_SECTORS, SECTOR).unwrap();
         let result = dev.read_at(0, FOUR_SECTORS).unwrap();
         assert_eq!(result.len(), FOUR_SECTORS as usize);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fake-stick detection helpers
+    // -----------------------------------------------------------------------
+
+    /// A MemoryDevice that rejects writes past a certain offset — simulates a
+    /// fake USB stick.
+    #[derive(Debug)]
+    struct FakeStickDevice {
+        inner: MemoryDevice,
+        writable_until: u64,
+    }
+
+    impl BlockDevice for FakeStickDevice {
+        fn geometry(&self) -> &DeviceGeometry {
+            self.inner.geometry()
+        }
+        fn read_at(&self, offset: u64, length: u64) -> CoreFsResult<Vec<u8>> {
+            self.inner.read_at(offset, length)
+        }
+        fn write_at(&mut self, offset: u64, data: &[u8]) -> CoreFsResult<()> {
+            if offset + data.len() as u64 > self.writable_until {
+                return Err(CoreFsError::State("write protected".to_string()));
+            }
+            self.inner.write_at(offset, data)
+        }
+        fn sync(&mut self) -> CoreFsResult<()> {
+            self.inner.sync()
+        }
+        fn trim(&mut self, offset: u64, length: u64) -> CoreFsResult<()> {
+            self.inner.trim(offset, length)
+        }
+        fn supports_trim(&self) -> bool {
+            false
+        }
+    }
+
+    const ONE_MIB: u64 = 1024 * 1024;
+
+    #[test]
+    fn sanity_check_on_honest_device_passes() {
+        let mut dev = MemoryDevice::new(16 * ONE_MIB, 4096).unwrap();
+        let report = sanity_check_writable(&mut dev, 0).unwrap();
+        assert!(report.is_honest());
+        assert!(report.failed_offsets.is_empty());
+        assert_eq!(report.estimated_usable_bytes, report.advertised_bytes);
+        assert_eq!(report.fake_ratio_percent(), 0);
+    }
+
+    #[test]
+    fn sanity_check_detects_fake_stick() {
+        // Advertises 16 MiB, actually only writable up to 2 MiB.
+        let fake = FakeStickDevice {
+            inner: MemoryDevice::new(16 * ONE_MIB, 4096).unwrap(),
+            writable_until: 2 * ONE_MIB,
+        };
+        let mut dev = fake;
+        let report = sanity_check_writable(&mut dev, 0).unwrap();
+        assert!(!report.is_honest());
+        assert!(!report.failed_offsets.is_empty());
+        assert!(report.estimated_usable_bytes < report.advertised_bytes);
+        assert!(report.fake_ratio_percent() > 50);
+    }
+
+    #[test]
+    fn sanity_check_zero_fills_probe_regions() {
+        let mut dev = MemoryDevice::new(16 * ONE_MIB, 4096).unwrap();
+        // Write known markers everywhere so we can detect that probe regions
+        // were zeroed afterwards.
+        let marker = vec![0xAB; (16 * ONE_MIB) as usize];
+        dev.write_at(0, &marker).unwrap();
+
+        let report = sanity_check_writable(&mut dev, 0).unwrap();
+        assert!(report.is_honest());
+
+        // Every probe region must be zero-filled after the check.
+        for &offset in &report.probed_offsets {
+            let read = dev.read_at(offset, 4096).unwrap();
+            assert!(
+                read.iter().all(|&b| b == 0),
+                "probe at offset {offset} was not zero-filled"
+            );
+        }
+    }
+
+    #[test]
+    fn sanity_check_respects_skip_below() {
+        let mut dev = MemoryDevice::new(16 * ONE_MIB, 4096).unwrap();
+        // Write marker within the skip region.
+        let marker = vec![0xCD; 4096];
+        dev.write_at(0, &marker).unwrap();
+
+        let report = sanity_check_writable(&mut dev, 1 * ONE_MIB).unwrap();
+        assert!(report.is_honest());
+
+        // Marker at offset 0 should be preserved (below skip_below=1 MiB).
+        let read = dev.read_at(0, 4096).unwrap();
+        assert_eq!(read, marker);
+    }
+
+    #[test]
+    fn verify_device_capacity_on_honest_device() {
+        let mut dev = MemoryDevice::new(16 * ONE_MIB, 4096).unwrap();
+        let report = verify_device_capacity(&mut dev, 64 * 1024, 10).unwrap();
+        assert!(report.is_honest());
+        assert_eq!(report.probed_offsets.len(), 10);
+        assert_eq!(report.fake_ratio_percent(), 0);
+    }
+
+    #[test]
+    fn verify_device_capacity_detects_fake() {
+        let fake = FakeStickDevice {
+            inner: MemoryDevice::new(16 * ONE_MIB, 4096).unwrap(),
+            writable_until: ONE_MIB,
+        };
+        let mut dev = fake;
+        let report = verify_device_capacity(&mut dev, 64 * 1024, 20).unwrap();
+        assert!(!report.is_honest());
+        // Most probes should fail since writable region is tiny.
+        assert!(report.failed_offsets.len() > 10);
+        assert!(report.fake_ratio_percent() > 80);
+    }
+
+    #[test]
+    fn verify_device_capacity_rejects_zero_chunks() {
+        let mut dev = MemoryDevice::new(16 * ONE_MIB, 4096).unwrap();
+        let err = verify_device_capacity(&mut dev, 64 * 1024, 0).unwrap_err();
+        assert!(err.to_string().contains("chunk_count"));
+    }
+
+    #[test]
+    fn verify_device_rejects_read_only() {
+        let mut dev = MemoryDevice::new(16 * ONE_MIB, 4096).unwrap();
+        dev.set_read_only(true);
+        let err = verify_device_capacity(&mut dev, 64 * 1024, 10).unwrap_err();
+        assert!(matches!(err, CoreFsError::PolicyViolation(_)));
+    }
+
+    #[test]
+    fn generate_test_pattern_is_offset_dependent() {
+        let p1 = generate_test_pattern(0, 4096);
+        let p2 = generate_test_pattern(4096, 4096);
+        let p3 = generate_test_pattern(8192, 4096);
+        assert_ne!(p1, p2);
+        assert_ne!(p2, p3);
+        assert_ne!(p1, p3);
+        assert_eq!(p1.len(), 4096);
+    }
+
+    #[test]
+    fn generate_test_pattern_is_deterministic() {
+        let p1 = generate_test_pattern(12345, 4096);
+        let p2 = generate_test_pattern(12345, 4096);
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn device_verification_report_fake_ratio_calculation() {
+        let report = DeviceVerificationReport {
+            advertised_bytes: 1000,
+            probed_offsets: vec![0, 500, 1000],
+            failed_offsets: vec![500, 1000],
+            highest_verified_offset: 100,
+            estimated_usable_bytes: 100,
+        };
+        assert!(!report.is_honest());
+        assert_eq!(report.fake_ratio_percent(), 90);
     }
 }

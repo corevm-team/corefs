@@ -343,6 +343,46 @@ where
                     info.capacity_bytes / u64::from(info.logical_sector_size),
                     info.logical_sector_size
                 );
+
+                // Quick fake-stick sanity check (unless --skip-check).
+                if !args.iter().any(|a| a == "--skip-check") {
+                    println!("running quick writability check at distributed offsets ...");
+                    // Leave the first 16 MiB untouched (volume image region).
+                    let report = crate::storage::block_device::sanity_check_writable(
+                        &mut device,
+                        16 * 1024 * 1024,
+                    )?;
+                    if report.is_honest() {
+                        println!(
+                            "sanity-check ok: {} probes succeeded across {} bytes",
+                            report.probed_offsets.len(),
+                            report.advertised_bytes
+                        );
+                    } else {
+                        eprintln!(
+                            "warning: device appears to be fake or failing — {} of {} probes failed",
+                            report.failed_offsets.len(),
+                            report.probed_offsets.len()
+                        );
+                        eprintln!(
+                            "  advertised capacity: {} bytes",
+                            report.advertised_bytes
+                        );
+                        eprintln!(
+                            "  estimated usable:    {} bytes ({}% appears fake)",
+                            report.estimated_usable_bytes,
+                            report.fake_ratio_percent()
+                        );
+                        eprintln!("  failed offsets (bytes):");
+                        for off in &report.failed_offsets {
+                            eprintln!("    - {off}");
+                        }
+                        return Err(CoreFsError::State(
+                            "device failed writability check — data loss likely, aborting"
+                                .to_string(),
+                        ));
+                    }
+                }
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -375,6 +415,76 @@ where
                 let _ = (device_path, mount_point);
                 return Err(CoreFsError::InvalidCommand(
                     "mount-device-rw is only available on Linux builds".to_string(),
+                ));
+            }
+        }
+        "verify-device" => {
+            let device_path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand(
+                    "missing device path for verify-device".to_string(),
+                )
+            })?;
+            #[cfg(target_os = "linux")]
+            {
+                if !args.iter().any(|a| a == "--destructive") {
+                    return Err(CoreFsError::InvalidCommand(
+                        "verify-device overwrites all data on the device. \
+                         Re-run with --destructive to confirm."
+                            .to_string(),
+                    ));
+                }
+                let chunk_count: u64 = parse_flag_u64(&args, "--chunks").unwrap_or(200);
+                let chunk_size: u64 =
+                    parse_flag_u64(&args, "--chunk-size").unwrap_or(64 * 1024);
+                let info = crate::storage::block_device::raw::probe_device(device_path)?;
+                if info.is_mounted {
+                    return Err(CoreFsError::PolicyViolation(format!(
+                        "refusing to verify: {device_path} is currently mounted"
+                    )));
+                }
+                crate::storage::block_device::raw::check_device_permissions(device_path)?;
+                let mut device =
+                    crate::storage::block_device::raw::RawBlockDevice::open(device_path, false)?;
+                println!(
+                    "verifying {device_path}: {chunk_count} chunks × {chunk_size} bytes across {} bytes",
+                    info.capacity_bytes
+                );
+                let report = crate::storage::block_device::verify_device_capacity(
+                    &mut device,
+                    chunk_size,
+                    chunk_count,
+                )?;
+                println!("advertised_bytes: {}", report.advertised_bytes);
+                println!(
+                    "probed_offsets:   {} distinct positions",
+                    report.probed_offsets.len()
+                );
+                println!("failed_probes:    {}", report.failed_offsets.len());
+                println!(
+                    "highest_verified: {} bytes",
+                    report.highest_verified_offset
+                );
+                println!(
+                    "estimated_usable: {} bytes",
+                    report.estimated_usable_bytes
+                );
+                if report.is_honest() {
+                    println!("verdict: ok — device appears to be honest");
+                } else {
+                    println!(
+                        "verdict: FAKE — roughly {}% of advertised capacity is unusable",
+                        report.fake_ratio_percent()
+                    );
+                    return Err(CoreFsError::State(
+                        "device failed capacity verification".to_string(),
+                    ));
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = device_path;
+                return Err(CoreFsError::InvalidCommand(
+                    "verify-device is only available on Linux builds".to_string(),
                 ));
             }
         }
@@ -517,8 +627,9 @@ fn print_usage() {
     println!("  mount-image <image-path> <mount-point>");
     println!("  mount-image-rw <image-path> <mount-point>");
     println!("  probe-device <device-path>");
-    println!("  mkfs-device <device-path>");
+    println!("  mkfs-device <device-path> [--skip-check]");
     println!("  fsck-device <device-path>");
+    println!("  verify-device <device-path> --destructive [--chunks <n>] [--chunk-size <bytes>]");
     println!("  mount-device-rw <device-path> <mount-point>");
     println!("  diagnose-mount <image-path> <mount-point> [--create]");
     println!(
@@ -530,6 +641,11 @@ fn print_usage() {
     println!(
         "  profiles: balanced | small-files | metadata-heavy | snapshot-heavy | persist-heavy"
     );
+}
+
+fn parse_flag_u64(args: &[String], flag: &str) -> Option<u64> {
+    let idx = args.iter().position(|a| a == flag)?;
+    args.get(idx + 1).and_then(|v| v.parse::<u64>().ok())
 }
 
 fn benchmark_config_from_args(args: &[String]) -> CoreFsResult<BenchmarkConfig> {
