@@ -1384,7 +1384,9 @@ fn fuse_capacity_blocks(image_path: &Path, nodes: &HashMap<u64, FuseNode>) -> (u
     let Some(backing_free_bytes) = backing_store_free_bytes(image_path) else {
         return (FUSE_TOTAL_BLOCKS, fallback_free);
     };
-    let current_image_size = std::fs::metadata(image_path).map(|meta| meta.len()).unwrap_or(0);
+    let current_image_size = std::fs::metadata(image_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
 
     // We persist atomically via sibling tmp file + rename, so growth is limited
     // by free host space minus the current on-disk image footprint.
@@ -1640,6 +1642,71 @@ mod tests {
             .expect("read from cache");
 
         assert_eq!(bytes, b"world".to_vec());
+    }
+
+    #[test]
+    fn rw_mount_open_with_truncate_clears_cached_file_contents() {
+        let mut mount = rw_mount_from_demo();
+        let docs_ino = mount
+            .lookup_child(ROOT_INO, OsStr::new("docs"))
+            .expect("docs")
+            .ino();
+        let readme_ino = mount
+            .lookup_child(docs_ino, OsStr::new("readme.txt"))
+            .expect("readme")
+            .ino();
+
+        let fh = mount
+            .open_file_handle(readme_ino, libc::O_RDWR | libc::O_TRUNC)
+            .expect("open with truncation");
+
+        assert_eq!(
+            mount
+                .open_files
+                .get(&fh)
+                .map(|handle| handle.data.clone())
+                .unwrap_or_default(),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            mount
+                .nodes_by_ino
+                .get(&readme_ino)
+                .map(|node| node.data.clone()),
+            Some(Vec::new())
+        );
+        assert!(mount.dirty);
+    }
+
+    #[test]
+    fn rw_mount_release_flushes_cached_writeback_and_closes_handle() {
+        let mut mount = rw_mount_from_demo();
+        let docs_ino = mount
+            .lookup_child(ROOT_INO, OsStr::new("docs"))
+            .expect("docs")
+            .ino();
+        let readme_ino = mount
+            .lookup_child(docs_ino, OsStr::new("readme.txt"))
+            .expect("readme")
+            .ino();
+
+        let fh = mount
+            .open_file_handle(readme_ino, libc::O_RDWR)
+            .expect("open");
+        mount
+            .write_to_handle(readme_ino, fh, 0, b"release")
+            .expect("write cache");
+
+        mount.release_file_handle(fh).expect("release should flush");
+
+        assert!(!mount.open_files.contains_key(&fh));
+        assert_eq!(
+            mount
+                .service
+                .read_file("/docs/readme.txt")
+                .expect("service read"),
+            b"release".to_vec()
+        );
     }
 
     #[test]
