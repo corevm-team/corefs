@@ -59,11 +59,17 @@ check_system_deps() {
   local missing_libs=()
 
   # Basis-Build-Tools
-  for cmd in git make gcc automake autoconf pkg-config libtool; do
+  for cmd in git make gcc automake autoconf pkg-config; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_cmds+=("$cmd")
     fi
   done
+
+  # libtool liefert unter Debian 'libtoolize', nicht 'libtool'
+  if ! command -v libtoolize >/dev/null 2>&1 && \
+     ! command -v libtool >/dev/null 2>&1; then
+    missing_cmds+=("libtool")
+  fi
 
   # FUSE-Userspace
   if ! command -v fusermount3 >/dev/null 2>&1 && \
@@ -115,12 +121,17 @@ check_system_deps() {
     fi
 
     # Nochmal pruefen ob alles da ist
-    for cmd in git make gcc automake autoconf pkg-config libtool; do
+    for cmd in git make gcc automake autoconf pkg-config; do
       if ! command -v "$cmd" >/dev/null 2>&1; then
         error "Kommando '${cmd}' nach Installation immer noch nicht gefunden."
         exit 1
       fi
     done
+    if ! command -v libtoolize >/dev/null 2>&1 && \
+       ! command -v libtool >/dev/null 2>&1; then
+      error "Weder 'libtool' noch 'libtoolize' nach Installation gefunden."
+      exit 1
+    fi
     for header in xfs/xfs.h uuid/uuid.h; do
       if ! echo "#include <${header}>" | gcc -E -x c - >/dev/null 2>&1; then
         error "Header '${header}' nach Installation immer noch nicht gefunden."
