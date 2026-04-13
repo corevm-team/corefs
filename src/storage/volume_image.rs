@@ -2082,6 +2082,73 @@ pub fn load_from_device(device: &dyn BlockDevice) -> CoreFsResult<PersistedState
     persisted_state_from_entries(&bytes, &inspected.entries, path)
 }
 
+/// Inspects a CoreFS volume on a [`BlockDevice`] and returns structural
+/// integrity metadata.
+///
+/// Reads the volume image from the device and runs the same checks as
+/// [`inspect_volume_image`] (superblock validation, checksum verification,
+/// segment presence).  Does not modify the device.
+pub fn inspect_device(device: &dyn BlockDevice) -> CoreFsResult<VolumeImageInspectionReport> {
+    let label = "<device>";
+    let path = Path::new(label);
+    let sector_size = device.sector_size() as u64;
+
+    // Read header.
+    let header_sector = device.read_at(0, sector_size)?;
+    if header_sector.len() < HEADER_SIZE {
+        return Err(CoreFsError::State(
+            "device too small for CoreFS header".to_string(),
+        ));
+    }
+    if &header_sector[..8] != MAGIC {
+        return Err(CoreFsError::State(
+            "device does not contain a CoreFS volume (invalid magic)".to_string(),
+        ));
+    }
+
+    let segment_count =
+        u32::from_le_bytes(header_sector[12..16].try_into().expect("fixed")) as usize;
+    let directory_offset = HEADER_SIZE;
+    let directory_length = segment_count * SEGMENT_ENTRY_SIZE;
+    let directory_end = directory_offset + directory_length;
+    let needed_for_directory = align_up(directory_end, sector_size as usize);
+
+    // Read header + directory.
+    let header_bytes = if needed_for_directory as u64 > sector_size {
+        let extra = device.read_at(sector_size, needed_for_directory as u64 - sector_size)?;
+        let mut combined = header_sector;
+        combined.extend_from_slice(&extra);
+        combined
+    } else {
+        header_sector
+    };
+
+    let directory = header_bytes.get(directory_offset..directory_end).ok_or_else(|| {
+        CoreFsError::State("truncated CoreFS directory on device".to_string())
+    })?;
+    let entries = parse_directory(directory)?;
+    let image_end = entries
+        .iter()
+        .map(|e| e.offset + e.length)
+        .max()
+        .unwrap_or(directory_end as u64);
+    let total_read = align_up(image_end as usize, sector_size as usize);
+    let total_read = total_read.min(device.capacity() as usize);
+
+    // Read the full image for checksum validation.
+    let bytes = if total_read as u64 > header_bytes.len() as u64 {
+        let remaining_offset = header_bytes.len() as u64;
+        let remaining = device.read_at(remaining_offset, total_read as u64 - remaining_offset)?;
+        let mut full = header_bytes;
+        full.extend_from_slice(&remaining);
+        full
+    } else {
+        header_bytes[..total_read].to_vec()
+    };
+
+    Ok(inspect_volume_image_bytes(&bytes, path)?.report)
+}
+
 /// Builds a serialized CoreFS image as a byte vector (for use with
 /// [`BlockDevice::write_at`] or direct device formatting).
 pub fn build_volume_image_bytes(state: &PersistedState) -> CoreFsResult<Vec<u8>> {

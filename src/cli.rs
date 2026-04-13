@@ -378,6 +378,40 @@ where
                 ));
             }
         }
+        "fsck-device" => {
+            let device_path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing device path for fsck-device".to_string())
+            })?;
+            #[cfg(target_os = "linux")]
+            {
+                // Read-only access is enough for fsck.
+                let device =
+                    crate::storage::block_device::raw::RawBlockDevice::open(device_path, true)?;
+                let report = IntegrityService.fsck_device(&device)?;
+                println!("fsck-device ok: {device_path}");
+                println!("format_version: {}", report.format_version);
+                println!("segment_count: {}", report.segment_count);
+                println!("valid_superblocks: {}", report.valid_superblocks);
+                println!("selected_generation: {}", report.selected_generation);
+                println!(
+                    "checksums: directory={} payload={}",
+                    report.directory_checksum_valid, report.payload_checksum_valid
+                );
+                println!("block_descriptors: {}", report.block_descriptors);
+                if !report.directory_checksum_valid || !report.payload_checksum_valid {
+                    return Err(CoreFsError::State(
+                        "integrity check failed — checksums do not match".to_string(),
+                    ));
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = device_path;
+                return Err(CoreFsError::InvalidCommand(
+                    "fsck-device is only available on Linux builds".to_string(),
+                ));
+            }
+        }
         "diagnose-mount" => {
             let image_path = args.get(2).ok_or_else(|| {
                 CoreFsError::InvalidCommand("missing image path for diagnose-mount".to_string())
@@ -484,6 +518,7 @@ fn print_usage() {
     println!("  mount-image-rw <image-path> <mount-point>");
     println!("  probe-device <device-path>");
     println!("  mkfs-device <device-path>");
+    println!("  fsck-device <device-path>");
     println!("  mount-device-rw <device-path> <mount-point>");
     println!("  diagnose-mount <image-path> <mount-point> [--create]");
     println!(

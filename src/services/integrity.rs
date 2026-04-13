@@ -254,6 +254,16 @@ impl IntegrityService {
         let report = volume_image::repair_volume_image_superblocks(path)?;
         Ok(map_repair_report(report))
     }
+
+    /// Runs structural integrity checks against a volume stored on a
+    /// [`crate::storage::block_device::BlockDevice`].
+    pub fn fsck_device(
+        &self,
+        device: &dyn crate::storage::block_device::BlockDevice,
+    ) -> CoreFsResult<ImageIntegrityReport> {
+        let report = volume_image::inspect_device(device)?;
+        Ok(map_image_report(report))
+    }
 }
 
 fn map_image_report(report: VolumeImageInspectionReport) -> ImageIntegrityReport {
