@@ -10,3 +10,4 @@ scripts/*.log
 .codex/
 corefs_brainstorming.txt
 CLAUDE.md
+.codex
