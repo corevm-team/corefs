@@ -1239,6 +1239,10 @@ impl CoreFsService {
 
     /// Updates the POSIX owner (uid/gid) of a path.  Either value can be
     /// `None` to leave it unchanged (matching `chown`/`lchown` semantics).
+    ///
+    /// Does **not** create a new file version and does **not** update
+    /// `modified_at` — metadata-only changes are tracked by `ctime` in
+    /// POSIX, not `mtime`.  Versioning captures content history only.
     pub fn set_owner(
         &mut self,
         path: &str,
@@ -1254,18 +1258,20 @@ impl CoreFsService {
         if let Some(g) = gid {
             inode.metadata.gid = g;
         }
-        inode.modified_at = SystemTime::now();
         Ok(())
     }
 
     /// Updates the POSIX mode bits of a path (permissions only; `0o7777` mask
     /// — type bits are derived from `InodeKind`).
+    ///
+    /// Does **not** create a new file version and does **not** update
+    /// `modified_at` — metadata-only changes are tracked by `ctime` in
+    /// POSIX, not `mtime`.  Versioning captures content history only.
     pub fn set_mode(&mut self, path: &str, mode: u32) -> CoreFsResult<()> {
         let inode = self.catalog.get_mut(path).ok_or_else(|| {
             CoreFsError::NotFound(format!("path not found: {path}"))
         })?;
         inode.metadata.mode = mode & 0o7777;
-        inode.modified_at = SystemTime::now();
         Ok(())
     }
 
@@ -2611,6 +2617,51 @@ mod tests {
         fs.set_mode("/b.txt", 0o177777).expect("chmod");
         let inode = fs.get_inode("/b.txt").expect("inode");
         assert_eq!(inode.metadata.mode, 0o7777);
+    }
+
+    #[test]
+    fn chown_and_chmod_do_not_create_new_versions() {
+        let mut fs = test_fs();
+        fs.create_file("/v.txt", b"first", &[]).expect("file");
+        let initial_versions = fs.versioning.list_versions("/v.txt").len();
+
+        // Writing content creates a new version.
+        fs.write_file("/v.txt", b"second").expect("write");
+        let after_write = fs.versioning.list_versions("/v.txt").len();
+        assert!(
+            after_write > initial_versions,
+            "content write should create a new version"
+        );
+
+        // chown/chmod should NOT create versions.
+        fs.set_owner("/v.txt", Some(1000), Some(1000)).expect("chown");
+        fs.set_mode("/v.txt", 0o600).expect("chmod");
+        fs.set_owner("/v.txt", None, Some(2000)).expect("chgrp");
+
+        let after_metadata = fs.versioning.list_versions("/v.txt").len();
+        assert_eq!(
+            after_metadata, after_write,
+            "metadata-only changes must not create versions"
+        );
+    }
+
+    #[test]
+    fn chown_preserves_modified_at() {
+        let mut fs = test_fs();
+        fs.create_file("/t.txt", b"data", &[]).expect("file");
+        let before = fs.get_inode("/t.txt").expect("inode").modified_at;
+
+        // Pause briefly to ensure SystemTime::now() would differ.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        fs.set_owner("/t.txt", Some(1000), Some(1000)).expect("chown");
+        fs.set_mode("/t.txt", 0o600).expect("chmod");
+
+        let after = fs.get_inode("/t.txt").expect("inode").modified_at;
+        assert_eq!(
+            before, after,
+            "chown/chmod must not update modified_at (POSIX mtime)"
+        );
     }
 
     #[test]

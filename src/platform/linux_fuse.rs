@@ -1545,7 +1545,8 @@ impl Filesystem for CoreFsFuseMountRw {
                     if let Some(g) = gid {
                         inode.metadata.gid = g;
                     }
-                    inode.modified_at = SystemTime::now();
+                    // POSIX: chown updates ctime, not mtime.  Versioning is
+                    // not triggered — metadata-only change.
                 }
             }
             self.dirty = true;
@@ -1559,7 +1560,7 @@ impl Filesystem for CoreFsFuseMountRw {
             if let Some(n) = self.nodes_by_ino.get_mut(&ino) {
                 if let Some(ref mut inode) = n.inode {
                     inode.metadata.mode = new_mode & 0o7777;
-                    inode.modified_at = SystemTime::now();
+                    // POSIX: chmod updates ctime, not mtime.
                 }
             }
             self.dirty = true;
