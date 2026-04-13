@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `257/257` Tests erfolgreich  
+**Test-Status:** `283/283` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -96,6 +96,8 @@
 - TRIM/Discard-Tracking im BlockStore: `FreedExtent`-Akkumulation bei `release_inode()` und Extent-Shrink; `drain_freed_extents()` für Weiterleitung an `BlockDevice::trim()`
 - CLI-Kommandos für Block-Devices: `probe-device` (Sicherheitsanalyse), `mkfs-device` (Formatierung mit Safety-Checks), `mount-device-rw` (FUSE-RW-Mount von `/dev/sdX`)
 - FUSE-Mount von Block-Devices: `mount_device_rw()` lädt Volume vom Device, dient über bestehende FUSE-RW-Infrastruktur, schreibt bei Unmount zurück auf das Device; `format_device()` formatiert ein Device mit leerem CoreFS-Volume
+- On-Demand Sektor-I/O: `DeviceVolume` liest beim Öffnen nur Header und Segment-Directory (~400 Bytes) vom Device; individuelle Segmente werden bei Bedarf sektorausgerichtet geladen und im Read-Cache gehalten; Write-Buffer akkumuliert Änderungen pro Segment; `flush()` schreibt nur geänderte Segmente; `invalidate_cache()` erzwingt Device-Reads
+- Device-Journal: `DeviceJournal` verwaltet eine reservierte 256-KiB-Region nach dem Volume-Image; `commit()` serialisiert `VolumeWal` mit Checksumme und `fdatasync()`-Barrier (Header → Payload → Sync); `clear()` markiert Journal als leer nach erfolgreichem Image-Update; Generation-Counter für Crash-Ordering; korrupte Journals werden bei `open()` erkannt und verworfen
 
 ### Plattform- und Integrationsmodell
 
@@ -115,12 +117,85 @@
 - redundante Superblock-Fallbacks, Generation-Counter-Selektion, `fsck-image`, Image-Reparatur, Header-Directory-Recovery, Rekonstruktion beschädigter Segmentverzeichnisse, Rekonstruktion defekter Blockdeskriptoren, Journal-Replay, Dirty/Clean-Recovery und Bereinigung verwaister Blockdaten sind testseitig abgesichert
 - `cargo test` aktuell vollständig erfolgreich
 
+### Testauswertung — Enterprise-Readiness (Stand 2026-04-13)
+
+#### Testverteilung nach Modul (~257 Tests)
+
+| Schicht | Modul | Tests | Schwerpunkte |
+|---------|-------|------:|-------------|
+| Storage | `block_device.rs` | ~60 | Sektoralignment, Memory-/File-Devices, TRIM, Read-only |
+| Storage | `block_store.rs` | ~21 | CoW, Dedup, Defragmentierung, Hot-Path-Allokation |
+| Storage | `volume_image.rs` | ~12 | Persistenzformat, Superblock, Segmenttabellen, Reparatur |
+| Storage | `allocator.rs`, `catalog.rs`, `volume_wal.rs`, `volume_session.rs` | ~10 | WAL-Ops, Session-Lifecycle, Allokation |
+| App | `mod.rs`, `tests.rs` | ~75 | Dateioperationen, Snapshots, Klonen, Verschlüsselung |
+| Platform | `linux_fuse.rs` | ~27 | Read-/Write-Caching, Snapshot-Overlays, Time-Travel |
+| Platform | `performance.rs`, `diagnostics.rs`, `runtime.rs`, `tools.rs` | ~11 | Benchmark-Profile, Diagnostik |
+| Services | `encryption.rs`, `compression.rs`, `security.rs` | ~10 | ChaCha20, LZ4, Tamper-Detection |
+| Services | `integrity.rs`, `recovery.rs`, `journal.rs` | ~12 | Scrubbing, fsck, Journal-Replay, Crash-Recovery |
+| Services | `versioning.rs`, `metadata.rs`, `quota.rs` | ~7 | Versionsbereinigung, Quota-Enforcement |
+| Services | `hot_paths.rs`, `sync.rs`, `semantic.rs`, `indexing.rs` | ~4 | je 1 Basistest |
+| Domain | `inode.rs`, `acl.rs`, `metadata.rs`, `volume.rs` | ~4 | je 1 Basistest |
+| CLI/Config | `cli.rs`, `config.rs`, `error.rs` | ~7 | Kommandozeile, Konfiguration |
+
+#### Gut abgedeckte Bereiche
+
+- **Copy-on-Write & Blob-Sharing** (~9 Tests): Ref-Counting, Klonen, Materialisierung, Sharing-Statistiken
+- **Snapshot-Lifecycle** (~15 Tests): Capture, Restore, Scoped Snapshots, Diff, Pinning, Encryption-Transparenz
+- **Encryption-Pipeline** (~6 Tests): Roundtrip, Wrong-Key-Rejection, Tamper-Detection
+- **Integritäts- & Recovery-Pfade** (~12 Tests): Scrubbing, fsck, Image-Reparatur, Journal-Reconciliation, Unclean-Recovery
+- **Block-Device-Abstraktion** (~60 Tests): Alignment, Boundary-Checks, Memory-/File-Devices, TRIM
+- **FUSE-Integration** (~27 Tests): Caching, Handle-Lifecycle, Virtual Overlays, Time-Travel
+
+#### Identifizierte Lücken für Enterprise-Level
+
+**P0 — Concurrency & Thread-Safety (0 Tests)**
+- Kein einziger Multi-Thread-Test vorhanden
+- Fehlend: parallele Schreibzugriffe, gleichzeitige Snapshot-Erstellung während Writes, CoW-Materialisierung unter Contention, Ref-Count-Races, Lock-Ordering / Deadlock-Erkennung
+- Begründung: für ein Dateisystem die kritischste Lücke — Race Conditions können Datenverlust verursachen
+
+**P0 — Fault Injection (0 Tests)**
+- Fehlend: ENOSPC-Recovery (Platte voll während Write/Journal-Commit/Snapshot), partielle I/O-Fehler, Bit-Rot/Silent-Corruption-Erkennung, Journal-Korruption (abgebrochener WAL-Eintrag), Superblock-Verlust mit Fallback-Validierung, Power-Loss-Simulation (Write-Abbruch an zufälligen Stellen)
+- Begründung: Enterprise bedeutet Überleben defekter Hardware und voller Platten
+
+**P0 — Stress & Skalierung (0 Tests)**
+- Fehlend: 10'000+ Dateien pro Verzeichnis (Katalog-Performance), 100+ MB Writes (Extent-Allokation), tiefe Verzeichnisbäume (500+ Ebenen), Langläufer (Sustained Writes über Minuten, Memory-Leak-Erkennung), 100+ Snapshot-Akkumulation, Clone-Kaskaden (Datei → Clone → Clone → Write)
+- Begründung: aktuelle Tests arbeiten ausschliesslich mit kleinen Datenmengen
+
+**P1 — Performance-Regression-Gate (Infrastruktur vorhanden, keine Assertions)**
+- Benchmark-Profile existieren (Balanced, SmallFiles, MetadataHeavy, SnapshotHeavy, PersistHeavy), aber keine automatische Regressionserkennung
+- Fehlend: Baseline-Capture pro Profil, Threshold-Assertions (Fail bei >15% Regression), Latenz-Histogramme (P50/P95/P99 statt nur Durchschnitt), CI-Integration
+- Begründung: Tail-Latency ist Enterprise-kritisch; Regressionen müssen automatisch erkannt werden
+
+**P1 — Crash-Recovery-Roundtrips (teilweise abgedeckt)**
+- Fehlend: vollständige Roundtrips (Daten schreiben → Image-Save abrupt abbrechen → neu laden → fsck → Konsistenzprüfung), automatischer `deep_check` nach jedem Stress-Test, Orphaned-Block-Audit nach vielen Deletes/Clones/Snapshots, Ref-Count-Konsistenzprüfung (Σ ref_counts == tatsächliche Blob-Referenzen)
+- Begründung: Crash-Recovery ist in Isolation getestet, aber nicht als End-to-End-Szenario unter Last
+
+**P2 — Encryption + Compression unter Last**
+- Fehlend: 1000+ Dateien verschlüsselt+komprimiert schreiben/lesen/verifizieren, Schlüsselwechsel (Re-Encryption aller Blöcke), gezielte Tamper-Detection unter Scale
+- Begründung: Pipeline-Korrektheit unter Volumen sicherstellen
+
+**P2 — Property-Based Testing / Deterministische Reproduzierbarkeit**
+- Fehlend: Seed-basierte Randomisierung für Stress-Tests, Property-Based Tests (proptest/quickcheck) z.B. „beliebige Sequenz von create/write/delete/snapshot → fsck ist immer clean"
+- Begründung: systematische Abdeckung von Zustandskombinationen, die manuell geschriebene Tests nicht erfassen
+
+#### Empfohlene Test-Roadmap
+
+| Prio | Kategorie | Umfang | Ziel |
+|------|-----------|--------|------|
+| P0 | Concurrency-Tests | ~15–20 Tests | Thread-Safety aller mutierbaren Pfade validieren |
+| P0 | Fault-Injection-Framework | ~15 Tests | I/O-Fehler, Disk-Full, Korruption überleben |
+| P0 | Stress- & Skalierungstests | ~10 Tests | Verhalten bei Enterprise-typischen Datenmengen |
+| P1 | Performance-Regression-Gate | ~5 Tests + CI | Automatische Erkennung von Latenz-/Throughput-Regressionen |
+| P1 | Crash-Recovery-Roundtrips | ~8 Tests | End-to-End-Konsistenz nach simulierten Abstürzen |
+| P2 | Encryption-Pipeline-Stress | ~5 Tests | Korrektheit der Encrypt+Compress-Pipeline unter Volumen |
+| P2 | Property-Based Tests | ~5 Generatoren | Zustandsinvarianten über zufällige Op-Sequenzen |
+
 ## Noch nicht umgesetzt
 
 Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten, aber noch nicht als vollständige reale Implementierung vorhanden:
 
 - produktionsnahes blockorientiertes On-Disk-Format
-- On-Demand Sektor-I/O auf Block-Devices (aktuell: vollständiges Laden/Speichern in den RAM; Ziel: sektorweises Lesen/Schreiben ohne vollständiges Laden)
+- vollständig segmentgranulares On-Demand I/O für FUSE-Mount (aktuell: `DeviceVolume` für Segment-Level-Zugriff vorhanden; FUSE-Mount lädt noch komplett in RAM und schreibt bei Unmount zurück)
 - persistentes physisch device-blockadressiertes Write-Ahead-Log direkt im Volume statt des aktuellen extent-orientierten Pending-WAL
 - Self-Healing mit Redundanzquellen
 - Cluster-Synchronisation
@@ -150,6 +225,8 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - mehrsegmentiges binäres Volume-Image-Format mit Segmenttabelle, Alignment-Regeln, redundanten Superblocks, Generation Countern, binären Segment-Frames und Prüflogik als weiterer Persistenzpfad
 - `BlockDevice`-Abstraktion mit `FileImageDevice`, `RawBlockDevice` (Linux) und `MemoryDevice`
 - `DeviceVolumeSession` für Block-Device-basierte Volume-Sitzungen
+- `DeviceVolume` für On-Demand-Segment-I/O mit Read-Cache und Write-Buffer
+- `DeviceJournal` für geräteresidentes Write-Ahead-Log mit Barrier-Semantik
 
 ### `src/services`
 
@@ -222,8 +299,8 @@ Ziel: CoreFS direkt auf einem Blockgerät (`/dev/sdX1`) formatieren und via FUSE
 - ✅ **TRIM/Discard-Tracking**: `FreedExtent`-Akkumulation im BlockStore bei `release_inode()` und Extent-Shrink; `drain_freed_extents()` für `BlockDevice::trim()`-Weiterleitung; `RawBlockDevice` implementiert `ioctl(BLKDISCARD)` mit automatischem Fallback bei `EOPNOTSUPP`
 - ✅ **Device-Safety**: `probe_device()` → `DeviceInfo` (sysfs-basiert: Sektorgrössen, R/O-Status, NVMe-Erkennung, `/proc/mounts`-Abgleich); `is_safe_to_format()` / `format_blockers()`
 - ✅ **`DeviceVolumeSession`**: Block-Device-basierte Session mit `format_new()`, `open()`, `flush()`, `mutate()` — analog zur dateibasierten `VolumeSession`
-- ⬜ **On-Demand Sektor-I/O**: sektorweises Lesen/Schreiben ohne vollständiges Laden des Volumes in den RAM; Read-Cache und Write-Buffer
-- ⬜ **Device-Journal**: Write-Ahead-Log in reservierten Sektoren auf dem Gerät statt temp-file+rename; Barrier-Semantik über `fdatasync()` für Crash-Safety
+- ✅ **On-Demand Sektor-I/O**: `DeviceVolume` liest nur Header+Directory (~400 Bytes) beim Öffnen; individuelle Segmente werden bei Bedarf vom Device geladen und im Read-Cache gehalten; Write-Buffer puffert Änderungen pro Segment; `flush()` schreibt nur geänderte Segmente zurück
+- ✅ **Device-Journal**: `DeviceJournal` reserviert 256 KiB nach dem Volume-Image für WAL-Entries; `commit()` schreibt Header + serialisierte `VolumeWal` mit Checksumme und `fdatasync()`-Barrier; `clear()` nach erfolgreichem Image-Update; Generation-Counter für Ordering; Crash-Recovery liest Journal und replayed committed Ops
 
 ### Phase 2: Systemkern
 
