@@ -14,9 +14,10 @@ pub enum WalOperation {
         path: String,
         inode: InodeId,
     },
-    PatchData {
+    PatchExtent {
         inode: InodeId,
-        data_offset: u64,
+        device_block: u64,
+        block_offset: usize,
         inode_offset: usize,
         bytes: Vec<u8>,
         final_len: usize,
@@ -69,9 +70,10 @@ pub fn apply_operation(service: &mut CoreFsService, operation: &WalOperation) ->
                 service.create_directory_with_inode(path, *inode)?;
             }
         }
-        WalOperation::PatchData {
+        WalOperation::PatchExtent {
             inode,
-            data_offset,
+            device_block,
+            block_offset,
             inode_offset,
             bytes,
             final_len,
@@ -80,11 +82,14 @@ pub fn apply_operation(service: &mut CoreFsService, operation: &WalOperation) ->
                 return Ok(());
             };
             let absolute_offset = service
-                .data_layout_for_inode(*inode)
-                .and_then(|layout| {
-                    data_offset
-                        .checked_sub(layout.data_offset)
-                        .map(|relative| relative as usize)
+                .data_extents_for_inode(*inode)
+                .into_iter()
+                .find_map(|extent| {
+                    if extent.device_block == *device_block {
+                        Some(extent.inode_offset.saturating_add(*block_offset))
+                    } else {
+                        None
+                    }
                 })
                 .unwrap_or(*inode_offset);
             if service.get_inode(&path).is_none() {
@@ -157,9 +162,10 @@ mod tests {
                     path: "/data/hello.txt".to_string(),
                     inode: InodeId(2),
                 },
-                WalOperation::PatchData {
+                WalOperation::PatchExtent {
                     inode: InodeId(2),
-                    data_offset: 0,
+                    device_block: 0,
+                    block_offset: 0,
                     inode_offset: 0,
                     bytes: b"hello".to_vec(),
                     final_len: 5,
@@ -193,9 +199,10 @@ mod tests {
 
         apply_operation(
             &mut service,
-            &WalOperation::PatchData {
+            &WalOperation::PatchExtent {
                 inode,
-                data_offset: 2,
+                device_block: 0,
+                block_offset: 2,
                 inode_offset: 2,
                 bytes: b"XYZ".to_vec(),
                 final_len: 8,
@@ -211,6 +218,36 @@ mod tests {
         assert_eq!(
             service.read_file("/delta.txt").expect("file should exist"),
             b"abXYZf".to_vec()
+        );
+    }
+
+    #[test]
+    fn wal_patch_extent_uses_device_block_mapping_when_available() {
+        let mut service = CoreFsService::format(CoreFsConfig {
+            block_size: 4,
+            ..CoreFsConfig::default()
+        });
+        service
+            .create_file("/extent.txt", b"abcdefgh", &[])
+            .expect("file");
+        let inode = service.inode_for_path("/extent.txt").expect("inode");
+
+        apply_operation(
+            &mut service,
+            &WalOperation::PatchExtent {
+                inode,
+                device_block: 1,
+                block_offset: 1,
+                inode_offset: 5,
+                bytes: b"ZZ".to_vec(),
+                final_len: 8,
+            },
+        )
+        .expect("patch should apply");
+
+        assert_eq!(
+            service.read_file("/extent.txt").expect("file should exist"),
+            b"abcdeZZh".to_vec()
         );
     }
 }

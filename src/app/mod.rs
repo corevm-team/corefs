@@ -46,6 +46,14 @@ pub struct InodeDataLayout {
     pub length: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataExtent {
+    pub device_block: u64,
+    pub data_offset: u64,
+    pub inode_offset: usize,
+    pub length: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedState {
     pub config: CoreFsConfig,
@@ -395,6 +403,38 @@ impl CoreFsService {
             offset = offset.saturating_add(record.bytes.len() as u64);
         }
         None
+    }
+
+    pub fn data_extents_for_inode(&self, inode_id: InodeId) -> Vec<DataExtent> {
+        let Some(layout) = self.data_layout_for_inode(inode_id) else {
+            return Vec::new();
+        };
+        let block_size = self.block_size().max(1);
+        let mut extents = Vec::new();
+        let mut consumed = 0usize;
+
+        while consumed < layout.length {
+            let data_offset = layout.data_offset.saturating_add(consumed as u64);
+            let extent_len = (layout.length - consumed).min(block_size);
+            extents.push(DataExtent {
+                device_block: data_offset / block_size as u64,
+                data_offset,
+                inode_offset: consumed,
+                length: extent_len,
+            });
+            consumed += extent_len;
+        }
+
+        if extents.is_empty() && layout.length == 0 {
+            extents.push(DataExtent {
+                device_block: layout.data_offset / block_size as u64,
+                data_offset: layout.data_offset,
+                inode_offset: 0,
+                length: 0,
+            });
+        }
+
+        extents
     }
 
     pub fn path_for_inode(&self, inode_id: InodeId) -> Option<String> {
@@ -1024,5 +1064,29 @@ mod tests {
         assert_eq!(first.length, 3);
         assert_eq!(second.data_offset, 3);
         assert_eq!(second.length, 5);
+    }
+
+    #[test]
+    fn data_extents_for_inode_follow_block_boundaries() {
+        let mut fs = CoreFsService::format(CoreFsConfig {
+            block_size: 4,
+            ..CoreFsConfig::default()
+        });
+        fs.create_file("/payload.bin", b"abcdefghij", &[])
+            .expect("file");
+
+        let inode = fs.inode_for_path("/payload.bin").expect("inode");
+        let extents = fs.data_extents_for_inode(inode);
+
+        assert_eq!(extents.len(), 3);
+        assert_eq!(extents[0].device_block, 0);
+        assert_eq!(extents[0].inode_offset, 0);
+        assert_eq!(extents[0].length, 4);
+        assert_eq!(extents[1].device_block, 1);
+        assert_eq!(extents[1].inode_offset, 4);
+        assert_eq!(extents[1].length, 4);
+        assert_eq!(extents[2].device_block, 2);
+        assert_eq!(extents[2].inode_offset, 8);
+        assert_eq!(extents[2].length, 2);
     }
 }

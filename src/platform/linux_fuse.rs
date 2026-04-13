@@ -582,25 +582,48 @@ impl CoreFsFuseMountRw {
         self.service.save_image_to_path(&self.image_path)
     }
 
-    fn record_data_patch(
+    fn record_extent_patch(
         &mut self,
         inode: InodeId,
         start: usize,
         bytes: &[u8],
         final_len: usize,
     ) -> CoreFsResult<()> {
-        let data_offset = self
-            .service
-            .data_layout_for_inode(inode)
-            .map(|layout| layout.data_offset.saturating_add(start as u64))
-            .unwrap_or(start as u64);
-        self.record_wal_operation(WalOperation::PatchData {
-            inode,
-            data_offset,
-            inode_offset: start,
-            bytes: bytes.to_vec(),
-            final_len,
-        })?;
+        let extents = self.service.data_extents_for_inode(inode);
+        let mut consumed = 0usize;
+
+        while consumed < bytes.len() {
+            let absolute_offset = start + consumed;
+            let extent = extents.iter().find(|extent| {
+                let range_end = extent.inode_offset.saturating_add(extent.length.max(1));
+                absolute_offset >= extent.inode_offset && absolute_offset < range_end
+            });
+
+            let Some(extent) = extent else {
+                self.record_wal_operation(WalOperation::PatchExtent {
+                    inode,
+                    device_block: absolute_offset as u64 / self.service.block_size().max(1) as u64,
+                    block_offset: absolute_offset % self.service.block_size().max(1),
+                    inode_offset: absolute_offset,
+                    bytes: bytes[consumed..].to_vec(),
+                    final_len,
+                })?;
+                break;
+            };
+
+            let offset_in_extent = absolute_offset.saturating_sub(extent.inode_offset);
+            let chunk_len = (extent.length.max(1).saturating_sub(offset_in_extent))
+                .min(bytes.len() - consumed);
+            self.record_wal_operation(WalOperation::PatchExtent {
+                inode,
+                device_block: extent.device_block,
+                block_offset: offset_in_extent,
+                inode_offset: absolute_offset,
+                bytes: bytes[consumed..consumed + chunk_len].to_vec(),
+                final_len,
+            })?;
+            consumed += chunk_len;
+        }
 
         Ok(())
     }
@@ -815,7 +838,7 @@ impl Filesystem for CoreFsFuseMountRw {
             return;
         }
         if self
-            .record_data_patch(inode_id, start, data, buf.len())
+            .record_extent_patch(inode_id, start, data, buf.len())
             .is_err()
         {
             reply.error(EIO);
@@ -1629,9 +1652,10 @@ mod tests {
             .write_file("/hello.txt", b"updated")
             .expect("write");
         mount
-            .record_wal_operation(WalOperation::PatchData {
+            .record_wal_operation(WalOperation::PatchExtent {
                 inode: mount.service.inode_for_path("/hello.txt").expect("inode"),
-                data_offset: 0,
+                device_block: 0,
+                block_offset: 0,
                 inode_offset: 0,
                 bytes: b"updated".to_vec(),
                 final_len: 7,

@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `99/99` Tests erfolgreich  
+**Test-Status:** `101/101` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -41,7 +41,7 @@
 - Journaling von Operationen
 - transaktionales Journal mit Pending-Transaktionen, Commit-/Abort-Markern und Recovery-Einträgen
 - integriertes Pending-WAL im Volume-Image fuer RW-Sessions
-- data-segmentadressierte WAL-Records ueber `inode + DATA-offset + inode_offset` fuer partielle File-Patches und Truncates
+- extent- und device-blockadressierte WAL-Records ueber `inode + device_block + block_offset + inode_offset` fuer partielle File-Patches und Truncates
 - automatische Versionierung im Basismodell
 - Snapshot-Erzeugung
 - Recoverable Delete und Secure Delete
@@ -83,7 +83,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - produktionsnahes blockorientiertes On-Disk-Format
 - echter Blockdevice-Zugriff
 - vollständige Copy-on-Write-Implementierung auf Datenträgerebene
-- physisch device-blockadressiertes Write-Ahead-Log direkt im Volume statt des aktuellen DATA-segmentadressierten Pending-WAL
+- persistentes physisch device-blockadressiertes Write-Ahead-Log direkt im Volume statt des aktuellen extent-orientierten Pending-WAL
 - Deduplizierung
 - Self-Healing mit Redundanzquellen
 - Cluster-Synchronisation
@@ -166,7 +166,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 - blockorientiertes On-Disk-Format definieren
 - Metadaten-Layout festlegen
 - die aktuellen binären Segment-Frames schrittweise in ein noch stärker blockorientiertes und spezialisierteres On-Disk-Format überführen
-- die aktuellen DATA-segmentadressierten WAL-Records in echte Device-Block-Records mit direkter physischer Segmentadressierung weiterentwickeln
+- die aktuellen extent- und device-blockadressierten WAL-Records in stabile physische Volume-Allocation und spaeter echte Device-Segmentadressierung weiterentwickeln
 - Performance-Baseline für zukünftige Persistenzumstellungen fortlaufend protokollieren
 
 ### Phase 2: Systemkern
@@ -194,7 +194,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 ## Wichtige Hinweise
 
 - Das Projekt ist aktuell ein strukturierter, getesteter Kern-, Persistenz- und Volume-Layout-Prototyp und noch kein produktionsreifes Dateisystem.
-- Der Linux-Mountpfad unterstützt inzwischen read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung, transaktionales Journal-Writeback und ein integriertes DATA-segmentadressiertes Pending-WAL im Volume, ist aber noch kein direkt device-blockadressiertes Produktions-WAL.
+- Der Linux-Mountpfad unterstützt inzwischen read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung, transaktionales Journal-Writeback und ein integriertes extent- und device-blockadressiertes Pending-WAL im Volume, ist aber noch kein persistentes produktionsnahes Device-WAL mit eigener Allokationsschicht.
 - Performance-Messungen werden jetzt über `benchmark` und `benchmark-log` reproduzierbar ausführbar.
 - Die vorhandene Testsuite ist stark für die aktuelle In-Memory-Implementierung, aber keine Garantie für `100%` messbare Coverage, da in der Umgebung keine Coverage-Tools installiert sind.
 - `.codex` ist inzwischen als projektinterne Vorgabedatei befüllt.

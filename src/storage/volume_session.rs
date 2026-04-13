@@ -155,9 +155,10 @@ mod tests {
                     path: "/data/file.txt".to_string(),
                     inode: crate::domain::inode::InodeId(2),
                 },
-                WalOperation::PatchData {
+                WalOperation::PatchExtent {
                     inode: crate::domain::inode::InodeId(2),
-                    data_offset: 0,
+                    device_block: 0,
+                    block_offset: 0,
                     inode_offset: 0,
                     bytes: b"hello".to_vec(),
                     final_len: 5,
