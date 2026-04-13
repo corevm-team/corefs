@@ -12,7 +12,6 @@
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::storage::block_device::BlockDevice;
 use crate::storage::volume_wal::VolumeWal;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -331,19 +330,6 @@ impl DeviceVolume {
 // DeviceJournal — WAL in reserved sectors
 // ---------------------------------------------------------------------------
 
-/// Header of the device journal region (64 bytes, sector-aligned).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct JournalHeader {
-    /// Number of committed entries in the journal.
-    entry_count: u32,
-    /// Generation counter — incremented on each commit.
-    generation: u64,
-    /// Checksum of the journal payload bytes.
-    entries_checksum: u64,
-    /// Length of the serialized payload in bytes (before sector padding).
-    payload_length: u64,
-}
-
 const JOURNAL_HEADER_SIZE: usize = 64;
 
 /// A write-ahead log stored in a reserved region on the [`BlockDevice`].
@@ -368,12 +354,6 @@ pub struct DeviceJournal {
     size: usize,
     generation: u64,
     entries: Option<VolumeWal>,
-}
-
-/// Serialized journal entry for the device journal.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct JournalPayload {
-    wal: VolumeWal,
 }
 
 impl DeviceJournal {
