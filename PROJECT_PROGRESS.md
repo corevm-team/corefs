@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `108/108` Tests erfolgreich  
+**Test-Status:** `112/112` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -19,7 +19,7 @@
 - klare Schichtung in `app`, `domain`, `storage`, `services`, `platform`
 - zentrale Fassade über `CoreFsService`
 - CLI-Kommandos für Grundfunktionen
-- CLI-Kommandos für Persistenz (`save` und `load`)
+- CLI-Kommandos für Image-Persistenz und Wartung
 - CLI-Kommandos für Benchmarking und Performance-Logging
 
 ### Domänenmodell
@@ -44,6 +44,7 @@
 - freie Extent-Wiederverwendung mit Gap-Reuse, Freigabe überschüssiger Blöcke bei Shrinks und Tail-Trim im Storage-Layer
 - persistentes `FREE`-Segment mit Free-List-Metadaten und persistenter Allocator-Policy
 - aktive Defragmentierung/Compaction fuer belegte Extents inklusive Service- und CLI-Pfad
+- Fragmentierungsmetriken, persistente Auto-Compaction-Policy und explizite Optimierungspfade fuer Live-Instanzen und Volume-Images
 - integriertes Pending-WAL im Volume-Image fuer RW-Sessions
 - extent- und device-blockadressierte WAL-Records ueber `inode + device_block + block_offset + inode_offset` fuer partielle File-Patches und Truncates
 - automatische Versionierung im Basismodell

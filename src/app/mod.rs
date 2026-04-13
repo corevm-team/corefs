@@ -16,7 +16,8 @@ use crate::services::sync::SyncService;
 use crate::services::versioning::VersioningService;
 use crate::storage::allocator::InodeAllocator;
 use crate::storage::block_store::{
-    AllocatorPolicy, BlockStore, DefragmentationReport, FreeExtentRecord,
+    AllocatorPolicy, BlockStore, DefragmentationReport, FragmentationReport, FreeExtentRecord,
+    OptimizationReport,
 };
 use crate::storage::catalog::Catalog;
 use crate::storage::volume_image;
@@ -163,6 +164,7 @@ impl CoreFsService {
         self.catalog.insert(inode);
         self.journal
             .record("create_file", path, format!("bytes={}", bytes.len()));
+        self.auto_optimize_storage("create_file");
         Ok(())
     }
 
@@ -214,6 +216,7 @@ impl CoreFsService {
         self.catalog.insert(inode);
         self.journal
             .record("create_symlink", path, format!("target={target}"));
+        self.auto_optimize_storage("create_symlink");
         Ok(())
     }
 
@@ -236,6 +239,7 @@ impl CoreFsService {
             .prune(path, self.config.versioning.keep_latest);
         self.journal
             .record("write_file", path, format!("bytes={}", bytes.len()));
+        self.auto_optimize_storage("write_file");
         Ok(())
     }
 
@@ -267,6 +271,7 @@ impl CoreFsService {
             self.security.secure_delete_bytes(&mut record.bytes);
             self.allocator.release(inode.id);
             self.journal.record("secure_delete", path, "blocks_zeroed");
+            self.auto_optimize_storage("secure_delete");
         } else {
             self.recovery.remember(inode.clone());
             self.catalog.move_to_deleted(inode.clone());
@@ -368,6 +373,41 @@ impl CoreFsService {
             ),
         );
         report
+    }
+
+    pub fn fragmentation_report(&self) -> FragmentationReport {
+        self.blocks.fragmentation_report()
+    }
+
+    pub fn optimize_storage(&mut self) -> OptimizationReport {
+        let report = self.blocks.optimize();
+        if let Some(defragmentation) = &report.defragmentation {
+            self.journal.record(
+                "optimize_storage",
+                "/",
+                format!(
+                    "fragmentation={} moved_entries={} reclaimed_gaps={} final_device_blocks={}",
+                    report.before.fragmentation_percent,
+                    defragmentation.moved_entries,
+                    defragmentation.reclaimed_gaps,
+                    defragmentation.final_device_blocks
+                ),
+            );
+        } else {
+            self.journal.record(
+                "optimize_storage",
+                "/",
+                format!(
+                    "fragmentation={} action=skipped",
+                    report.before.fragmentation_percent
+                ),
+            );
+        }
+        report
+    }
+
+    pub fn set_allocator_policy(&mut self, policy: AllocatorPolicy) {
+        self.blocks.set_allocator_policy(policy);
     }
 
     pub fn begin_write_transaction(&mut self, label: &str) -> u64 {
@@ -680,6 +720,27 @@ impl CoreFsService {
 
         if self.next_snapshot_id < replay.snapshot_count as u64 {
             self.next_snapshot_id = replay.snapshot_count as u64;
+        }
+    }
+
+    fn auto_optimize_storage(&mut self, reason: &str) {
+        let before = self.blocks.fragmentation_report();
+        if !before.needs_compaction {
+            return;
+        }
+        let report = self.blocks.optimize();
+        if let Some(defragmentation) = report.defragmentation {
+            self.journal.record(
+                "auto_optimize_storage",
+                "/",
+                format!(
+                    "reason={reason} fragmentation={} moved_entries={} reclaimed_gaps={} final_device_blocks={}",
+                    report.before.fragmentation_percent,
+                    defragmentation.moved_entries,
+                    defragmentation.reclaimed_gaps,
+                    defragmentation.final_device_blocks
+                ),
+            );
         }
     }
 }
@@ -1134,5 +1195,59 @@ mod tests {
         assert!(report.moved_entries >= 1);
         assert!(after < before);
         assert!(fs.journal_entries() >= 1);
+    }
+
+    #[test]
+    fn optimize_storage_reports_fragmentation_and_compacts_when_needed() {
+        let mut fs = CoreFsService::format(CoreFsConfig {
+            block_size: 4,
+            ..CoreFsConfig::default()
+        });
+        fs.set_allocator_policy(AllocatorPolicy {
+            background_compaction_enabled: false,
+            fragmentation_threshold_percent: 25,
+            coalesce_on_release: false,
+            ..AllocatorPolicy::default()
+        });
+        fs.create_file("/a", b"aaaa", &[]).expect("file");
+        fs.create_file("/b", b"bbbb", &[]).expect("file");
+        fs.create_file("/c", b"cccc", &[]).expect("file");
+        fs.create_file("/d", b"dddd", &[]).expect("file");
+        fs.create_file("/e", b"eeee", &[]).expect("file");
+        fs.delete_file("/b", true).expect("delete");
+        fs.delete_file("/d", true).expect("delete");
+
+        let report = fs.optimize_storage();
+
+        assert!(report.defragmentation.is_some());
+        assert!(report.before.fragmentation_percent >= 25);
+        assert_eq!(report.after.fragmentation_percent, 0);
+    }
+
+    #[test]
+    fn auto_optimize_runs_when_policy_requests_background_compaction() {
+        let mut fs = CoreFsService::format(CoreFsConfig {
+            block_size: 4,
+            ..CoreFsConfig::default()
+        });
+        fs.set_allocator_policy(AllocatorPolicy {
+            background_compaction_enabled: true,
+            fragmentation_threshold_percent: 25,
+            coalesce_on_release: false,
+            ..AllocatorPolicy::default()
+        });
+        fs.create_file("/a", b"aaaa", &[]).expect("file");
+        fs.create_file("/b", b"bbbb", &[]).expect("file");
+        fs.create_file("/c", b"cccc", &[]).expect("file");
+        fs.delete_file("/b", true).expect("delete");
+        fs.write_file("/c", b"ccccdddd").expect("write");
+
+        let report = fs.fragmentation_report();
+
+        assert_eq!(report.fragmentation_percent, 0);
+        assert!(
+            fs.journal_entries() >= 1,
+            "auto optimization should leave a journal trail"
+        );
     }
 }

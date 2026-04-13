@@ -1904,6 +1904,8 @@ mod tests {
             split_threshold_blocks: 2,
             coalesce_on_release: true,
             tail_trim_enabled: true,
+            background_compaction_enabled: true,
+            fragmentation_threshold_percent: 40,
         };
         state.free_extents = vec![FreeExtentRecord {
             device_block: 0,

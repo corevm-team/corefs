@@ -30,12 +30,19 @@ where
         }
         "status" => {
             let report = fs.admin_report();
+            let fragmentation = fs.fragmentation_report();
             println!("volume: {}", report.volume.name);
             println!("block_size: {}", report.volume.block_size);
             println!("features: {}", report.volume.feature_flags.join(", "));
             println!("files: {}", report.stats.files);
             println!("snapshots: {}", report.stats.snapshots);
             println!("journal_entries: {}", report.stats.journal_entries);
+            println!(
+                "fragmentation: {}% free_extents={} total_free_blocks={}",
+                fragmentation.fragmentation_percent,
+                fragmentation.free_extents,
+                fragmentation.total_free_blocks
+            );
         }
         "ls" => {
             for path in fs.list_paths() {
@@ -64,6 +71,21 @@ where
                 "defrag moved_entries={} reclaimed_gaps={} final_device_blocks={}",
                 report.moved_entries, report.reclaimed_gaps, report.final_device_blocks
             );
+        }
+        "optimize" => {
+            let report = fs.optimize_storage();
+            println!(
+                "optimize before={} after={} compacted={}",
+                report.before.fragmentation_percent,
+                report.after.fragmentation_percent,
+                report.defragmentation.is_some()
+            );
+            if let Some(defrag) = report.defragmentation {
+                println!(
+                    "moved_entries={} reclaimed_gaps={} final_device_blocks={}",
+                    defrag.moved_entries, defrag.reclaimed_gaps, defrag.final_device_blocks
+                );
+            }
         }
         "delete" => {
             let path = args.get(2).ok_or_else(|| {
@@ -187,6 +209,27 @@ where
                 "moved_entries={} reclaimed_gaps={} final_device_blocks={}",
                 report.moved_entries, report.reclaimed_gaps, report.final_device_blocks
             );
+        }
+        "optimize-image" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing path for optimize-image".to_string())
+            })?;
+            let mut loaded = CoreFsService::load_image_from_path(path)?;
+            let report = loaded.optimize_storage();
+            loaded.save_image_to_path(path)?;
+            println!("optimize-image ok: {path}");
+            println!(
+                "before={} after={} compacted={}",
+                report.before.fragmentation_percent,
+                report.after.fragmentation_percent,
+                report.defragmentation.is_some()
+            );
+            if let Some(defrag) = report.defragmentation {
+                println!(
+                    "moved_entries={} reclaimed_gaps={} final_device_blocks={}",
+                    defrag.moved_entries, defrag.reclaimed_gaps, defrag.final_device_blocks
+                );
+            }
         }
         "mount-image" => {
             let image_path = args.get(2).ok_or_else(|| {
@@ -315,6 +358,7 @@ fn print_usage() {
     println!("  snapshot [name]");
     println!("  scrub");
     println!("  defrag");
+    println!("  optimize");
     println!("  delete <path> [--secure]");
     println!("  restore <path>");
     println!("  write <path> <payload>");
@@ -324,6 +368,7 @@ fn print_usage() {
     println!("  load-image <path>");
     println!("  fsck-image <path> [--repair]");
     println!("  defrag-image <path>");
+    println!("  optimize-image <path>");
     println!("  mount-image <image-path> <mount-point>");
     println!("  mount-image-rw <image-path> <mount-point>");
     println!("  diagnose-mount <image-path> <mount-point> [--create]");
@@ -455,6 +500,7 @@ mod tests {
             ],
             vec!["corefs".to_string(), "scrub".to_string()],
             vec!["corefs".to_string(), "defrag".to_string()],
+            vec!["corefs".to_string(), "optimize".to_string()],
             vec![
                 "corefs".to_string(),
                 "write".to_string(),
@@ -491,6 +537,11 @@ mod tests {
             vec![
                 "corefs".to_string(),
                 "defrag-image".to_string(),
+                fsck_image_path.clone(),
+            ],
+            vec![
+                "corefs".to_string(),
+                "optimize-image".to_string(),
                 fsck_image_path.clone(),
             ],
             vec![

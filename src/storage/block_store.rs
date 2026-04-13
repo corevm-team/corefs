@@ -29,6 +29,8 @@ pub struct AllocatorPolicy {
     pub split_threshold_blocks: u64,
     pub coalesce_on_release: bool,
     pub tail_trim_enabled: bool,
+    pub background_compaction_enabled: bool,
+    pub fragmentation_threshold_percent: u8,
 }
 
 impl Default for AllocatorPolicy {
@@ -38,6 +40,8 @@ impl Default for AllocatorPolicy {
             split_threshold_blocks: 1,
             coalesce_on_release: true,
             tail_trim_enabled: true,
+            background_compaction_enabled: false,
+            fragmentation_threshold_percent: 25,
         }
     }
 }
@@ -72,6 +76,23 @@ pub struct DefragmentationReport {
     pub moved_entries: usize,
     pub reclaimed_gaps: usize,
     pub final_device_blocks: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FragmentationReport {
+    pub free_extents: usize,
+    pub total_free_blocks: u64,
+    pub largest_free_extent: u64,
+    pub fragmented_free_blocks: u64,
+    pub fragmentation_percent: u8,
+    pub needs_compaction: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptimizationReport {
+    pub before: FragmentationReport,
+    pub after: FragmentationReport,
+    pub defragmentation: Option<DefragmentationReport>,
 }
 
 #[derive(Debug)]
@@ -218,6 +239,18 @@ impl BlockStore {
         self.free_extents.clone()
     }
 
+    pub fn set_allocator_policy(&mut self, policy: AllocatorPolicy) {
+        self.policy = policy;
+        if self.policy.coalesce_on_release {
+            self.normalize_free_extents();
+        } else {
+            self.free_extents.sort_by_key(|extent| extent.device_block);
+            if self.policy.tail_trim_enabled {
+                self.trim_free_tail();
+            }
+        }
+    }
+
     fn ingest_records(&mut self, records: Vec<BlockRecord>) {
         for record in records {
             let next = record
@@ -256,6 +289,38 @@ impl BlockStore {
         }
     }
 
+    pub fn fragmentation_report(&self) -> FragmentationReport {
+        let total_free_blocks = self
+            .free_extents
+            .iter()
+            .map(|extent| extent.allocated_blocks)
+            .sum::<u64>();
+        let largest_free_extent = self
+            .free_extents
+            .iter()
+            .map(|extent| extent.allocated_blocks)
+            .max()
+            .unwrap_or(0);
+        let fragmented_free_blocks = total_free_blocks.saturating_sub(largest_free_extent);
+        let fragmentation_percent = if total_free_blocks == 0 {
+            0
+        } else {
+            ((fragmented_free_blocks.saturating_mul(100)) / total_free_blocks).min(100) as u8
+        };
+        let threshold = self.policy.fragmentation_threshold_percent.min(100);
+
+        FragmentationReport {
+            free_extents: self.free_extents.len(),
+            total_free_blocks,
+            largest_free_extent,
+            fragmented_free_blocks,
+            fragmentation_percent,
+            needs_compaction: self.policy.background_compaction_enabled
+                && fragmentation_percent >= threshold
+                && self.free_extents.len() > 1,
+        }
+    }
+
     pub fn defragment(&mut self) -> DefragmentationReport {
         let mut entries: Vec<_> = self
             .blocks
@@ -287,6 +352,24 @@ impl BlockStore {
             moved_entries,
             reclaimed_gaps: original_free,
             final_device_blocks: cursor,
+        }
+    }
+
+    pub fn optimize(&mut self) -> OptimizationReport {
+        let before = self.fragmentation_report();
+        let threshold = self.policy.fragmentation_threshold_percent.min(100);
+        let should_compact = before.fragmentation_percent >= threshold && before.free_extents > 1;
+        let defragmentation = if should_compact {
+            Some(self.defragment())
+        } else {
+            None
+        };
+        let after = self.fragmentation_report();
+
+        OptimizationReport {
+            before,
+            after,
+            defragmentation,
         }
     }
 
@@ -639,6 +722,8 @@ mod tests {
             split_threshold_blocks: 2,
             coalesce_on_release: true,
             tail_trim_enabled: true,
+            background_compaction_enabled: true,
+            fragmentation_threshold_percent: 40,
         };
         let records = vec![BlockRecord {
             inode: InodeId(1),
@@ -698,6 +783,95 @@ mod tests {
         assert_eq!(report.reclaimed_gaps, 1);
         assert_eq!(report.final_device_blocks, 2);
         assert!(store.free_extents().is_empty());
+        assert_eq!(store.read(InodeId(2)).expect("record").device_block, 1);
+    }
+
+    #[test]
+    fn fragmentation_report_detects_split_free_space() {
+        let records = vec![
+            BlockRecord {
+                inode: InodeId(1),
+                bytes: b"aa".to_vec(),
+                checksum: checksum(b"aa"),
+                device_block: 0,
+                allocated_blocks: 1,
+            },
+            BlockRecord {
+                inode: InodeId(2),
+                bytes: b"bb".to_vec(),
+                checksum: checksum(b"bb"),
+                device_block: 3,
+                allocated_blocks: 1,
+            },
+        ];
+        let free_extents = vec![
+            FreeExtentRecord {
+                device_block: 1,
+                allocated_blocks: 1,
+            },
+            FreeExtentRecord {
+                device_block: 2,
+                allocated_blocks: 1,
+            },
+        ];
+        let policy = AllocatorPolicy {
+            background_compaction_enabled: true,
+            fragmentation_threshold_percent: 25,
+            coalesce_on_release: false,
+            ..AllocatorPolicy::default()
+        };
+        let store = BlockStore::from_records_with_allocator(records, 4, policy, free_extents);
+
+        let report = store.fragmentation_report();
+
+        assert_eq!(report.free_extents, 2);
+        assert_eq!(report.total_free_blocks, 2);
+        assert_eq!(report.largest_free_extent, 1);
+        assert_eq!(report.fragmentation_percent, 50);
+        assert!(report.needs_compaction);
+    }
+
+    #[test]
+    fn optimize_compacts_when_policy_requires_it() {
+        let records = vec![
+            BlockRecord {
+                inode: InodeId(1),
+                bytes: b"aa".to_vec(),
+                checksum: checksum(b"aa"),
+                device_block: 0,
+                allocated_blocks: 1,
+            },
+            BlockRecord {
+                inode: InodeId(2),
+                bytes: b"bb".to_vec(),
+                checksum: checksum(b"bb"),
+                device_block: 3,
+                allocated_blocks: 1,
+            },
+        ];
+        let free_extents = vec![
+            FreeExtentRecord {
+                device_block: 1,
+                allocated_blocks: 1,
+            },
+            FreeExtentRecord {
+                device_block: 2,
+                allocated_blocks: 1,
+            },
+        ];
+        let policy = AllocatorPolicy {
+            background_compaction_enabled: true,
+            fragmentation_threshold_percent: 25,
+            coalesce_on_release: false,
+            ..AllocatorPolicy::default()
+        };
+        let mut store = BlockStore::from_records_with_allocator(records, 4, policy, free_extents);
+
+        let report = store.optimize();
+
+        assert!(report.defragmentation.is_some());
+        assert_eq!(report.before.fragmentation_percent, 50);
+        assert_eq!(report.after.fragmentation_percent, 0);
         assert_eq!(store.read(InodeId(2)).expect("record").device_block, 1);
     }
 }
