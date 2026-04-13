@@ -251,6 +251,31 @@ impl CoreFsService {
         Ok(())
     }
 
+    /// Appends `extra` bytes to the file at `path` without replacing existing content.
+    ///
+    /// Uses `BlockStore::append_to_inode` for O(extra.len()) amortised growth when the
+    /// blob is exclusively owned.  Callers must ensure sequential append semantics; for
+    /// random writes use `write_file` instead.
+    pub fn extend_file(&mut self, path: &str, extra: &[u8]) -> CoreFsResult<()> {
+        let inode = self
+            .catalog
+            .get_mut(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+
+        if inode.kind != InodeKind::File {
+            return Err(CoreFsError::InvalidInput(format!(
+                "extend is only supported for files: {path}"
+            )));
+        }
+
+        inode.modified_at = SystemTime::now();
+        inode.size = self.blocks.append_to_inode(inode.id, extra);
+        self.hot_paths.record_write(path, extra.len());
+        self.journal
+            .record("extend_file", path, format!("extra_bytes={}", extra.len()));
+        Ok(())
+    }
+
     pub fn read_file(&self, path: &str) -> CoreFsResult<Vec<u8>> {
         let inode = self
             .catalog

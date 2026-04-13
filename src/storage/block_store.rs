@@ -199,6 +199,66 @@ impl BlockStore {
         })
     }
 
+    /// Appends `extra` bytes to the existing data for `inode`.
+    ///
+    /// When the inode's blob is exclusively owned (ref_count == 1) the bytes are
+    /// extended in-place and the checksum is updated incrementally — O(extra.len())
+    /// amortised, no full re-read required. When the blob is shared (ref_count > 1)
+    /// a copy-on-write clone is performed before extending.
+    ///
+    /// If `inode` has no existing data this behaves identically to `write`.
+    pub fn append_to_inode(&mut self, inode: InodeId, extra: &[u8]) -> usize {
+        let entry = self.blocks.get(&inode);
+        let Some(entry) = entry else {
+            return self.write(inode, extra.to_vec());
+        };
+
+        let old_checksum = entry.blob_checksum;
+        let old_device_block = entry.device_block;
+        let old_allocated = entry.allocated_blocks;
+
+        let Some(blob) = self.blobs.get_mut(&old_checksum) else {
+            return self.write(inode, extra.to_vec());
+        };
+
+        if blob.ref_count == 1 {
+            // Exclusively owned: extend in-place.
+            // The hash is a polynomial fold so it is incrementally composable:
+            // checksum(A ++ B) == checksum(B, seed=checksum(A)).
+            let incremental_new = extra
+                .iter()
+                .fold(blob.checksum, |acc, byte| {
+                    acc.wrapping_mul(16777619).wrapping_add(u64::from(*byte))
+                });
+            blob.bytes.extend_from_slice(extra);
+            blob.checksum = incremental_new;
+            let new_size = blob.bytes.len();
+
+            // Re-key the blob HashMap (old checksum → new checksum).
+            let updated_blob = self.blobs.remove(&old_checksum).expect("blob must exist");
+            self.blobs.insert(incremental_new, updated_blob);
+
+            let required = required_blocks(new_size, self.block_size);
+            self.blocks.insert(
+                inode,
+                BlockEntry {
+                    inode,
+                    blob_checksum: incremental_new,
+                    size: new_size,
+                    device_block: old_device_block,
+                    allocated_blocks: required.max(old_allocated),
+                },
+            );
+            new_size
+        } else {
+            // Shared blob: copy-on-write before extending.
+            blob.ref_count -= 1;
+            let mut new_bytes = blob.bytes.clone();
+            new_bytes.extend_from_slice(extra);
+            self.write(inode, new_bytes)
+        }
+    }
+
     pub fn contains(&self, inode: InodeId) -> bool {
         self.blocks.contains_key(&inode)
     }

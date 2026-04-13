@@ -3,8 +3,8 @@ use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::storage::volume_wal::{VolumeWal, WalOperation};
 use fuser::{
-    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
-    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
+    FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate, ReplyData,
+    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
 use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOTDIR, ENOTEMPTY, EROFS};
 use std::collections::{BTreeMap, HashMap};
@@ -361,6 +361,11 @@ impl Filesystem for CoreFsFuseMount {
 
 // ── Read-write FUSE mount ────────────────────────────────────────────────────
 
+/// When a sequential write causes the uncommitted buffer to exceed this size the
+/// buffer is flushed to the service and cleared, keeping peak RAM proportional to
+/// the threshold rather than to the full file size.
+const STREAM_FLUSH_THRESHOLD: usize = 32 * 1024 * 1024; // 32 MiB
+
 #[derive(Debug)]
 struct CoreFsFuseMountRw {
     service: CoreFsService,
@@ -378,7 +383,13 @@ struct CoreFsFuseMountRw {
 struct OpenFileHandle {
     ino: u64,
     path: String,
+    /// Uncommitted write buffer.  For small files this holds all content; for
+    /// streaming files it holds only the bytes since the last intermediate flush.
     data: Vec<u8>,
+    /// Bytes already committed to the service via intermediate streaming flushes.
+    /// Zero for non-streaming handles.  Total logical file size =
+    /// `committed_size + data.len()`.
+    committed_size: usize,
     dirty: bool,
 }
 
@@ -661,10 +672,18 @@ impl CoreFsFuseMountRw {
             )));
         }
 
+        // For streaming files node.data may be empty (cleared after flush to avoid
+        // holding a duplicate of the large blob).  In that case seed from the service.
+        let initial_data = if node.data.is_empty() && node.inode.as_ref().is_some_and(|i| i.size > 0) {
+            self.service.read_file(&node.path).unwrap_or_default()
+        } else {
+            node.data.clone()
+        };
         let mut handle = OpenFileHandle {
             ino,
             path: node.path.clone(),
-            data: node.data.clone(),
+            data: initial_data,
+            committed_size: 0,
             dirty: false,
         };
         if flags & libc::O_TRUNC != 0 {
@@ -687,24 +706,55 @@ impl CoreFsFuseMountRw {
     }
 
     fn read_from_handle(&self, ino: u64, fh: u64, offset: i64, size: u32) -> CoreFsResult<Vec<u8>> {
-        let data = if let Some(handle) = self.open_files.get(&fh) {
-            if handle.ino != ino {
-                return Err(CoreFsError::State(format!(
-                    "file handle {fh} does not match inode {ino}"
-                )));
-            }
-            &handle.data
-        } else {
-            &self
+        let Some(handle) = self.open_files.get(&fh) else {
+            // No open handle: fall back to node cache (populated at open/flush time).
+            let data = &self
                 .nodes_by_ino
                 .get(&ino)
                 .ok_or_else(|| CoreFsError::NotFound(format!("inode not found: {ino}")))?
-                .data
+                .data;
+            let start = offset.max(0) as usize;
+            let end = start.saturating_add(size as usize).min(data.len());
+            return Ok(data.get(start..end).unwrap_or(&[]).to_vec());
         };
 
+        if handle.ino != ino {
+            return Err(CoreFsError::State(format!(
+                "file handle {fh} does not match inode {ino}"
+            )));
+        }
+
         let start = offset.max(0) as usize;
-        let end = start.saturating_add(size as usize).min(data.len());
-        Ok(data.get(start..end).unwrap_or(&[]).to_vec())
+        let total_size = handle.committed_size + handle.data.len();
+        let end = start.saturating_add(size as usize).min(total_size);
+
+        if start >= end {
+            return Ok(vec![]);
+        }
+
+        if handle.committed_size == 0 || start >= handle.committed_size {
+            // Entirely within the uncommitted buffer.
+            let buf_start = start.saturating_sub(handle.committed_size);
+            let buf_end = (end - handle.committed_size).min(handle.data.len());
+            return Ok(handle.data.get(buf_start..buf_end).unwrap_or(&[]).to_vec());
+        }
+
+        if end <= handle.committed_size {
+            // Entirely within the committed portion — read from the service.
+            let service_bytes = self.service.read_file(&handle.path)?;
+            let s = start.min(service_bytes.len());
+            let e = end.min(service_bytes.len());
+            return Ok(service_bytes[s..e].to_vec());
+        }
+
+        // Spans the committed prefix and the uncommitted buffer — combine both.
+        let service_bytes = self.service.read_file(&handle.path)?;
+        let mut result = Vec::with_capacity(end - start);
+        let committed_slice = &service_bytes[start..handle.committed_size.min(service_bytes.len())];
+        result.extend_from_slice(committed_slice);
+        let buf_end = (end - handle.committed_size).min(handle.data.len());
+        result.extend_from_slice(&handle.data[..buf_end]);
+        Ok(result)
     }
 
     fn write_to_handle(
@@ -724,22 +774,57 @@ impl CoreFsFuseMountRw {
             )));
         }
 
-        let new_len = {
-            let start = offset.max(0) as usize;
-            let end = start.saturating_add(data.len());
-            if handle.data.len() < end {
-                handle.data.resize(end, 0);
+        // How many bytes does this write cover in the logical file?
+        let write_start = offset.max(0) as usize;
+        let write_end = write_start.saturating_add(data.len());
+
+        // Determine whether this write extends the file sequentially.
+        // Sequential: the write begins exactly at the current end of logical content.
+        let logical_end_before = handle.committed_size + handle.data.len();
+        let is_sequential_append = write_start == logical_end_before;
+
+        if is_sequential_append && handle.committed_size + handle.data.len() + data.len()
+            > STREAM_FLUSH_THRESHOLD
+            && write_start >= handle.committed_size
+        {
+            // Streaming mode: flush the current buffer to the service before buffering
+            // more, so that handle.data stays bounded to ≤ STREAM_FLUSH_THRESHOLD.
+            let buf_to_flush = std::mem::take(&mut handle.data);
+            if !buf_to_flush.is_empty() {
+                if handle.committed_size == 0 {
+                    // First flush: create the initial committed content.
+                    if self.service.write_file(&handle.path, &buf_to_flush).is_err() {
+                        handle.data = buf_to_flush;
+                        return Err(CoreFsError::State("streaming flush failed".into()));
+                    }
+                } else {
+                    // Subsequent flushes: append to what is already in the service.
+                    if self.service.extend_file(&handle.path, &buf_to_flush).is_err() {
+                        handle.data = buf_to_flush;
+                        return Err(CoreFsError::State("streaming extend failed".into()));
+                    }
+                }
+                handle.committed_size += buf_to_flush.len();
             }
-            handle.data[start..end].copy_from_slice(data);
-            handle.dirty = true;
-            handle.data.len()
-        };
-        // Update only the cached inode metadata; the open handle is the authoritative data
-        // source for reads while the file is open (see read_from_handle), so we must NOT
-        // clone the full buffer here — doing so is O(n²) in file size.
+            // Now buffer the newly arrived chunk.
+            handle.data.extend_from_slice(data);
+        } else {
+            // Small file or non-sequential write: keep everything in the buffer.
+            if handle.data.len() < write_end.saturating_sub(handle.committed_size) {
+                handle.data.resize(write_end.saturating_sub(handle.committed_size), 0);
+            }
+            let buf_start = write_start.saturating_sub(handle.committed_size);
+            let buf_end = write_end.saturating_sub(handle.committed_size);
+            handle.data[buf_start..buf_end].copy_from_slice(data);
+        }
+        handle.dirty = true;
+
+        let new_total = handle.committed_size + handle.data.len();
+        // Update only the cached inode metadata; reads on an open handle go through
+        // read_from_handle (which checks handle.data / service), not node.data.
         if let Some(node) = self.nodes_by_ino.get_mut(&ino) {
             if let Some(ref mut inode) = node.inode {
-                inode.size = new_len;
+                inode.size = new_total;
                 inode.modified_at = SystemTime::now();
             }
         }
@@ -761,20 +846,47 @@ impl CoreFsFuseMountRw {
             .and_then(|node| node.inode.as_ref().map(|inode| inode.id))
             .ok_or_else(|| CoreFsError::State(format!("missing inode metadata for handle {fh}")))?;
         self.ensure_mutation_session("write-cache-flush")?;
-        self.service.write_file(&handle.path, &handle.data)?;
-        if handle.data.is_empty() {
+
+        if handle.committed_size == 0 {
+            // Non-streaming path: write the full buffer to the service in one call.
+            self.service.write_file(&handle.path, &handle.data)?;
+        } else if handle.data.is_empty() {
+            // Streaming: all bytes already committed, nothing left to flush.
+        } else {
+            // Streaming: flush the remaining uncommitted tail.
+            self.service.extend_file(&handle.path, &handle.data)?;
+        }
+
+        // Record WAL for the entire logical file (needed for crash recovery).
+        let total_size = handle.committed_size + handle.data.len();
+        if total_size == 0 {
             self.record_wal_operation(WalOperation::TruncateInode {
                 inode: inode_id,
                 size: 0,
             })?;
         } else {
-            self.record_extent_patch(inode_id, 0, &handle.data, handle.data.len())?;
+            // For streaming files read the full content back from the service (one-time,
+            // at close) to record the WAL covering the entire extent.
+            let full_data = if handle.committed_size > 0 {
+                self.service.read_file(&handle.path)?
+            } else {
+                handle.data.clone()
+            };
+            self.record_extent_patch(inode_id, 0, &full_data, full_data.len())?;
         }
         self.service.save_image_to_path(&self.image_path)?;
-        // Sync node.data once from the flushed handle so that subsequent opens seed the
-        // correct data (we no longer mirror every write into node.data to avoid O(n²) copies).
+
+        // Sync node.data once from the service so subsequent opens seed correct content.
+        // For large streaming files node.data is not kept in RAM — the service blob
+        // is the authoritative copy; node.data is cleared to avoid a second copy.
         if let Some(node) = self.nodes_by_ino.get_mut(&handle.ino) {
-            node.data = handle.data.clone();
+            if handle.committed_size == 0 {
+                node.data = handle.data.clone();
+            } else {
+                // Streaming: don't duplicate the large blob in node.data.
+                // Subsequent opens will re-populate from the service via open_file_handle.
+                node.data = Vec::new();
+            }
         }
         if let Some(open) = self.open_files.get_mut(&fh) {
             open.dirty = false;
@@ -806,6 +918,16 @@ impl CoreFsFuseMountRw {
 }
 
 impl Filesystem for CoreFsFuseMountRw {
+    fn init(&mut self, _req: &Request<'_>, config: &mut KernelConfig) -> Result<(), libc::c_int> {
+        // FUSE_WRITEBACK_CACHE (bit 16): the kernel buffers writes in the page cache and
+        // delivers larger, batched write calls to the daemon instead of one call per
+        // application write syscall.  This improves sequential write throughput and
+        // decouples the application from our per-flush latency.
+        const FUSE_WRITEBACK_CACHE: u32 = 1 << 16;
+        let _ = config.add_capabilities(FUSE_WRITEBACK_CACHE);
+        Ok(())
+    }
+
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         match self.lookup_child(parent, name) {
             Some(node) => reply.entry(&TTL, &node.attr(), 0),
