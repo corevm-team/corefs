@@ -1507,12 +1507,13 @@ impl Filesystem for CoreFsFuseMountRw {
         let path = node.path.clone();
         let is_file = matches!(node.kind(), InodeKind::File);
 
-        // Handle chown (uid/gid).
+        // Metadata-only changes (chown/chmod): apply to service and
+        // in-memory node cache, mark dirty.  Do NOT persist on every call —
+        // the kernel will trigger persist via fsync/flush/umount when
+        // durability is required.  This matches ext4/xfs semantics and
+        // avoids a full image rewrite per chown (critical on slow devices
+        // like USB sticks).
         if uid.is_some() || gid.is_some() {
-            if self.ensure_mutation_session("chown").is_err() {
-                reply.error(EIO);
-                return;
-            }
             if self.service.set_owner(&path, uid, gid).is_err() {
                 reply.error(EIO);
                 return;
@@ -1529,18 +1530,9 @@ impl Filesystem for CoreFsFuseMountRw {
                 }
             }
             self.dirty = true;
-            if self.persist().is_err() {
-                reply.error(EIO);
-                return;
-            }
         }
 
-        // Handle chmod (mode).
         if let Some(new_mode) = mode {
-            if self.ensure_mutation_session("chmod").is_err() {
-                reply.error(EIO);
-                return;
-            }
             if self.service.set_mode(&path, new_mode).is_err() {
                 reply.error(EIO);
                 return;
@@ -1552,10 +1544,6 @@ impl Filesystem for CoreFsFuseMountRw {
                 }
             }
             self.dirty = true;
-            if self.persist().is_err() {
-                reply.error(EIO);
-                return;
-            }
         }
 
         if !is_file {
