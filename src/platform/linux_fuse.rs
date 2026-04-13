@@ -1522,11 +1522,19 @@ mod tests {
     }
 
     fn rw_mount_from_demo() -> CoreFsFuseMountRw {
+        let path = std::env::temp_dir().join(format!(
+            "corefs-rw-demo-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
         let mut fs = CoreFsService::format(CoreFsConfig::default());
         fs.create_directory("/docs").expect("dir");
         fs.create_file("/docs/readme.txt", b"hello", &[])
             .expect("file");
-        CoreFsFuseMountRw::from_service(fs, PathBuf::from("/tmp/test.img"))
+        CoreFsFuseMountRw::from_service(fs, path)
     }
 
     #[test]

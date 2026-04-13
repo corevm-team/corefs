@@ -134,30 +134,38 @@ impl BlockStore {
         let checksum = checksum(&bytes);
         let size = bytes.len();
         let required_blocks = required_blocks(size, self.block_size);
-        let existing_allocation = self
+        let existing = self
             .blocks
             .get(&inode)
-            .map(|entry| (entry.device_block, entry.allocated_blocks));
-        self.release_inode(inode);
+            .map(|entry| (entry.device_block, entry.allocated_blocks, entry.blob_checksum));
 
-        let (device_block, allocated_blocks) = match existing_allocation {
-            Some((device_block, allocated_blocks)) if allocated_blocks >= required_blocks => {
-                if allocated_blocks > required_blocks {
+        let (device_block, allocated_blocks) = match existing {
+            Some((device_block, existing_blocks, old_checksum))
+                if existing_blocks >= required_blocks =>
+            {
+                // Reuse the existing allocation in-place: release the blob reference without
+                // freeing the extent back to the free list (the block address stays occupied).
+                self.blocks.remove(&inode);
+                if let Some(blob) = self.blobs.get_mut(&old_checksum) {
+                    blob.ref_count = blob.ref_count.saturating_sub(1);
+                    if blob.ref_count == 0 {
+                        self.blobs.remove(&old_checksum);
+                    }
+                }
+                if existing_blocks > required_blocks {
                     self.insert_free_extent(FreeExtent {
                         device_block: device_block.saturating_add(required_blocks),
-                        allocated_blocks: allocated_blocks - required_blocks,
+                        allocated_blocks: existing_blocks - required_blocks,
                     });
                 }
                 (device_block, required_blocks)
             }
-            Some((device_block, allocated_blocks)) => {
-                self.insert_free_extent(FreeExtent {
-                    device_block,
-                    allocated_blocks,
-                });
+            _ => {
+                // Old allocation is too small (or absent): release it (adds to free list) and
+                // allocate a fresh extent of the required size.
+                self.release_inode(inode);
                 self.allocate_extent(required_blocks.max(1))
             }
-            _ => self.allocate_extent(required_blocks.max(1)),
         };
 
         let blob = self.blobs.entry(checksum).or_insert_with(|| BlobRecord {
