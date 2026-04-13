@@ -596,6 +596,11 @@ impl CoreFsFuseMountRw {
         if let Some(wal) = self.pending_wal.as_mut() {
             wal.push(operation);
         }
+        Ok(())
+    }
+
+    fn record_wal_operation_and_save(&mut self, operation: WalOperation) -> CoreFsResult<()> {
+        self.record_wal_operation(operation)?;
         self.service.save_image_to_path(&self.image_path)
     }
 
@@ -760,6 +765,7 @@ impl CoreFsFuseMountRw {
         } else {
             self.record_extent_patch(inode_id, 0, &handle.data, handle.data.len())?;
         }
+        self.service.save_image_to_path(&self.image_path)?;
         if let Some(open) = self.open_files.get_mut(&fh) {
             open.dirty = false;
         }
@@ -862,7 +868,7 @@ impl Filesystem for CoreFsFuseMountRw {
                     return;
                 }
                 if self
-                    .record_wal_operation(WalOperation::TruncateInode {
+                    .record_wal_operation_and_save(WalOperation::TruncateInode {
                         inode: inode_id,
                         size: new_size as usize,
                     })
@@ -980,7 +986,7 @@ impl Filesystem for CoreFsFuseMountRw {
             return;
         };
         if self
-            .record_wal_operation(WalOperation::CreateFile {
+            .record_wal_operation_and_save(WalOperation::CreateFile {
                 path: path.clone(),
                 inode: inode_id,
             })
@@ -1038,7 +1044,7 @@ impl Filesystem for CoreFsFuseMountRw {
             return;
         };
         if self
-            .record_wal_operation(WalOperation::CreateDirectory {
+            .record_wal_operation_and_save(WalOperation::CreateDirectory {
                 path: path.clone(),
                 inode: inode_id,
             })
@@ -1085,7 +1091,7 @@ impl Filesystem for CoreFsFuseMountRw {
             return;
         }
         if self
-            .record_wal_operation(WalOperation::DeletePath { path: path.clone() })
+            .record_wal_operation_and_save(WalOperation::DeletePath { path: path.clone() })
             .is_err()
         {
             reply.error(EIO);
@@ -1130,7 +1136,7 @@ impl Filesystem for CoreFsFuseMountRw {
             return;
         }
         if self
-            .record_wal_operation(WalOperation::DeletePath { path: path.clone() })
+            .record_wal_operation_and_save(WalOperation::DeletePath { path: path.clone() })
             .is_err()
         {
             reply.error(EIO);
@@ -1216,7 +1222,7 @@ impl Filesystem for CoreFsFuseMountRw {
             return;
         }
         if self
-            .record_wal_operation(WalOperation::RenamePath {
+            .record_wal_operation_and_save(WalOperation::RenamePath {
                 from: src_path.clone(),
                 to: dst_path.clone(),
             })
@@ -2014,6 +2020,10 @@ mod tests {
                 final_len: 7,
             })
             .expect("wal");
+        mount
+            .service
+            .save_image_to_path(&path)
+            .expect("explicit save after wal");
 
         let loaded = CoreFsService::load_image_from_path(&path).expect("image should load");
         assert!(!loaded.has_pending_wal(), "load should replay pending WAL");
