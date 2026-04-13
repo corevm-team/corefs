@@ -1,6 +1,8 @@
 use crate::app::CoreFsService;
 use crate::config::CoreFsConfig;
 use crate::error::{CoreFsError, CoreFsResult};
+use crate::storage::block_device::BlockDevice;
+use crate::storage::volume_image;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -97,6 +99,75 @@ fn temporary_image_path(path: &Path) -> PathBuf {
     path.with_file_name(file_name)
 }
 
+// ---------------------------------------------------------------------------
+// DeviceVolumeSession — block-device-backed session
+// ---------------------------------------------------------------------------
+
+/// A volume session backed by a [`BlockDevice`] instead of a file path.
+///
+/// Flush writes the full volume state directly to the device via
+/// sector-aligned I/O, and sync ensures durability.
+#[derive(Debug)]
+pub struct DeviceVolumeSession {
+    device: Box<dyn BlockDevice>,
+    service: CoreFsService,
+}
+
+impl DeviceVolumeSession {
+    /// Formats a new CoreFS volume on the device and writes it immediately.
+    pub fn format_new(
+        mut device: Box<dyn BlockDevice>,
+        config: CoreFsConfig,
+    ) -> CoreFsResult<Self> {
+        let service = CoreFsService::format(config);
+        let state = service.persisted_state();
+        volume_image::save_to_device(device.as_mut(), &state)?;
+        Ok(Self { device, service })
+    }
+
+    /// Opens an existing CoreFS volume from a device.
+    pub fn open(device: Box<dyn BlockDevice>) -> CoreFsResult<Self> {
+        let state = volume_image::load_from_device(device.as_ref())?;
+        let mut service = CoreFsService::from_persisted_state(state);
+        if service.has_pending_wal() {
+            service.recover_pending_wal()?;
+        }
+        Ok(Self { device, service })
+    }
+
+    /// Returns a reference to the underlying service.
+    pub fn service(&self) -> &CoreFsService {
+        &self.service
+    }
+
+    /// Returns a mutable reference to the underlying service.
+    pub fn service_mut(&mut self) -> &mut CoreFsService {
+        &mut self.service
+    }
+
+    /// Returns a reference to the underlying device.
+    pub fn device(&self) -> &dyn BlockDevice {
+        self.device.as_ref()
+    }
+
+    /// Writes the current volume state to the device.
+    pub fn flush(&mut self) -> CoreFsResult<()> {
+        let state = self.service.persisted_state();
+        volume_image::save_to_device(self.device.as_mut(), &state)?;
+        Ok(())
+    }
+
+    /// Executes an operation on the service, then flushes to the device.
+    pub fn mutate<T>(
+        &mut self,
+        operation: impl FnOnce(&mut CoreFsService) -> CoreFsResult<T>,
+    ) -> CoreFsResult<T> {
+        let result = operation(&mut self.service)?;
+        self.flush()?;
+        Ok(result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +250,55 @@ mod tests {
         assert!(!reopened.service().has_pending_wal());
 
         let _ = fs::remove_file(path);
+    }
+
+    // -----------------------------------------------------------------------
+    // DeviceVolumeSession tests
+    // -----------------------------------------------------------------------
+
+    use crate::storage::block_device::MemoryDevice;
+
+    fn memory_device() -> Box<dyn crate::storage::block_device::BlockDevice> {
+        // 2 MiB device with 4 KiB sectors — plenty for test volumes.
+        Box::new(MemoryDevice::new(2 * 1024 * 1024, 4096).unwrap())
+    }
+
+    #[test]
+    fn device_session_format_and_read_back() {
+        let dev = memory_device();
+        let mut session =
+            DeviceVolumeSession::format_new(dev, CoreFsConfig::default()).expect("format");
+        session
+            .mutate(|svc| {
+                svc.create_directory("/data")?;
+                svc.create_file("/data/hello.txt", b"world", &[])?;
+                Ok(())
+            })
+            .expect("mutate");
+
+        // Re-open from the same device
+        let dev2 = {
+            let mem = session.device.as_ref() as *const dyn crate::storage::block_device::BlockDevice;
+            // Clone the underlying MemoryDevice data for re-open.
+            let mem_ref = unsafe { &*mem };
+            let data = mem_ref.read_at(0, mem_ref.capacity()).unwrap();
+            Box::new(MemoryDevice::from_bytes(data, 4096).unwrap())
+                as Box<dyn crate::storage::block_device::BlockDevice>
+        };
+
+        let reopened = DeviceVolumeSession::open(dev2).expect("reopen");
+        assert_eq!(
+            reopened.service().read_file("/data/hello.txt").unwrap(),
+            b"world".to_vec()
+        );
+    }
+
+    #[test]
+    fn device_session_format_creates_valid_volume() {
+        let dev = memory_device();
+        let session =
+            DeviceVolumeSession::format_new(dev, CoreFsConfig::default()).expect("format");
+        assert_eq!(session.service().volume_name(), "corefs");
+        assert!(session.service().list_paths().is_empty()); // empty volume, no files yet
     }
 }

@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `181/181` Tests erfolgreich  
+**Test-Status:** `257/257` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -89,6 +89,13 @@
 - Verschlüsselung ruhender Daten: `EncryptionService` mit ChaCha20-Poly1305 (AEAD), 256-Bit-Schlüssel, zufällige 12-Byte-Nonce pro Verschlüsselung; Pipeline: compress → encrypt → store; read → decrypt → decompress; `inode.metadata.encrypted` Flag pro Datei; Schlüssel-Ableitung für Tests via `derive_key_from()`; FUSE-Read-only-Mount unterstützt transparente Entschlüsselung
 - expliziter Deduplizierungs-Pass: `BlockStore::dedup_pass()` mit 3-Phasen-Scan (ref_count-Audit, Hash-Kollisions-Erkennung, byte-identische Konsolidierung); `CoreFsService::run_dedup()` hinter `config.performance.deduplication_enabled` konfigurierbar
 - erweiterte In-Memory-Konsistenzprüfung: `IntegrityService::deep_fsck()` validiert Katalog↔Block-Konsistenz, Checksum-Integrität, Entschlüsselungs- und Dekomprimierungs-Pipeline, `inode.size`-Abgleich, verwaiste Blöcke; `FsckReport` mit Detailkategorien (orphaned_blocks, missing_blocks, size_mismatches, compression_errors, encryption_errors, checksum_failures)
+- Block-Device I/O Layer: `BlockDevice`-Trait mit sektorausgerichtetem `read_at`/`write_at`/`sync`/`trim`, Alignment-Enforcement, Bounds-Checking und Read-only-Protection; drei Implementierungen: `FileImageDevice` (dateibasiert), `RawBlockDevice` (Linux `/dev/sdX` mit `ioctl(BLKGETSIZE64)`/`BLKDISCARD`, sysfs-Probing), `MemoryDevice` (Test-Referenzimplementierung)
+- Device-Safety: `probe_device()` mit `DeviceInfo`-Struct (Mount-Erkennung, Ganz-Disk-Erkennung, Read-only-Status, NVMe-Partitionserkennung); `is_safe_to_format()` und `format_blockers()` als Sicherheitsabfrage vor destruktiven Operationen
+- Volume-Image-Persistenz auf Block-Devices: `save_to_device()` und `load_from_device()` serialisieren/deserialisieren den vollständigen CoreFS-Zustand sektorausgerichtet auf beliebige `BlockDevice`-Implementierungen; `build_volume_image_bytes()` für In-Memory-Serialisierung
+- `DeviceVolumeSession`: Block-Device-basierte Volume-Session mit `format_new()`, `open()`, `flush()` und `mutate()` analog zur dateibasierten `VolumeSession`
+- TRIM/Discard-Tracking im BlockStore: `FreedExtent`-Akkumulation bei `release_inode()` und Extent-Shrink; `drain_freed_extents()` für Weiterleitung an `BlockDevice::trim()`
+- CLI-Kommandos für Block-Devices: `probe-device` (Sicherheitsanalyse), `mkfs-device` (Formatierung mit Safety-Checks), `mount-device-rw` (FUSE-RW-Mount von `/dev/sdX`)
+- FUSE-Mount von Block-Devices: `mount_device_rw()` lädt Volume vom Device, dient über bestehende FUSE-RW-Infrastruktur, schreibt bei Unmount zurück auf das Device; `format_device()` formatiert ein Device mit leerem CoreFS-Volume
 
 ### Plattform- und Integrationsmodell
 
@@ -113,7 +120,7 @@
 Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten, aber noch nicht als vollständige reale Implementierung vorhanden:
 
 - produktionsnahes blockorientiertes On-Disk-Format
-- echter Blockdevice-Zugriff (`BlockDevice`-Trait, `RawDevice`-Implementierung, `mkfs /dev/sdX1`, On-Demand Sektor-I/O, TRIM/Discard) — siehe Phase 1b
+- On-Demand Sektor-I/O auf Block-Devices (aktuell: vollständiges Laden/Speichern in den RAM; Ziel: sektorweises Lesen/Schreiben ohne vollständiges Laden)
 - persistentes physisch device-blockadressiertes Write-Ahead-Log direkt im Volume statt des aktuellen extent-orientierten Pending-WAL
 - Self-Healing mit Redundanzquellen
 - Cluster-Synchronisation
@@ -138,9 +145,11 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 ### `src/storage`
 
 - Inode-Allokation
-- Blockspeicher im In-Memory-Modell
+- Blockspeicher im In-Memory-Modell mit TRIM/Discard-Tracking (`FreedExtent`)
 - Katalog für aktive und gelöschte Einträge
 - mehrsegmentiges binäres Volume-Image-Format mit Segmenttabelle, Alignment-Regeln, redundanten Superblocks, Generation Countern, binären Segment-Frames und Prüflogik als weiterer Persistenzpfad
+- `BlockDevice`-Abstraktion mit `FileImageDevice`, `RawBlockDevice` (Linux) und `MemoryDevice`
+- `DeviceVolumeSession` für Block-Device-basierte Volume-Sitzungen
 
 ### `src/services`
 
@@ -207,15 +216,14 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 
 Ziel: CoreFS direkt auf einem Blockgerät (`/dev/sdX1`) formatieren und via FUSE mounten — ohne Umweg über eine `.img`-Datei auf einem Fremddateisystem.
 
-- **`BlockDevice`-Trait** definieren: `trait BlockDevice { fn read_sectors(...); fn write_sectors(...); fn capacity(); fn sector_size(); fn sync(); }` mit zwei Implementierungen:
-  - `FileImage` — bestehende `.img`-Persistenz (Refactoring aus `volume_image.rs`)
-  - `RawDevice` — `open("/dev/sdX1", O_RDWR | O_DIRECT)` mit `ioctl(BLKGETSIZE64)` für Kapazität und `ioctl(BLKBSZGET)` für Sektorausrichtung
-- **`mkfs /dev/sdX1`** als CLI-Kommando: Superblocks, Segmenttabelle, Root-Inode und leeres Journal direkt auf das Gerät schreiben; Sicherheitsabfrage vor destruktiver Operation; Partitionserkennung zur Vermeidung von Ganz-Disk-Formatierung
-- **On-Demand Sektor-I/O** im Storage-Layer: nicht das gesamte Volume in den RAM laden, sondern sektorweise lesen/schreiben über den `BlockDevice`-Trait; Read-Cache und Write-Buffer für Performance
-- **Device-Journal**: Write-Ahead-Log in reservierten Sektoren auf dem Gerät selbst statt temp-file+rename; Barrier-Semantik über `fdatasync()` / `ioctl(BLKFLSBUF)` für Crash-Safety
-- **FUSE-Mount auf Blockgerät**: `mount /dev/sdX1 /mnt/usb` statt `mount-image foo.img /mnt`; Kapazitätsmeldung aus echtem Gerät statt Hardcoded-Wert; Write-Back direkt auf Sektoren
-- **TRIM/Discard**: `ioctl(BLKDISCARD)` für freigegebene Extents auf SSD-/Flash-basierten Geräten (optional, hinter Feature-Flag)
-- **Permissions und Safety**: Root-/Capability-Prüfung vor Device-Zugriff; Refuse bei gemounteten Geräten; Warnung bei Ganz-Disk-Devices ohne Partitionstabelle
+- ✅ **`BlockDevice`-Trait**: `read_at`/`write_at`/`sync`/`trim` mit Alignment-Enforcement, Bounds-Checking und Read-only-Protection; drei Implementierungen: `FileImageDevice`, `RawBlockDevice` (Linux), `MemoryDevice` (Test)
+- ✅ **`mkfs-device /dev/sdX1`**: CLI-Kommando mit `probe_device()`-Safety-Checks (Mount-Erkennung, Ganz-Disk-Warnung, Read-only-Prüfung)
+- ✅ **FUSE-Mount auf Blockgerät**: `mount-device-rw /dev/sdX1 /mnt` mit Load-from-Device, FUSE-RW-Session, Write-back-to-Device bei Unmount
+- ✅ **TRIM/Discard-Tracking**: `FreedExtent`-Akkumulation im BlockStore bei `release_inode()` und Extent-Shrink; `drain_freed_extents()` für `BlockDevice::trim()`-Weiterleitung; `RawBlockDevice` implementiert `ioctl(BLKDISCARD)` mit automatischem Fallback bei `EOPNOTSUPP`
+- ✅ **Device-Safety**: `probe_device()` → `DeviceInfo` (sysfs-basiert: Sektorgrössen, R/O-Status, NVMe-Erkennung, `/proc/mounts`-Abgleich); `is_safe_to_format()` / `format_blockers()`
+- ✅ **`DeviceVolumeSession`**: Block-Device-basierte Session mit `format_new()`, `open()`, `flush()`, `mutate()` — analog zur dateibasierten `VolumeSession`
+- ⬜ **On-Demand Sektor-I/O**: sektorweises Lesen/Schreiben ohne vollständiges Laden des Volumes in den RAM; Read-Cache und Write-Buffer
+- ⬜ **Device-Journal**: Write-Ahead-Log in reservierten Sektoren auf dem Gerät statt temp-file+rename; Barrier-Semantik über `fdatasync()` für Crash-Safety
 
 ### Phase 2: Systemkern
 

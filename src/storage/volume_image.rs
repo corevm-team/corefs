@@ -1894,6 +1894,266 @@ fn current_generation() -> u64 {
         .as_nanos() as u64
 }
 
+// ---------------------------------------------------------------------------
+// BlockDevice-based persistence
+// ---------------------------------------------------------------------------
+
+use crate::storage::block_device::BlockDevice;
+
+/// Serializes the full volume state to a [`BlockDevice`].
+///
+/// The image is built in memory (identical binary format as the file-based
+/// path), then written sector-aligned to the device.  The device must be
+/// large enough to hold the entire image.
+pub fn save_to_device(
+    device: &mut dyn BlockDevice,
+    state: &PersistedState,
+) -> CoreFsResult<()> {
+    let label = "<device>";
+    let path = Path::new(label);
+    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size);
+
+    let mut segments = vec![
+        raw_segment_from_bytes(*b"SUPR", vec![0; SUPERBLOCK_SIZE]),
+        raw_segment_from_bytes(*b"SUP2", vec![0; SUPERBLOCK_SIZE]),
+        serialize_segment(*b"CNFG", &ConfigSegment { config: state.config.clone() }, path)?,
+        serialize_segment(*b"VOLM", &VolumeSegment { volume: state.volume.clone() }, path)?,
+        serialize_inode_segment(*b"AINO", &state.active_inodes, path)?,
+        serialize_inode_segment(*b"DINO", &state.deleted_inodes, path)?,
+        serialize_journal_segment(*b"JOUR", &state.journal_entries, path)?,
+        serialize_segment(*b"VERS", &VersionSegment { versions: state.versions.clone() }, path)?,
+        serialize_segment(*b"SYNC", &SyncSegment { sync_statuses: state.sync_statuses.clone() }, path)?,
+        serialize_segment(*b"HOTP", &HotPathSegment { records: state.hot_path_records.clone() }, path)?,
+        serialize_snapshot_segment(*b"SNAP", &SnapshotSegment { snapshots: state.snapshots.clone(), next_snapshot_id: state.next_snapshot_id }, path)?,
+        serialize_segment(*b"TXNJ", &JournalRuntimeSegment { clean_unmount: state.clean_unmount, runtime: state.journal_runtime.clone(), pending_wal: state.pending_wal.clone() }, path)?,
+        serialize_segment(*b"FREE", &FreeSpaceSegment { policy: state.allocator_policy.clone(), extents: state.free_extents.clone() }, path)?,
+        serialize_segment(*b"BLKD", &BlockDescriptorSegment { descriptors }, path)?,
+        serialize_bytes_segment(*b"DATA", &block_data, path)?,
+    ];
+
+    let segment_count = segments.len();
+    let directory_offset = HEADER_SIZE;
+    let directory_length = segment_count * SEGMENT_ENTRY_SIZE;
+    let mut offset = align_up(directory_offset + directory_length, SEGMENT_ALIGNMENT);
+    let mut entries = Vec::with_capacity(segment_count);
+
+    for segment in &segments {
+        entries.push(SegmentEntry {
+            kind: segment.kind,
+            offset: offset as u64,
+            length: segment.payload.len() as u64,
+        });
+        offset = align_up(offset + segment.payload.len(), SEGMENT_ALIGNMENT);
+    }
+
+    let total_size = offset;
+    let sector_size = device.sector_size() as usize;
+    let padded_size = align_up(total_size, sector_size);
+
+    if padded_size as u64 > device.capacity() {
+        return Err(CoreFsError::State(format!(
+            "volume image ({padded_size} bytes) exceeds device capacity ({} bytes)",
+            device.capacity()
+        )));
+    }
+
+    let directory_bytes = directory_bytes(&entries);
+    let superblock = Superblock {
+        format_version: FORMAT_VERSION,
+        alignment: SEGMENT_ALIGNMENT as u32,
+        segment_count: segment_count as u32,
+        clean_unmount: u32::from(state.clean_unmount),
+        generation: current_generation(),
+        directory_offset: directory_offset as u64,
+        directory_length: directory_length as u64,
+        directory_checksum: checksum(&directory_bytes),
+        payload_checksum: checksum_of_payloads(&segments),
+    };
+    let superblock_bytes = encode_superblock(&superblock);
+    segments[0].payload = superblock_bytes.clone();
+    segments[1].payload = superblock_bytes;
+
+    let mut bytes = vec![0u8; padded_size];
+    bytes[..8].copy_from_slice(MAGIC);
+    bytes[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    bytes[12..16].copy_from_slice(&(segment_count as u32).to_le_bytes());
+    bytes[directory_offset..directory_offset + directory_length].copy_from_slice(&directory_bytes);
+
+    for (entry, segment) in entries.iter().zip(segments.iter()) {
+        let start = entry.offset as usize;
+        let end = start + segment.payload.len();
+        bytes[start..end].copy_from_slice(&segment.payload);
+    }
+
+    // Write sector-by-sector to support devices with limited write buffers.
+    let mut write_offset = 0u64;
+    while write_offset < padded_size as u64 {
+        let chunk_end = (write_offset as usize + sector_size).min(padded_size);
+        device.write_at(write_offset, &bytes[write_offset as usize..chunk_end])?;
+        write_offset = chunk_end as u64;
+    }
+    device.sync()?;
+
+    Ok(())
+}
+
+/// Loads a volume state from a [`BlockDevice`].
+///
+/// Reads the header first to determine the image size, then loads the
+/// full image and delegates to the existing byte-level parser.
+pub fn load_from_device(device: &dyn BlockDevice) -> CoreFsResult<PersistedState> {
+    let label = "<device>";
+    let path = Path::new(label);
+    let sector_size = device.sector_size() as u64;
+
+    // Read the first sector to parse the header.
+    let header_sector = device.read_at(0, sector_size)?;
+    if header_sector.len() < HEADER_SIZE {
+        return Err(CoreFsError::State(
+            "device too small for CoreFS header".to_string(),
+        ));
+    }
+    if &header_sector[..8] != MAGIC {
+        return Err(CoreFsError::State(
+            "device does not contain a CoreFS volume (invalid magic)".to_string(),
+        ));
+    }
+    let version = u32::from_le_bytes(header_sector[8..12].try_into().expect("fixed slice"));
+    if version != FORMAT_VERSION {
+        return Err(CoreFsError::State(format!(
+            "unsupported CoreFS format version {version} on device"
+        )));
+    }
+
+    let segment_count = u32::from_le_bytes(
+        header_sector[12..16].try_into().expect("fixed slice"),
+    ) as usize;
+
+    // Calculate how much data we need: parse the directory to find the last segment end.
+    let directory_offset = HEADER_SIZE;
+    let directory_length = segment_count * SEGMENT_ENTRY_SIZE;
+    let directory_end = directory_offset + directory_length;
+    let needed_for_directory = align_up(directory_end, sector_size as usize);
+
+    // Read enough sectors to cover the full directory.
+    let header_bytes = if needed_for_directory as u64 > sector_size {
+        let extra = device.read_at(sector_size, needed_for_directory as u64 - sector_size)?;
+        let mut combined = header_sector;
+        combined.extend_from_slice(&extra);
+        combined
+    } else {
+        header_sector
+    };
+
+    // Parse directory to find the total image extent.
+    let directory = header_bytes.get(directory_offset..directory_end).ok_or_else(|| {
+        CoreFsError::State("truncated CoreFS directory on device".to_string())
+    })?;
+    let entries = parse_directory(directory)?;
+    let image_end = entries
+        .iter()
+        .map(|e| e.offset + e.length)
+        .max()
+        .unwrap_or(directory_end as u64);
+    let total_read = align_up(image_end as usize, sector_size as usize);
+    let total_read = total_read.min(device.capacity() as usize);
+
+    // Read the full image.
+    let bytes = if total_read as u64 > header_bytes.len() as u64 {
+        let remaining_offset = header_bytes.len() as u64;
+        let remaining = device.read_at(remaining_offset, total_read as u64 - remaining_offset)?;
+        let mut full = header_bytes;
+        full.extend_from_slice(&remaining);
+        full
+    } else {
+        header_bytes[..total_read].to_vec()
+    };
+
+    let inspected = inspect_volume_image_bytes(&bytes, path)?;
+    let superblock = inspected.superblock;
+
+    if superblock.alignment as usize != SEGMENT_ALIGNMENT {
+        return Err(CoreFsError::State(format!(
+            "unsupported CoreFS alignment {} on device",
+            superblock.alignment
+        )));
+    }
+
+    persisted_state_from_entries(&bytes, &inspected.entries, path)
+}
+
+/// Builds a serialized CoreFS image as a byte vector (for use with
+/// [`BlockDevice::write_at`] or direct device formatting).
+pub fn build_volume_image_bytes(state: &PersistedState) -> CoreFsResult<Vec<u8>> {
+    let label = "<memory>";
+    let path = Path::new(label);
+    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size);
+
+    let mut segments = vec![
+        raw_segment_from_bytes(*b"SUPR", vec![0; SUPERBLOCK_SIZE]),
+        raw_segment_from_bytes(*b"SUP2", vec![0; SUPERBLOCK_SIZE]),
+        serialize_segment(*b"CNFG", &ConfigSegment { config: state.config.clone() }, path)?,
+        serialize_segment(*b"VOLM", &VolumeSegment { volume: state.volume.clone() }, path)?,
+        serialize_inode_segment(*b"AINO", &state.active_inodes, path)?,
+        serialize_inode_segment(*b"DINO", &state.deleted_inodes, path)?,
+        serialize_journal_segment(*b"JOUR", &state.journal_entries, path)?,
+        serialize_segment(*b"VERS", &VersionSegment { versions: state.versions.clone() }, path)?,
+        serialize_segment(*b"SYNC", &SyncSegment { sync_statuses: state.sync_statuses.clone() }, path)?,
+        serialize_segment(*b"HOTP", &HotPathSegment { records: state.hot_path_records.clone() }, path)?,
+        serialize_snapshot_segment(*b"SNAP", &SnapshotSegment { snapshots: state.snapshots.clone(), next_snapshot_id: state.next_snapshot_id }, path)?,
+        serialize_segment(*b"TXNJ", &JournalRuntimeSegment { clean_unmount: state.clean_unmount, runtime: state.journal_runtime.clone(), pending_wal: state.pending_wal.clone() }, path)?,
+        serialize_segment(*b"FREE", &FreeSpaceSegment { policy: state.allocator_policy.clone(), extents: state.free_extents.clone() }, path)?,
+        serialize_segment(*b"BLKD", &BlockDescriptorSegment { descriptors }, path)?,
+        serialize_bytes_segment(*b"DATA", &block_data, path)?,
+    ];
+
+    let segment_count = segments.len();
+    let directory_offset = HEADER_SIZE;
+    let directory_length = segment_count * SEGMENT_ENTRY_SIZE;
+    let mut offset = align_up(directory_offset + directory_length, SEGMENT_ALIGNMENT);
+    let mut entries = Vec::with_capacity(segment_count);
+
+    for segment in &segments {
+        entries.push(SegmentEntry {
+            kind: segment.kind,
+            offset: offset as u64,
+            length: segment.payload.len() as u64,
+        });
+        offset = align_up(offset + segment.payload.len(), SEGMENT_ALIGNMENT);
+    }
+
+    let total_size = offset;
+    let directory_bytes = directory_bytes(&entries);
+    let superblock = Superblock {
+        format_version: FORMAT_VERSION,
+        alignment: SEGMENT_ALIGNMENT as u32,
+        segment_count: segment_count as u32,
+        clean_unmount: u32::from(state.clean_unmount),
+        generation: current_generation(),
+        directory_offset: directory_offset as u64,
+        directory_length: directory_length as u64,
+        directory_checksum: checksum(&directory_bytes),
+        payload_checksum: checksum_of_payloads(&segments),
+    };
+    let superblock_bytes = encode_superblock(&superblock);
+    segments[0].payload = superblock_bytes.clone();
+    segments[1].payload = superblock_bytes;
+
+    let mut bytes = vec![0u8; total_size];
+    bytes[..8].copy_from_slice(MAGIC);
+    bytes[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    bytes[12..16].copy_from_slice(&(segment_count as u32).to_le_bytes());
+    bytes[directory_offset..directory_offset + directory_length].copy_from_slice(&directory_bytes);
+
+    for (entry, segment) in entries.iter().zip(segments.iter()) {
+        let start = entry.offset as usize;
+        let end = start + segment.payload.len();
+        bytes[start..end].copy_from_slice(&segment.payload);
+    }
+
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2308,5 +2568,198 @@ mod tests {
         assert_eq!(loaded.block_records[0].bytes, b"hello".to_vec());
 
         let _ = fs::remove_file(path);
+    }
+
+    // -----------------------------------------------------------------------
+    // BlockDevice integration tests
+    // -----------------------------------------------------------------------
+
+    use crate::storage::block_device::MemoryDevice;
+
+    fn memory_device(capacity: u64) -> MemoryDevice {
+        MemoryDevice::new(capacity, 4096).unwrap()
+    }
+
+    #[test]
+    fn save_and_load_from_device_round_trip() {
+        let state = sample_state();
+        let mut dev = memory_device(2 * 1024 * 1024);
+
+        save_to_device(&mut dev, &state).unwrap();
+        let loaded = load_from_device(&dev).unwrap();
+
+        assert_eq!(loaded.config.volume_name, state.config.volume_name);
+        assert_eq!(loaded.active_inodes.len(), state.active_inodes.len());
+        assert_eq!(loaded.deleted_inodes.len(), state.deleted_inodes.len());
+        assert_eq!(loaded.journal_entries.len(), state.journal_entries.len());
+        assert_eq!(loaded.versions.len(), state.versions.len());
+        assert_eq!(loaded.snapshots.len(), state.snapshots.len());
+        assert_eq!(loaded.next_snapshot_id, state.next_snapshot_id);
+        assert_eq!(loaded.block_records.len(), state.block_records.len());
+        assert_eq!(loaded.free_extents.len(), state.free_extents.len());
+    }
+
+    #[test]
+    fn save_to_device_rejects_insufficient_capacity() {
+        // Build a state with enough data to exceed a very small device.
+        let mut state = sample_state();
+        state.block_records = vec![
+            crate::storage::block_store::BlockRecord {
+                inode: InodeId(1),
+                bytes: vec![0xAA; 8192],
+                checksum: 999,
+                device_block: 0,
+                allocated_blocks: 2,
+            },
+        ];
+        // 4 KiB device cannot fit the header + segments + 8 KiB data.
+        let mut dev = memory_device(4096);
+
+        let err = save_to_device(&mut dev, &state).unwrap_err();
+        assert!(err.to_string().contains("exceeds device capacity"));
+    }
+
+    #[test]
+    fn load_from_device_rejects_unformatted() {
+        let dev = memory_device(2 * 1024 * 1024); // All zeros
+        let err = load_from_device(&dev).unwrap_err();
+        assert!(err.to_string().contains("invalid magic"));
+    }
+
+    #[test]
+    fn save_and_load_device_preserves_block_data() {
+        let mut state = sample_state();
+        state.block_records = vec![
+            crate::storage::block_store::BlockRecord {
+                inode: InodeId(1),
+                bytes: b"device-test-payload".to_vec(),
+                checksum: 12345,
+                device_block: 0,
+                allocated_blocks: 1,
+            },
+        ];
+        let mut dev = memory_device(2 * 1024 * 1024);
+
+        save_to_device(&mut dev, &state).unwrap();
+        let loaded = load_from_device(&dev).unwrap();
+
+        assert_eq!(loaded.block_records.len(), 1);
+        assert_eq!(loaded.block_records[0].bytes, b"device-test-payload".to_vec());
+        assert_eq!(loaded.block_records[0].inode, InodeId(1));
+    }
+
+    #[test]
+    fn save_and_load_device_empty_state() {
+        let state = PersistedState {
+            config: CoreFsConfig::default(),
+            volume: crate::domain::volume::VolumeDescriptor::from_config(&CoreFsConfig::default()),
+            clean_unmount: true,
+            pending_wal: None,
+            active_inodes: Vec::new(),
+            deleted_inodes: Vec::new(),
+            allocator_policy: AllocatorPolicy::default(),
+            free_extents: Vec::new(),
+            hot_path_records: Vec::new(),
+            block_records: Vec::new(),
+            journal_entries: Vec::new(),
+            journal_runtime: crate::services::journal::JournalRuntimeState::default(),
+            versions: Vec::new(),
+            sync_statuses: Vec::new(),
+            snapshots: Vec::new(),
+            next_snapshot_id: 0,
+        };
+        let mut dev = memory_device(2 * 1024 * 1024);
+
+        save_to_device(&mut dev, &state).unwrap();
+        let loaded = load_from_device(&dev).unwrap();
+
+        assert_eq!(loaded.config.volume_name, "corefs");
+        assert!(loaded.active_inodes.is_empty());
+        assert!(loaded.block_records.is_empty());
+    }
+
+    #[test]
+    fn save_and_load_device_with_512_byte_sectors() {
+        let state = sample_state();
+        let mut dev = MemoryDevice::new(2 * 1024 * 1024, 512).unwrap();
+
+        save_to_device(&mut dev, &state).unwrap();
+        let loaded = load_from_device(&dev).unwrap();
+
+        assert_eq!(loaded.config.volume_name, state.config.volume_name);
+        assert_eq!(loaded.active_inodes.len(), state.active_inodes.len());
+    }
+
+    #[test]
+    fn build_volume_image_bytes_creates_valid_image() {
+        let state = sample_state();
+        let bytes = build_volume_image_bytes(&state).unwrap();
+
+        // Should start with MAGIC
+        assert_eq!(&bytes[..8], MAGIC);
+        // Should have correct format version
+        let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        assert_eq!(version, FORMAT_VERSION);
+    }
+
+    #[test]
+    fn device_round_trip_matches_file_round_trip() {
+        let state = sample_state();
+
+        // File path
+        let file_path = temp_path("device-vs-file");
+        save_volume_image(&file_path, &state).unwrap();
+        let file_loaded = load_volume_image(&file_path).unwrap();
+
+        // Device path
+        let mut dev = memory_device(2 * 1024 * 1024);
+        save_to_device(&mut dev, &state).unwrap();
+        let device_loaded = load_from_device(&dev).unwrap();
+
+        // Both should produce identical state
+        assert_eq!(file_loaded.config, device_loaded.config);
+        assert_eq!(file_loaded.active_inodes.len(), device_loaded.active_inodes.len());
+        assert_eq!(file_loaded.block_records.len(), device_loaded.block_records.len());
+        assert_eq!(file_loaded.snapshots.len(), device_loaded.snapshots.len());
+        assert_eq!(file_loaded.next_snapshot_id, device_loaded.next_snapshot_id);
+        for (f, d) in file_loaded.block_records.iter().zip(device_loaded.block_records.iter()) {
+            assert_eq!(f.inode, d.inode);
+            assert_eq!(f.bytes, d.bytes);
+        }
+
+        let _ = fs::remove_file(file_path);
+    }
+
+    #[test]
+    fn multiple_save_load_cycles_on_same_device() {
+        let mut dev = memory_device(2 * 1024 * 1024);
+
+        // Cycle 1: empty state
+        let state1 = PersistedState {
+            config: CoreFsConfig::default(),
+            volume: crate::domain::volume::VolumeDescriptor::from_config(&CoreFsConfig::default()),
+            clean_unmount: true,
+            pending_wal: None,
+            active_inodes: Vec::new(),
+            deleted_inodes: Vec::new(),
+            allocator_policy: AllocatorPolicy::default(),
+            free_extents: Vec::new(),
+            hot_path_records: Vec::new(),
+            block_records: Vec::new(),
+            journal_entries: Vec::new(),
+            journal_runtime: crate::services::journal::JournalRuntimeState::default(),
+            versions: Vec::new(),
+            sync_statuses: Vec::new(),
+            snapshots: Vec::new(),
+            next_snapshot_id: 0,
+        };
+        save_to_device(&mut dev, &state1).unwrap();
+
+        // Cycle 2: overwrite with sample state
+        let state2 = sample_state();
+        save_to_device(&mut dev, &state2).unwrap();
+        let loaded = load_from_device(&dev).unwrap();
+        assert_eq!(loaded.active_inodes.len(), state2.active_inodes.len());
+        assert_eq!(loaded.next_snapshot_id, state2.next_snapshot_id);
     }
 }

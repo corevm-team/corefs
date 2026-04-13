@@ -287,6 +287,95 @@ where
                 ));
             }
         }
+        "probe-device" => {
+            let device_path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing device path for probe-device".to_string())
+            })?;
+            #[cfg(target_os = "linux")]
+            {
+                let info = crate::storage::block_device::raw::probe_device(device_path)?;
+                println!("device: {}", info.path.display());
+                println!("capacity: {} bytes", info.capacity_bytes);
+                println!(
+                    "sector_size: logical={} physical={}",
+                    info.logical_sector_size, info.physical_sector_size
+                );
+                println!("read_only: {}", info.read_only);
+                println!("whole_disk: {}", info.is_whole_disk);
+                println!("mounted: {}", info.is_mounted);
+                println!("safe_to_format: {}", info.is_safe_to_format());
+                for blocker in info.format_blockers() {
+                    println!("  blocker: {blocker}");
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = device_path;
+                return Err(CoreFsError::InvalidCommand(
+                    "probe-device is only available on Linux builds".to_string(),
+                ));
+            }
+        }
+        "mkfs-device" => {
+            let device_path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing device path for mkfs-device".to_string())
+            })?;
+            #[cfg(target_os = "linux")]
+            {
+                let info = crate::storage::block_device::raw::probe_device(device_path)?;
+                if !info.is_safe_to_format() {
+                    for blocker in info.format_blockers() {
+                        eprintln!("error: {blocker}");
+                    }
+                    return Err(CoreFsError::PolicyViolation(
+                        "device is not safe to format — see errors above".to_string(),
+                    ));
+                }
+                let config = crate::config::CoreFsConfig::default();
+                let mut device =
+                    crate::storage::block_device::raw::RawBlockDevice::open(device_path, false)?;
+                linux_fuse::format_device(&mut device, config)?;
+                println!("formatted CoreFS volume on {device_path}");
+                println!(
+                    "capacity: {} bytes ({} sectors of {} bytes)",
+                    info.capacity_bytes,
+                    info.capacity_bytes / u64::from(info.logical_sector_size),
+                    info.logical_sector_size
+                );
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = device_path;
+                return Err(CoreFsError::InvalidCommand(
+                    "mkfs-device is only available on Linux builds".to_string(),
+                ));
+            }
+        }
+        "mount-device-rw" => {
+            let device_path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand(
+                    "missing device path for mount-device-rw".to_string(),
+                )
+            })?;
+            let mount_point = args.get(3).ok_or_else(|| {
+                CoreFsError::InvalidCommand(
+                    "missing mount point for mount-device-rw".to_string(),
+                )
+            })?;
+            #[cfg(target_os = "linux")]
+            {
+                let device =
+                    crate::storage::block_device::raw::RawBlockDevice::open(device_path, false)?;
+                linux_fuse::mount_device_rw(Box::new(device), mount_point)?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (device_path, mount_point);
+                return Err(CoreFsError::InvalidCommand(
+                    "mount-device-rw is only available on Linux builds".to_string(),
+                ));
+            }
+        }
         "diagnose-mount" => {
             let image_path = args.get(2).ok_or_else(|| {
                 CoreFsError::InvalidCommand("missing image path for diagnose-mount".to_string())
@@ -391,6 +480,9 @@ fn print_usage() {
     println!("  optimize-image <path>");
     println!("  mount-image <image-path> <mount-point>");
     println!("  mount-image-rw <image-path> <mount-point>");
+    println!("  probe-device <device-path>");
+    println!("  mkfs-device <device-path>");
+    println!("  mount-device-rw <device-path> <mount-point>");
     println!("  diagnose-mount <image-path> <mount-point> [--create]");
     println!(
         "  benchmark [--profile <name>] [--files <n>] [--payload <bytes>] [--snapshots <n>] [--saves <n>]"

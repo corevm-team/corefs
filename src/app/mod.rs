@@ -1270,7 +1270,7 @@ impl CoreFsService {
         Ok(())
     }
 
-    fn persisted_state(&self) -> PersistedState {
+    pub fn persisted_state(&self) -> PersistedState {
         PersistedState {
             config: self.config.clone(),
             volume: self.volume.clone(),
@@ -1291,7 +1291,7 @@ impl CoreFsService {
         }
     }
 
-    fn from_persisted_state(state: PersistedState) -> Self {
+    pub fn from_persisted_state(state: PersistedState) -> Self {
         let block_size = state.volume.block_size;
         let next_inode = state
             .active_inodes

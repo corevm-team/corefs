@@ -2228,6 +2228,85 @@ pub fn mount_image_rw(
     })
 }
 
+// ── Block-device mount helpers ──────────────────────────────────────────────
+
+/// Mounts a CoreFS volume from a [`BlockDevice`] read-write via FUSE.
+///
+/// The device is loaded into memory, served through the existing FUSE RW
+/// infrastructure, and flushed back to the device on sync/unmount.  This
+/// reuses the proven FUSE RW stack; a future iteration may add on-demand
+/// sector I/O.
+pub fn mount_device_rw(
+    mut device: Box<dyn crate::storage::block_device::BlockDevice>,
+    mount_point: impl AsRef<Path>,
+) -> CoreFsResult<()> {
+    let mount_point = mount_point.as_ref();
+    let state = crate::storage::volume_image::load_from_device(device.as_ref())?;
+    let mut service = CoreFsService::from_persisted_state(state);
+    if service.has_pending_wal() {
+        service.recover_pending_wal()?;
+        let recovered_state = service.persisted_state();
+        crate::storage::volume_image::save_to_device(device.as_mut(), &recovered_state)?;
+    }
+
+    // Write an unclean-shutdown marker to the device before mounting.
+    service.mark_unclean_shutdown();
+    let dirty_state = service.persisted_state();
+    crate::storage::volume_image::save_to_device(device.as_mut(), &dirty_state)?;
+
+    // Use a temporary image file as the FUSE backing store during the mount.
+    let tmp_dir = std::env::temp_dir();
+    let tmp_name = format!(
+        "corefs-device-mount-{}-{}.img",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let tmp_path = tmp_dir.join(tmp_name);
+    service.save_image_to_path(&tmp_path)?;
+
+    let fs_name = format!("corefs:{}", service.volume_name());
+    let mount = CoreFsFuseMountRw::from_service(service, tmp_path.clone());
+
+    let result = fuser::mount2(
+        mount,
+        mount_point,
+        &[
+            MountOption::RW,
+            MountOption::FSName(fs_name),
+            MountOption::DefaultPermissions,
+        ],
+    )
+    .map_err(|error| {
+        CoreFsError::State(format!(
+            "failed to mount CoreFS device on {}: {error}",
+            mount_point.display()
+        ))
+    });
+
+    // After unmount: write the final state from the temp image back to the device.
+    if tmp_path.exists() {
+        if let Ok(final_state) = crate::storage::volume_image::load_volume_image(&tmp_path) {
+            let _ = crate::storage::volume_image::save_to_device(device.as_mut(), &final_state);
+        }
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    result
+}
+
+/// Formats a [`BlockDevice`] with a new empty CoreFS volume.
+pub fn format_device(
+    device: &mut dyn crate::storage::block_device::BlockDevice,
+    config: crate::config::CoreFsConfig,
+) -> CoreFsResult<()> {
+    let service = CoreFsService::format(config);
+    let state = service.persisted_state();
+    crate::storage::volume_image::save_to_device(device, &state)
+}
+
 // ── statfs helpers ───────────────────────────────────────────────────────────
 
 /// Logical block size reported to the kernel.

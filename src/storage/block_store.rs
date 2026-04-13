@@ -140,6 +140,14 @@ pub struct CowStats {
     pub max_ref_count: usize,
 }
 
+/// A freed device-block range, suitable for issuing TRIM/discard to the
+/// underlying block device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreedExtent {
+    pub device_block: u64,
+    pub block_count: u64,
+}
+
 #[derive(Debug)]
 pub struct BlockStore {
     block_size: usize,
@@ -148,6 +156,10 @@ pub struct BlockStore {
     free_extents: Vec<FreeExtent>,
     blocks: BTreeMap<InodeId, BlockEntry>,
     blobs: BTreeMap<u64, BlobRecord>,
+    /// Extents freed since the last call to [`drain_freed_extents`].
+    /// The caller (typically the volume session or FUSE mount) can drain
+    /// this list and forward it as TRIM/discard commands to the device.
+    pending_trims: Vec<FreedExtent>,
 }
 
 impl BlockStore {
@@ -163,6 +175,7 @@ impl BlockStore {
             free_extents: Vec::new(),
             blocks: BTreeMap::new(),
             blobs: BTreeMap::new(),
+            pending_trims: Vec::new(),
         }
     }
 
@@ -189,9 +202,15 @@ impl BlockStore {
                     }
                 }
                 if existing_blocks > required_blocks {
+                    let tail_block = device_block.saturating_add(required_blocks);
+                    let tail_count = existing_blocks - required_blocks;
+                    self.pending_trims.push(FreedExtent {
+                        device_block: tail_block,
+                        block_count: tail_count,
+                    });
                     self.insert_free_extent(FreeExtent {
-                        device_block: device_block.saturating_add(required_blocks),
-                        allocated_blocks: existing_blocks - required_blocks,
+                        device_block: tail_block,
+                        allocated_blocks: tail_count,
                     });
                 }
                 (device_block, required_blocks)
@@ -356,6 +375,18 @@ impl BlockStore {
 
     pub fn free_extents(&self) -> Vec<FreeExtentRecord> {
         self.free_extents.clone()
+    }
+
+    /// Drains and returns all device-block ranges freed since the last drain.
+    ///
+    /// The caller can forward these to [`BlockDevice::trim`] for DISCARD.
+    pub fn drain_freed_extents(&mut self) -> Vec<FreedExtent> {
+        std::mem::take(&mut self.pending_trims)
+    }
+
+    /// Returns the pending TRIM list without draining it.
+    pub fn pending_trims(&self) -> &[FreedExtent] {
+        &self.pending_trims
     }
 
     pub fn set_allocator_policy(&mut self, policy: AllocatorPolicy) {
@@ -948,6 +979,12 @@ impl BlockStore {
             self.blobs.remove(&entry.blob_checksum);
         }
 
+        // Record the freed extent for TRIM/discard.
+        self.pending_trims.push(FreedExtent {
+            device_block: entry.device_block,
+            block_count: entry.allocated_blocks,
+        });
+
         self.insert_free_extent(FreeExtent {
             device_block: entry.device_block,
             allocated_blocks: entry.allocated_blocks,
@@ -1445,5 +1482,83 @@ mod tests {
         assert_eq!(stats.shared_blobs, 0);
         assert_eq!(stats.exclusive_blobs, 0);
         assert_eq!(stats.max_ref_count, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // TRIM / freed extent tracking
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn remove_records_freed_extent_for_trim() {
+        let mut store = BlockStore::default();
+        store.write(InodeId(1), b"hello".to_vec());
+        let record = store.read(InodeId(1)).unwrap();
+        let expected_block = record.device_block;
+        let expected_count = record.allocated_blocks;
+
+        assert!(store.pending_trims().is_empty());
+
+        store.remove(InodeId(1));
+
+        let trims = store.drain_freed_extents();
+        assert_eq!(trims.len(), 1);
+        assert_eq!(trims[0].device_block, expected_block);
+        assert_eq!(trims[0].block_count, expected_count);
+    }
+
+    #[test]
+    fn write_shrink_records_tail_freed_extent() {
+        let mut store = BlockStore::default();
+        // Write a large payload that needs multiple blocks
+        store.write(InodeId(1), vec![0xAA; 16384]);
+        store.drain_freed_extents(); // clear
+
+        // Overwrite with a smaller payload
+        store.write(InodeId(1), vec![0xBB; 1]);
+
+        let trims = store.drain_freed_extents();
+        // Should have freed the tail blocks
+        assert!(!trims.is_empty());
+    }
+
+    #[test]
+    fn drain_freed_extents_clears_pending() {
+        let mut store = BlockStore::default();
+        store.write(InodeId(1), b"hello".to_vec());
+        store.remove(InodeId(1));
+
+        let first = store.drain_freed_extents();
+        assert!(!first.is_empty());
+
+        let second = store.drain_freed_extents();
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn multiple_removes_accumulate_trims() {
+        let mut store = BlockStore::default();
+        store.write(InodeId(1), b"aaa".to_vec());
+        store.write(InodeId(2), b"bbb".to_vec());
+        store.write(InodeId(3), b"ccc".to_vec());
+
+        store.remove(InodeId(1));
+        store.remove(InodeId(3));
+
+        let trims = store.drain_freed_extents();
+        assert_eq!(trims.len(), 2);
+    }
+
+    #[test]
+    fn pending_trims_does_not_drain() {
+        let mut store = BlockStore::default();
+        store.write(InodeId(1), b"hello".to_vec());
+        store.remove(InodeId(1));
+
+        assert!(!store.pending_trims().is_empty());
+        assert!(!store.pending_trims().is_empty()); // Still there
+
+        let drained = store.drain_freed_extents();
+        assert!(!drained.is_empty());
+        assert!(store.pending_trims().is_empty()); // Now empty
     }
 }
