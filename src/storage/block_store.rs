@@ -27,6 +27,12 @@ struct BlockEntry {
     allocated_blocks: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FreeExtent {
+    device_block: u64,
+    allocated_blocks: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DedupeStats {
     pub logical_blocks: usize,
@@ -38,6 +44,7 @@ pub struct DedupeStats {
 pub struct BlockStore {
     block_size: usize,
     next_device_block: u64,
+    free_extents: Vec<FreeExtent>,
     blocks: BTreeMap<InodeId, BlockEntry>,
     blobs: BTreeMap<u64, BlobRecord>,
 }
@@ -47,6 +54,7 @@ impl BlockStore {
         Self {
             block_size: block_size.max(1),
             next_device_block: 0,
+            free_extents: Vec::new(),
             blocks: BTreeMap::new(),
             blobs: BTreeMap::new(),
         }
@@ -64,14 +72,22 @@ impl BlockStore {
 
         let (device_block, allocated_blocks) = match existing_allocation {
             Some((device_block, allocated_blocks)) if allocated_blocks >= required_blocks => {
-                (device_block, allocated_blocks)
+                if allocated_blocks > required_blocks {
+                    self.insert_free_extent(FreeExtent {
+                        device_block: device_block.saturating_add(required_blocks),
+                        allocated_blocks: allocated_blocks - required_blocks,
+                    });
+                }
+                (device_block, required_blocks)
             }
-            _ => {
-                let device_block = self.next_device_block;
-                let allocated_blocks = required_blocks.max(1);
-                self.next_device_block = self.next_device_block.saturating_add(allocated_blocks);
-                (device_block, allocated_blocks)
+            Some((device_block, allocated_blocks)) => {
+                self.insert_free_extent(FreeExtent {
+                    device_block,
+                    allocated_blocks,
+                });
+                self.allocate_extent(required_blocks.max(1))
             }
+            _ => self.allocate_extent(required_blocks.max(1)),
         };
 
         let blob = self.blobs.entry(checksum).or_insert_with(|| BlobRecord {
@@ -167,6 +183,7 @@ impl BlockStore {
                 },
             );
         }
+        self.rebuild_free_extents();
     }
 
     pub fn dedupe_stats(&self) -> DedupeStats {
@@ -175,6 +192,97 @@ impl BlockStore {
             unique_blobs: self.blobs.len(),
             deduplicated_blocks: self.blocks.len().saturating_sub(self.blobs.len()),
         }
+    }
+
+    fn allocate_extent(&mut self, required_blocks: u64) -> (u64, u64) {
+        if let Some(index) = self
+            .free_extents
+            .iter()
+            .enumerate()
+            .filter(|(_, extent)| extent.allocated_blocks >= required_blocks)
+            .min_by_key(|(_, extent)| extent.allocated_blocks)
+            .map(|(index, _)| index)
+        {
+            let extent = self.free_extents.remove(index);
+            if extent.allocated_blocks > required_blocks {
+                self.insert_free_extent(FreeExtent {
+                    device_block: extent.device_block.saturating_add(required_blocks),
+                    allocated_blocks: extent.allocated_blocks - required_blocks,
+                });
+            }
+            return (extent.device_block, required_blocks);
+        }
+
+        let device_block = self.next_device_block;
+        self.next_device_block = self.next_device_block.saturating_add(required_blocks);
+        (device_block, required_blocks)
+    }
+
+    fn insert_free_extent(&mut self, extent: FreeExtent) {
+        if extent.allocated_blocks == 0 {
+            return;
+        }
+        self.free_extents.push(extent);
+        self.normalize_free_extents();
+    }
+
+    fn normalize_free_extents(&mut self) {
+        self.free_extents.sort_by_key(|extent| extent.device_block);
+        let mut merged: Vec<FreeExtent> = Vec::with_capacity(self.free_extents.len());
+
+        for extent in self.free_extents.drain(..) {
+            if let Some(last) = merged.last_mut() {
+                let last_end = last.device_block.saturating_add(last.allocated_blocks);
+                if last_end >= extent.device_block {
+                    let extent_end = extent.device_block.saturating_add(extent.allocated_blocks);
+                    last.allocated_blocks = extent_end.saturating_sub(last.device_block);
+                    continue;
+                }
+            }
+            merged.push(extent);
+        }
+
+        self.free_extents = merged;
+        self.trim_free_tail();
+    }
+
+    fn trim_free_tail(&mut self) {
+        while let Some(last) = self.free_extents.last().copied() {
+            let last_end = last.device_block.saturating_add(last.allocated_blocks);
+            if last_end != self.next_device_block {
+                break;
+            }
+            self.next_device_block = last.device_block;
+            self.free_extents.pop();
+        }
+    }
+
+    fn rebuild_free_extents(&mut self) {
+        let mut occupied: Vec<(u64, u64)> = self
+            .blocks
+            .values()
+            .map(|entry| {
+                (
+                    entry.device_block,
+                    entry.device_block.saturating_add(entry.allocated_blocks),
+                )
+            })
+            .collect();
+        occupied.sort_by_key(|(start, _)| *start);
+
+        self.free_extents.clear();
+        let mut cursor = 0u64;
+        for (start, end) in occupied {
+            if start > cursor {
+                self.free_extents.push(FreeExtent {
+                    device_block: cursor,
+                    allocated_blocks: start - cursor,
+                });
+            }
+            cursor = cursor.max(end);
+        }
+        self.next_device_block = self.next_device_block.max(cursor);
+        self.trim_free_tail();
     }
 
     fn release_inode(&mut self, inode: InodeId) {
@@ -192,6 +300,11 @@ impl BlockStore {
         if remove_blob {
             self.blobs.remove(&entry.blob_checksum);
         }
+
+        self.insert_free_extent(FreeExtent {
+            device_block: entry.device_block,
+            allocated_blocks: entry.allocated_blocks,
+        });
     }
 }
 
@@ -277,6 +390,65 @@ mod tests {
         let second = store.read(inode).expect("record");
 
         assert_eq!(first.device_block, second.device_block);
-        assert_eq!(first.allocated_blocks, second.allocated_blocks);
+        assert_eq!(first.allocated_blocks, 2);
+        assert_eq!(second.allocated_blocks, 1);
+    }
+
+    #[test]
+    fn freed_extents_are_reused_for_new_writes() {
+        let mut store = BlockStore::with_block_size(4);
+
+        store.write(InodeId(1), b"abcd".to_vec());
+        store.write(InodeId(2), b"efgh".to_vec());
+        let removed = store.remove(InodeId(1)).expect("record");
+        assert_eq!(removed.device_block, 0);
+
+        store.write(InodeId(3), b"zzzz".to_vec());
+        let reused = store.read(InodeId(3)).expect("record");
+
+        assert_eq!(reused.device_block, 0);
+        assert_eq!(reused.allocated_blocks, 1);
+    }
+
+    #[test]
+    fn shrinking_write_releases_surplus_blocks_for_reuse() {
+        let mut store = BlockStore::with_block_size(4);
+        let inode = InodeId(1);
+
+        store.write(inode, b"abcdefgh".to_vec());
+        store.write(inode, b"abc".to_vec());
+        store.write(InodeId(2), b"wxyz".to_vec());
+
+        let first = store.read(inode).expect("record");
+        let second = store.read(InodeId(2)).expect("record");
+        assert_eq!(first.device_block, 0);
+        assert_eq!(first.allocated_blocks, 1);
+        assert_eq!(second.device_block, 1);
+    }
+
+    #[test]
+    fn records_rebuild_free_extents_and_reuse_gaps() {
+        let records = vec![
+            BlockRecord {
+                inode: InodeId(1),
+                bytes: b"aa".to_vec(),
+                checksum: checksum(b"aa"),
+                device_block: 0,
+                allocated_blocks: 1,
+            },
+            BlockRecord {
+                inode: InodeId(2),
+                bytes: b"bb".to_vec(),
+                checksum: checksum(b"bb"),
+                device_block: 2,
+                allocated_blocks: 1,
+            },
+        ];
+        let mut store = BlockStore::from_records_with_block_size(records, 4);
+
+        store.write(InodeId(3), b"cc".to_vec());
+        let inserted = store.read(InodeId(3)).expect("record");
+
+        assert_eq!(inserted.device_block, 1);
     }
 }

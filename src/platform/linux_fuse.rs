@@ -612,8 +612,8 @@ impl CoreFsFuseMountRw {
             };
 
             let offset_in_extent = absolute_offset.saturating_sub(extent.inode_offset);
-            let chunk_len = (extent.length.max(1).saturating_sub(offset_in_extent))
-                .min(bytes.len() - consumed);
+            let chunk_len =
+                (extent.length.max(1).saturating_sub(offset_in_extent)).min(bytes.len() - consumed);
             self.record_wal_operation(WalOperation::PatchExtent {
                 inode,
                 device_block: extent.device_block,

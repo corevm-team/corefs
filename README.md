@@ -21,7 +21,7 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `102/102` Tests erfolgreich
+- Test-Status: `105/105` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -88,6 +88,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Journaling von Operationen
 - transaktionales Journal mit `tx_begin`/`tx_commit`/`tx_abort`, Pending-Transaktionen und Recovery-Markern
 - persistente physische Volume-Allokation pro Dateiinhalt mit stabilen `device_block`-/`allocated_blocks`-Metadaten im Volume-Image
+- freie Extent-Wiederverwendung im Storage-Layer mit Gap-Reuse, Shrink-Freigabe und Tail-Trim fuer physische Blockallokationen
 - integriertes Pending-WAL im Volume-Image fuer den RW-Mount
 - extent- und device-blockadressierte WAL-Records ueber `inode + device_block + block_offset + inode_offset` fuer partielle File-Patches und Truncates statt nur grober Vollwrites
 - Basis-Versionierung
@@ -362,7 +363,7 @@ cargo run -- read /etc/corefs.conf
 Die nächste sinnvolle Ausbaufolge ist:
 
 1. Das aktuelle segmentierte Binärformat weiter in Richtung eines echten blockorientierten On-Disk-Layouts mit stärker spezialisierter Segmentcodierung weiterentwickeln.
-2. Die persistente physische Volume-Allokation um freie Listen, Reuse, Fragmentierungssteuerung und spaeter echte Device-Segmentadressierung erweitern.
+2. Die vorhandene freie Blockverwaltung um persistente Free-List-Metadaten, gezielte Fragmentierungssteuerung und spaeter echte Device-Segmentadressierung erweitern.
 3. VFS- und Kernel-Integrationsschnittstelle für das eigene Betriebssystem entwerfen.
 4. Sicherheits-, Integritäts- und Recovery-Funktionen auf reale Laufzeitmechanismen anheben.
 5. Erweiterte Features wie Cluster, Deduplizierung und semantische Tiefenanalyse ergänzen.

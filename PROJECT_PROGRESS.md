@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `102/102` Tests erfolgreich  
+**Test-Status:** `105/105` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -41,6 +41,7 @@
 - Journaling von Operationen
 - transaktionales Journal mit Pending-Transaktionen, Commit-/Abort-Markern und Recovery-Einträgen
 - persistente physische Volume-Allokation pro Dateiinhalt mit stabilen `device_block`-/`allocated_blocks`-Metadaten
+- freie Extent-Wiederverwendung mit Gap-Reuse, Freigabe überschüssiger Blöcke bei Shrinks und Tail-Trim im Storage-Layer
 - integriertes Pending-WAL im Volume-Image fuer RW-Sessions
 - extent- und device-blockadressierte WAL-Records ueber `inode + device_block + block_offset + inode_offset` fuer partielle File-Patches und Truncates
 - automatische Versionierung im Basismodell
@@ -167,7 +168,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 - blockorientiertes On-Disk-Format definieren
 - Metadaten-Layout festlegen
 - die aktuellen binären Segment-Frames schrittweise in ein noch stärker blockorientiertes und spezialisierteres On-Disk-Format überführen
-- die vorhandene physische Volume-Allokation um freie Listen, Reuse, Fragmentierungssteuerung und spaeter echte Device-Segmentadressierung weiterentwickeln
+- die freie Blockverwaltung um persistente Free-List-Metadaten, Fragmentierungssteuerung und spaeter echte Device-Segmentadressierung weiterentwickeln
 - Performance-Baseline für zukünftige Persistenzumstellungen fortlaufend protokollieren
 
 ### Phase 2: Systemkern
@@ -195,7 +196,7 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 ## Wichtige Hinweise
 
 - Das Projekt ist aktuell ein strukturierter, getesteter Kern-, Persistenz- und Volume-Layout-Prototyp und noch kein produktionsreifes Dateisystem.
-- Der Linux-Mountpfad unterstützt inzwischen read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung, transaktionales Journal-Writeback, persistente physische Volume-Allokation und ein integriertes extent- und device-blockadressiertes Pending-WAL im Volume, ist aber noch kein vollständiges produktionsnahes Device-WAL mit freier Blockverwaltung.
+- Der Linux-Mountpfad unterstützt inzwischen read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung, transaktionales Journal-Writeback, persistente physische Volume-Allokation, freie Extent-Wiederverwendung und ein integriertes extent- und device-blockadressiertes Pending-WAL im Volume, ist aber noch kein vollständiges produktionsnahes Device-WAL mit persistenten Free-List-Metadaten.
 - Performance-Messungen werden jetzt über `benchmark` und `benchmark-log` reproduzierbar ausführbar.
 - Die vorhandene Testsuite ist stark für die aktuelle In-Memory-Implementierung, aber keine Garantie für `100%` messbare Coverage, da in der Umgebung keine Coverage-Tools installiert sind.
 - `.codex` ist inzwischen als projektinterne Vorgabedatei befüllt.
