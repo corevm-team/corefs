@@ -459,17 +459,23 @@ struct VirtFile {
     modified_at: SystemTime,
 }
 
-/// Backing store for the FUSE RW mount: either a file path or a block device.
+/// Backing store for the FUSE RW mount: either a file path or a block device
+/// with an optional incremental-persist cache.
 enum FuseBacking {
     File(PathBuf),
-    Device(Box<dyn crate::storage::block_device::BlockDevice>),
+    Device {
+        device: Box<dyn crate::storage::block_device::BlockDevice>,
+        /// Cache of segment layout and payloads used for incremental persists.
+        /// Populated on first write; reset whenever the image layout changes.
+        cache: Option<crate::storage::volume_image::DeviceImageCache>,
+    },
 }
 
 impl std::fmt::Debug for FuseBacking {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::File(path) => write!(f, "File({:?})", path),
-            Self::Device(dev) => write!(f, "Device({:?})", dev.geometry()),
+            Self::Device { device, .. } => write!(f, "Device({:?})", device.geometry()),
         }
     }
 }
@@ -602,16 +608,29 @@ impl CoreFsFuseMountRw {
         service: CoreFsService,
         device: Box<dyn crate::storage::block_device::BlockDevice>,
     ) -> CoreFsResult<Self> {
-        Ok(Self::from_service(service, FuseBacking::Device(device)))
+        Ok(Self::from_service(
+            service,
+            FuseBacking::Device { device, cache: None },
+        ))
     }
 
     /// Persists the current service state to the backing store.
+    ///
+    /// For file-backed mounts this writes the full image atomically via
+    /// temp-file + rename.  For device-backed mounts this uses
+    /// [`persist_to_device_incremental`], which only rewrites segments
+    /// whose bytes actually changed when the image layout is stable.
     fn persist(&mut self) -> CoreFsResult<()> {
         match &mut self.backing {
             FuseBacking::File(path) => self.service.save_image_to_path(path),
-            FuseBacking::Device(dev) => {
+            FuseBacking::Device { device, cache } => {
                 let state = self.service.persisted_state();
-                crate::storage::volume_image::save_to_device(dev.as_mut(), &state)
+                let _report = crate::storage::volume_image::persist_to_device_incremental(
+                    device.as_mut(),
+                    &state,
+                    cache,
+                )?;
+                Ok(())
             }
         }
     }
@@ -1332,10 +1351,10 @@ impl CoreFsFuseMountRw {
     fn statfs_view(&self) -> (u64, u64) {
         match &self.backing {
             FuseBacking::File(path) => fuse_capacity_blocks(path, &self.nodes_by_ino),
-            FuseBacking::Device(dev) => {
+            FuseBacking::Device { device, .. } => {
                 let used_bytes: u64 = self.nodes_by_ino.values().map(|n| n.data.len() as u64).sum();
                 let used_blocks = used_bytes.div_ceil(FUSE_BLOCK_SIZE as u64);
-                let total_blocks = dev.capacity() / FUSE_BLOCK_SIZE as u64;
+                let total_blocks = device.capacity() / FUSE_BLOCK_SIZE as u64;
                 let free_blocks = total_blocks.saturating_sub(used_blocks);
                 (total_blocks, free_blocks)
             }

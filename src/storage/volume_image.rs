@@ -1910,16 +1910,25 @@ fn current_generation() -> u64 {
 // ---------------------------------------------------------------------------
 
 use crate::storage::block_device::BlockDevice;
+use std::collections::HashMap;
 
-/// Serializes the full volume state to a [`BlockDevice`].
-///
-/// The image is built in memory (identical binary format as the file-based
-/// path), then written sector-aligned to the device.  The device must be
-/// large enough to hold the entire image.
-pub fn save_to_device(
-    device: &mut dyn BlockDevice,
+/// Fully-built image ready to be written to a device.
+struct BuiltImage {
+    /// All segments with their final payloads (SUPR/SUP2 contain the
+    /// serialized superblock).
+    segments: Vec<SegmentPayload>,
+    /// Final byte offsets and lengths for each segment.
+    entries: Vec<SegmentEntry>,
+    /// Complete image as contiguous bytes, padded to sector size.
+    bytes: Vec<u8>,
+}
+
+/// Builds an in-memory image from the persisted state.  Does not perform I/O.
+fn build_image(
     state: &PersistedState,
-) -> CoreFsResult<()> {
+    sector_size: usize,
+    capacity: u64,
+) -> CoreFsResult<BuiltImage> {
     let label = "<device>";
     let path = Path::new(label);
     let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size);
@@ -1958,13 +1967,11 @@ pub fn save_to_device(
     }
 
     let total_size = offset;
-    let sector_size = device.sector_size() as usize;
     let padded_size = align_up(total_size, sector_size);
 
-    if padded_size as u64 > device.capacity() {
+    if padded_size as u64 > capacity {
         return Err(CoreFsError::State(format!(
-            "volume image ({padded_size} bytes) exceeds device capacity ({} bytes)",
-            device.capacity()
+            "volume image ({padded_size} bytes) exceeds device capacity ({capacity} bytes)"
         )));
     }
 
@@ -1996,16 +2003,179 @@ pub fn save_to_device(
         bytes[start..end].copy_from_slice(&segment.payload);
     }
 
-    // Write sector-by-sector to support devices with limited write buffers.
+    Ok(BuiltImage {
+        segments,
+        entries,
+        bytes,
+    })
+}
+
+/// Writes a fully built image to the device sector-by-sector and syncs.
+fn write_full_image(
+    device: &mut dyn BlockDevice,
+    built: &BuiltImage,
+) -> CoreFsResult<()> {
+    let sector_size = device.sector_size() as usize;
+    let padded_size = built.bytes.len();
     let mut write_offset = 0u64;
     while write_offset < padded_size as u64 {
         let chunk_end = (write_offset as usize + sector_size).min(padded_size);
-        device.write_at(write_offset, &bytes[write_offset as usize..chunk_end])?;
+        device.write_at(write_offset, &built.bytes[write_offset as usize..chunk_end])?;
         write_offset = chunk_end as u64;
     }
     device.sync()?;
-
     Ok(())
+}
+
+/// Serializes the full volume state to a [`BlockDevice`].
+///
+/// The image is built in memory (identical binary format as the file-based
+/// path), then written sector-aligned to the device.  The device must be
+/// large enough to hold the entire image.
+pub fn save_to_device(
+    device: &mut dyn BlockDevice,
+    state: &PersistedState,
+) -> CoreFsResult<()> {
+    let built = build_image(state, device.sector_size() as usize, device.capacity())?;
+    write_full_image(device, &built)
+}
+
+/// Cache of segment layout and payload bytes used by
+/// [`persist_to_device_incremental`] to skip unchanged segments across
+/// successive persist calls.
+#[derive(Debug, Clone)]
+pub struct DeviceImageCache {
+    /// Map segment kind -> (offset on device, last-written payload bytes).
+    segments: HashMap<[u8; 4], (u64, Vec<u8>)>,
+}
+
+impl DeviceImageCache {
+    fn from_built(built: &BuiltImage) -> Self {
+        let segments = built
+            .segments
+            .iter()
+            .zip(built.entries.iter())
+            .map(|(seg, entry)| (seg.kind, (entry.offset, seg.payload.clone())))
+            .collect();
+        Self { segments }
+    }
+}
+
+/// Persists the volume state to a device with optional incremental
+/// optimization: if all segment sizes are unchanged from the cached layout,
+/// only the segments whose bytes actually differ are rewritten in-place.
+///
+/// On first call (cache is `None`) or when any segment size changes, a full
+/// rewrite is performed and the cache is refreshed.
+///
+/// Superblocks always change (generation counter) and are therefore always
+/// written in the incremental path; this is cheap (56 bytes × 2).
+pub fn persist_to_device_incremental(
+    device: &mut dyn BlockDevice,
+    state: &PersistedState,
+    cache: &mut Option<DeviceImageCache>,
+) -> CoreFsResult<PersistReport> {
+    let built = build_image(state, device.sector_size() as usize, device.capacity())?;
+
+    // Determine if we can do an in-place incremental update.
+    let can_incremental = cache.as_ref().is_some_and(|c| {
+        built.segments.iter().zip(built.entries.iter()).all(|(seg, entry)| {
+            c.segments
+                .get(&seg.kind)
+                .is_some_and(|(off, cached)| cached.len() == seg.payload.len() && *off == entry.offset)
+        })
+    });
+
+    if !can_incremental {
+        write_full_image(device, &built)?;
+        *cache = Some(DeviceImageCache::from_built(&built));
+        return Ok(PersistReport {
+            incremental: false,
+            segments_written: built.segments.len(),
+            bytes_written: built.bytes.len() as u64,
+        });
+    }
+
+    let cache_ref = cache.as_mut().expect("cache exists when can_incremental");
+    let mut segments_written = 0usize;
+    let mut bytes_written = 0u64;
+    let sector_size = device.sector_size() as u64;
+
+    for (segment, entry) in built.segments.iter().zip(built.entries.iter()) {
+        let cached_entry = cache_ref
+            .segments
+            .get_mut(&segment.kind)
+            .expect("every segment is present in cache");
+        if cached_entry.1 != segment.payload {
+            write_segment_rmw(device, entry.offset, &segment.payload, sector_size)?;
+            cached_entry.1 = segment.payload.clone();
+            segments_written += 1;
+            bytes_written += segment.payload.len() as u64;
+        }
+    }
+
+    if segments_written > 0 {
+        device.sync()?;
+    }
+
+    Ok(PersistReport {
+        incremental: true,
+        segments_written,
+        bytes_written,
+    })
+}
+
+/// Writes `payload` at byte `offset` on a sector-aligned device using
+/// read-modify-write for partial-sector segments.  Segment offsets are
+/// 64-byte aligned (`SEGMENT_ALIGNMENT`) but device writes typically need
+/// sector alignment (512/4096), so we read the enclosing sector range,
+/// patch in the payload, and write it back.
+fn write_segment_rmw(
+    device: &mut dyn BlockDevice,
+    offset: u64,
+    payload: &[u8],
+    sector_size: u64,
+) -> CoreFsResult<()> {
+    let end_offset = offset + payload.len() as u64;
+    let sector_start = (offset / sector_size) * sector_size;
+    let sector_end = end_offset.div_ceil(sector_size) * sector_size;
+    let sector_end = sector_end.min(device.capacity());
+
+    let span = sector_end - sector_start;
+    if span == 0 {
+        return Ok(());
+    }
+
+    // Fast path: already sector-aligned and an exact multiple of sector_size.
+    if sector_start == offset && span == payload.len() as u64 {
+        device.write_at(offset, payload)?;
+        return Ok(());
+    }
+
+    // Read-modify-write path.
+    let mut buf = device.read_at(sector_start, span)?;
+    let offset_in_buf = (offset - sector_start) as usize;
+    let end_in_buf = offset_in_buf + payload.len();
+    if end_in_buf > buf.len() {
+        return Err(CoreFsError::State(format!(
+            "segment at offset {offset} (len {}) extends past device end",
+            payload.len()
+        )));
+    }
+    buf[offset_in_buf..end_in_buf].copy_from_slice(payload);
+    device.write_at(sector_start, &buf)?;
+    Ok(())
+}
+
+/// Result of a persist call — useful for telemetry and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PersistReport {
+    /// `true` if the incremental fast path was used.
+    pub incremental: bool,
+    /// Number of segments actually written to the device.
+    pub segments_written: usize,
+    /// Total number of bytes written to the device (excluding sync metadata).
+    pub bytes_written: u64,
 }
 
 /// Loads a volume state from a [`BlockDevice`].
@@ -2839,5 +3009,168 @@ mod tests {
         let loaded = load_from_device(&dev).unwrap();
         assert_eq!(loaded.active_inodes.len(), state2.active_inodes.len());
         assert_eq!(loaded.next_snapshot_id, state2.next_snapshot_id);
+    }
+
+    // -----------------------------------------------------------------------
+    // Incremental persist
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn first_incremental_persist_does_full_write_and_populates_cache() {
+        let state = sample_state();
+        let mut dev = memory_device(2 * 1024 * 1024);
+        let mut cache: Option<DeviceImageCache> = None;
+
+        let report =
+            persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
+        assert!(!report.incremental, "first call should be full write");
+        assert!(cache.is_some(), "cache should be populated");
+
+        let loaded = load_from_device(&dev).unwrap();
+        assert_eq!(loaded.active_inodes.len(), state.active_inodes.len());
+    }
+
+    #[test]
+    fn incremental_persist_skips_unchanged_segments() {
+        let state = sample_state();
+        let mut dev = memory_device(2 * 1024 * 1024);
+        let mut cache: Option<DeviceImageCache> = None;
+
+        // First call: full write.
+        let first = persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
+        assert!(!first.incremental);
+        assert!(first.bytes_written > 0);
+
+        // Second call with identical state: incremental, zero segments written
+        // (except the superblock contains a new generation counter, but only if
+        // the bytes actually changed between builds — which they do, since
+        // `current_generation()` returns nanosecond timestamps).
+        let second = persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
+        assert!(second.incremental, "second call should use incremental path");
+        // At most 2 segments change (SUPR + SUP2 with new generation).
+        assert!(
+            second.segments_written <= 2,
+            "unchanged state should only rewrite superblocks, got {} segments",
+            second.segments_written
+        );
+    }
+
+    #[test]
+    fn incremental_persist_writes_only_changed_metadata_segment() {
+        let mut state = sample_state();
+        state.active_inodes.push(Inode {
+            id: InodeId(1),
+            kind: InodeKind::File,
+            path: "/owned.txt".to_string(),
+            size: 0,
+            created_at: std::time::SystemTime::now(),
+            modified_at: std::time::SystemTime::now(),
+            metadata: crate::domain::metadata::FileMetadata::default(),
+        });
+
+        let mut dev = memory_device(2 * 1024 * 1024);
+        let mut cache: Option<DeviceImageCache> = None;
+
+        // First call: full write.
+        persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
+
+        // Modify only the inode's metadata (simulates chown).
+        state.active_inodes[0].metadata.uid = 1234;
+        state.active_inodes[0].metadata.gid = 5678;
+        state.active_inodes[0].metadata.mode = 0o600;
+
+        let report = persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
+        assert!(report.incremental);
+        // SUPR + SUP2 + AINO = 3 at most.  Implementations may write BLKD/DATA
+        // if split_blocks emits anything different — but for a chown, it
+        // shouldn't.  We allow up to 3 to stay robust against future tweaks.
+        assert!(
+            report.segments_written <= 3,
+            "chown should only rewrite a few segments, got {}",
+            report.segments_written
+        );
+        assert!(
+            report.segments_written >= 1,
+            "at least superblock should be written"
+        );
+
+        // Verify the change persisted.
+        let loaded = load_from_device(&dev).unwrap();
+        assert_eq!(loaded.active_inodes[0].metadata.uid, 1234);
+        assert_eq!(loaded.active_inodes[0].metadata.gid, 5678);
+        assert_eq!(loaded.active_inodes[0].metadata.mode, 0o600);
+    }
+
+    #[test]
+    fn incremental_persist_falls_back_to_full_on_size_change() {
+        let mut state = sample_state();
+        let mut dev = memory_device(2 * 1024 * 1024);
+        let mut cache: Option<DeviceImageCache> = None;
+
+        persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
+
+        // Add a new inode — AINO grows, so layout changes.
+        state.active_inodes.push(Inode {
+            id: InodeId(999),
+            kind: InodeKind::File,
+            path: "/new-file.txt".to_string(),
+            size: 0,
+            created_at: std::time::SystemTime::now(),
+            modified_at: std::time::SystemTime::now(),
+            metadata: crate::domain::metadata::FileMetadata::default(),
+        });
+
+        let report = persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
+        assert!(
+            !report.incremental,
+            "adding an inode changes AINO size — should fall back to full write"
+        );
+
+        // Verify state loaded back correctly.
+        let loaded = load_from_device(&dev).unwrap();
+        assert_eq!(loaded.active_inodes.len(), state.active_inodes.len());
+    }
+
+    #[test]
+    fn incremental_persist_bytes_written_is_much_less_than_full() {
+        // Construct a state with substantial DATA so the full image is large.
+        let mut state = sample_state();
+        state.active_inodes.push(Inode {
+            id: InodeId(1),
+            kind: InodeKind::File,
+            path: "/big.bin".to_string(),
+            size: 64 * 1024,
+            created_at: std::time::SystemTime::now(),
+            modified_at: std::time::SystemTime::now(),
+            metadata: crate::domain::metadata::FileMetadata::default(),
+        });
+        state.block_records = vec![
+            crate::storage::block_store::BlockRecord {
+                inode: InodeId(1),
+                bytes: vec![0xAA; 64 * 1024], // 64 KiB data blob
+                checksum: 1,
+                device_block: 0,
+                allocated_blocks: 16,
+            },
+        ];
+
+        let mut dev = memory_device(2 * 1024 * 1024);
+        let mut cache: Option<DeviceImageCache> = None;
+
+        let full = persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
+        let full_bytes = full.bytes_written;
+
+        // Modify only the inode's metadata (chown-like).
+        state.active_inodes[0].metadata.uid = 42;
+
+        let incr = persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
+        assert!(incr.incremental);
+        // Incremental bytes should be dramatically smaller than full.
+        assert!(
+            incr.bytes_written * 10 < full_bytes,
+            "expected incremental ({}) to be >10x smaller than full ({})",
+            incr.bytes_written,
+            full_bytes
+        );
     }
 }
