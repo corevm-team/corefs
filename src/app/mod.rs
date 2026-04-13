@@ -40,6 +40,12 @@ pub struct AdminReport {
     pub stats: FsStats,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InodeDataLayout {
+    pub data_offset: u64,
+    pub length: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedState {
     pub config: CoreFsConfig,
@@ -374,6 +380,21 @@ impl CoreFsService {
 
     pub fn block_size(&self) -> usize {
         self.volume.block_size
+    }
+
+    pub fn data_layout_for_inode(&self, inode_id: InodeId) -> Option<InodeDataLayout> {
+        let mut offset = 0u64;
+        for record in self.blocks.records() {
+            let layout = InodeDataLayout {
+                data_offset: offset,
+                length: record.bytes.len(),
+            };
+            if record.inode == inode_id {
+                return Some(layout);
+            }
+            offset = offset.saturating_add(record.bytes.len() as u64);
+        }
+        None
     }
 
     pub fn path_for_inode(&self, inode_id: InodeId) -> Option<String> {
@@ -982,5 +1003,26 @@ mod tests {
             validate_path(&too_long),
             Err(CoreFsError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn data_layout_for_inode_tracks_data_segment_offsets() {
+        let mut fs = CoreFsService::format(CoreFsConfig::default());
+        fs.create_file("/a.txt", b"abc", &[]).expect("file");
+        fs.create_file("/b.txt", b"hello", &[]).expect("file");
+
+        let first = fs
+            .inode_for_path("/a.txt")
+            .and_then(|inode| fs.data_layout_for_inode(inode))
+            .expect("first layout");
+        let second = fs
+            .inode_for_path("/b.txt")
+            .and_then(|inode| fs.data_layout_for_inode(inode))
+            .expect("second layout");
+
+        assert_eq!(first.data_offset, 0);
+        assert_eq!(first.length, 3);
+        assert_eq!(second.data_offset, 3);
+        assert_eq!(second.length, 5);
     }
 }

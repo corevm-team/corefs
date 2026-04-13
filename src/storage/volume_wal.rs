@@ -14,10 +14,10 @@ pub enum WalOperation {
         path: String,
         inode: InodeId,
     },
-    PatchBlock {
+    PatchData {
         inode: InodeId,
-        block_index: usize,
-        block_offset: usize,
+        data_offset: u64,
+        inode_offset: usize,
         bytes: Vec<u8>,
         final_len: usize,
     },
@@ -69,19 +69,24 @@ pub fn apply_operation(service: &mut CoreFsService, operation: &WalOperation) ->
                 service.create_directory_with_inode(path, *inode)?;
             }
         }
-        WalOperation::PatchBlock {
+        WalOperation::PatchData {
             inode,
-            block_index,
-            block_offset,
+            data_offset,
+            inode_offset,
             bytes,
             final_len,
         } => {
             let Some(path) = service.path_for_inode(*inode) else {
                 return Ok(());
             };
-            let absolute_offset = block_index
-                .saturating_mul(service.block_size())
-                .saturating_add(*block_offset);
+            let absolute_offset = service
+                .data_layout_for_inode(*inode)
+                .and_then(|layout| {
+                    data_offset
+                        .checked_sub(layout.data_offset)
+                        .map(|relative| relative as usize)
+                })
+                .unwrap_or(*inode_offset);
             if service.get_inode(&path).is_none() {
                 let mut payload = Vec::new();
                 payload.resize(*final_len, 0);
@@ -152,10 +157,10 @@ mod tests {
                     path: "/data/hello.txt".to_string(),
                     inode: InodeId(2),
                 },
-                WalOperation::PatchBlock {
+                WalOperation::PatchData {
                     inode: InodeId(2),
-                    block_index: 0,
-                    block_offset: 0,
+                    data_offset: 0,
+                    inode_offset: 0,
                     bytes: b"hello".to_vec(),
                     final_len: 5,
                 },
@@ -188,10 +193,10 @@ mod tests {
 
         apply_operation(
             &mut service,
-            &WalOperation::PatchBlock {
+            &WalOperation::PatchData {
                 inode,
-                block_index: 0,
-                block_offset: 2,
+                data_offset: 2,
+                inode_offset: 2,
                 bytes: b"XYZ".to_vec(),
                 final_len: 8,
             },
@@ -199,10 +204,7 @@ mod tests {
         .expect("patch should apply");
         apply_operation(
             &mut service,
-            &WalOperation::TruncateInode {
-                inode,
-                size: 6,
-            },
+            &WalOperation::TruncateInode { inode, size: 6 },
         )
         .expect("truncate should apply");
 

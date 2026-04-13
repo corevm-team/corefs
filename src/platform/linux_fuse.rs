@@ -582,30 +582,25 @@ impl CoreFsFuseMountRw {
         self.service.save_image_to_path(&self.image_path)
     }
 
-    fn record_block_patch(
+    fn record_data_patch(
         &mut self,
         inode: InodeId,
         start: usize,
         bytes: &[u8],
         final_len: usize,
     ) -> CoreFsResult<()> {
-        let block_size = self.service.block_size().max(1);
-        let mut consumed = 0usize;
-
-        while consumed < bytes.len() {
-            let absolute_offset = start + consumed;
-            let block_index = absolute_offset / block_size;
-            let block_offset = absolute_offset % block_size;
-            let chunk_len = (block_size - block_offset).min(bytes.len() - consumed);
-            self.record_wal_operation(WalOperation::PatchBlock {
-                inode,
-                block_index,
-                block_offset,
-                bytes: bytes[consumed..consumed + chunk_len].to_vec(),
-                final_len,
-            })?;
-            consumed += chunk_len;
-        }
+        let data_offset = self
+            .service
+            .data_layout_for_inode(inode)
+            .map(|layout| layout.data_offset.saturating_add(start as u64))
+            .unwrap_or(start as u64);
+        self.record_wal_operation(WalOperation::PatchData {
+            inode,
+            data_offset,
+            inode_offset: start,
+            bytes: bytes.to_vec(),
+            final_len,
+        })?;
 
         Ok(())
     }
@@ -820,7 +815,7 @@ impl Filesystem for CoreFsFuseMountRw {
             return;
         }
         if self
-            .record_block_patch(inode_id, start, data, buf.len())
+            .record_data_patch(inode_id, start, data, buf.len())
             .is_err()
         {
             reply.error(EIO);
@@ -1634,10 +1629,10 @@ mod tests {
             .write_file("/hello.txt", b"updated")
             .expect("write");
         mount
-            .record_wal_operation(WalOperation::PatchBlock {
+            .record_wal_operation(WalOperation::PatchData {
                 inode: mount.service.inode_for_path("/hello.txt").expect("inode"),
-                block_index: 0,
-                block_offset: 0,
+                data_offset: 0,
+                inode_offset: 0,
                 bytes: b"updated".to_vec(),
                 final_len: 7,
             })
