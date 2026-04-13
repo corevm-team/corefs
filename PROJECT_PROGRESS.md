@@ -110,7 +110,7 @@
 Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten, aber noch nicht als vollständige reale Implementierung vorhanden:
 
 - produktionsnahes blockorientiertes On-Disk-Format
-- echter Blockdevice-Zugriff
+- echter Blockdevice-Zugriff (`BlockDevice`-Trait, `RawDevice`-Implementierung, `mkfs /dev/sdX1`, On-Demand Sektor-I/O, TRIM/Discard) — siehe Phase 1b
 - persistentes physisch device-blockadressiertes Write-Ahead-Log direkt im Volume statt des aktuellen extent-orientierten Pending-WAL
 - Deduplizierung
 - Self-Healing mit Redundanzquellen
@@ -199,6 +199,20 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 - die aktuellen binären Segment-Frames schrittweise in ein noch stärker blockorientiertes und spezialisierteres On-Disk-Format überführen
 - die Defragmentierungs- und Allocator-Schicht um intelligentere Reallocation-Policies, Hintergrund-Compaction und spaeter Copy-on-Write-orientierte Extent-Moves weiterentwickeln
 - Performance-Baseline für zukünftige Persistenzumstellungen fortlaufend protokollieren
+
+### Phase 1b: Block-Device I/O (USB-Stick, Partition, Raw Device)
+
+Ziel: CoreFS direkt auf einem Blockgerät (`/dev/sdX1`) formatieren und via FUSE mounten — ohne Umweg über eine `.img`-Datei auf einem Fremddateisystem.
+
+- **`BlockDevice`-Trait** definieren: `trait BlockDevice { fn read_sectors(...); fn write_sectors(...); fn capacity(); fn sector_size(); fn sync(); }` mit zwei Implementierungen:
+  - `FileImage` — bestehende `.img`-Persistenz (Refactoring aus `volume_image.rs`)
+  - `RawDevice` — `open("/dev/sdX1", O_RDWR | O_DIRECT)` mit `ioctl(BLKGETSIZE64)` für Kapazität und `ioctl(BLKBSZGET)` für Sektorausrichtung
+- **`mkfs /dev/sdX1`** als CLI-Kommando: Superblocks, Segmenttabelle, Root-Inode und leeres Journal direkt auf das Gerät schreiben; Sicherheitsabfrage vor destruktiver Operation; Partitionserkennung zur Vermeidung von Ganz-Disk-Formatierung
+- **On-Demand Sektor-I/O** im Storage-Layer: nicht das gesamte Volume in den RAM laden, sondern sektorweise lesen/schreiben über den `BlockDevice`-Trait; Read-Cache und Write-Buffer für Performance
+- **Device-Journal**: Write-Ahead-Log in reservierten Sektoren auf dem Gerät selbst statt temp-file+rename; Barrier-Semantik über `fdatasync()` / `ioctl(BLKFLSBUF)` für Crash-Safety
+- **FUSE-Mount auf Blockgerät**: `mount /dev/sdX1 /mnt/usb` statt `mount-image foo.img /mnt`; Kapazitätsmeldung aus echtem Gerät statt Hardcoded-Wert; Write-Back direkt auf Sektoren
+- **TRIM/Discard**: `ioctl(BLKDISCARD)` für freigegebene Extents auf SSD-/Flash-basierten Geräten (optional, hinter Feature-Flag)
+- **Permissions und Safety**: Root-/Capability-Prüfung vor Device-Zugriff; Refuse bei gemounteten Geräten; Warnung bei Ganz-Disk-Devices ohne Partitionstabelle
 
 ### Phase 2: Systemkern
 
