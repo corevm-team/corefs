@@ -1,4 +1,4 @@
-use crate::domain::inode::{Inode, InodeId};
+use crate::domain::inode::{Inode, InodeId, InodeKind};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Default)]
@@ -46,6 +46,19 @@ impl Catalog {
 
     pub fn inode_by_id(&self, inode_id: InodeId) -> Option<&Inode> {
         self.entries.values().find(|inode| inode.id == inode_id)
+    }
+
+    /// Returns `(file_count, total_bytes)` for all non-directory entries without cloning.
+    pub fn quota_stats(&self) -> (usize, usize) {
+        let mut files = 0usize;
+        let mut bytes = 0usize;
+        for inode in self.entries.values() {
+            if inode.kind != InodeKind::Directory {
+                files += 1;
+                bytes += inode.size;
+            }
+        }
+        (files, bytes)
     }
 
     pub fn active_entries(&self) -> Vec<Inode> {

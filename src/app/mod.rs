@@ -11,6 +11,8 @@ use crate::services::hot_paths::{HotPathRecord, HotPathService};
 use crate::services::indexing::IndexingService;
 use crate::services::integrity::{IntegrityReport, IntegrityService};
 use crate::services::journal::{JournalRecoverySummary, JournalRuntimeState, JournalService};
+use crate::services::compression::CompressionService;
+use crate::services::quota::QuotaService;
 use crate::services::recovery::RecoveryService;
 use crate::services::security::SecurityService;
 use crate::services::sync::SyncService;
@@ -87,6 +89,8 @@ pub struct CoreFsService {
     blocks: BlockStore,
     journal: JournalService,
     versioning: VersioningService,
+    compression: CompressionService,
+    quota: QuotaService,
     recovery: RecoveryService,
     integrity: IntegrityService,
     indexing: IndexingService,
@@ -114,6 +118,8 @@ impl CoreFsService {
             blocks: BlockStore::with_block_size(block_size),
             journal,
             versioning: VersioningService::default(),
+            compression: CompressionService,
+            quota: QuotaService,
             recovery: RecoveryService::default(),
             integrity: IntegrityService,
             indexing: IndexingService,
@@ -146,6 +152,16 @@ impl CoreFsService {
             )));
         }
 
+        // Enforce quota before allocating anything.
+        let (cur_files, cur_bytes) = self.catalog.quota_stats();
+        self.quota.check_stats(
+            &self.config.quotas,
+            cur_files,
+            cur_bytes,
+            1,
+            bytes.len() as isize,
+        )?;
+
         self.allocator.allocate_specific(inode_id);
         let mut metadata = FileMetadata::default();
         metadata.tags = tags.to_vec();
@@ -156,14 +172,33 @@ impl CoreFsService {
         metadata.compressed = self.config.performance.compression_enabled;
         metadata.acl = vec![AclEntry::full_access(Principal::Role("system".to_string()))];
 
-        let mut inode = Inode::new(inode_id, InodeKind::File, path.to_string(), metadata);
-        inode.size = self.blocks.write(inode_id, bytes.to_vec());
+        // Determine whether to compress and prepare the bytes to store.
+        let compress = self.config.performance.compression_enabled
+            && self.compression.should_compress(bytes);
+        metadata.compressed = compress;
 
+        let mut inode = Inode::new(inode_id, InodeKind::File, path.to_string(), metadata);
+
+        // Store version before compression (versions hold original uncompressed content).
         if self.config.versioning.keep_latest > 0 {
             self.versioning.store_version(path, bytes.to_vec());
             self.versioning
                 .prune(path, self.config.versioning.keep_latest);
+            if let Some(budget) = self.config.versioning.max_version_bytes {
+                if self.versioning.total_bytes() > budget {
+                    self.versioning.prune_to_budget(budget);
+                }
+            }
         }
+
+        // Write block: compress if applicable; inode.size always tracks logical size.
+        let stored_bytes = if compress {
+            self.compression.compress(bytes)?
+        } else {
+            bytes.to_vec()
+        };
+        self.blocks.write(inode_id, stored_bytes);
+        inode.size = bytes.len(); // logical (uncompressed) size
 
         self.catalog.insert(inode);
         self.hot_paths.record_write(path, bytes.len());
@@ -239,12 +274,45 @@ impl CoreFsService {
             )));
         }
 
-        inode.modified_at = SystemTime::now();
-        inode.size = self.blocks.write(inode.id, bytes.to_vec());
-        self.hot_paths.record_write(path, bytes.len());
+        // Enforce quota: byte delta = new_size - old_size (may be negative for shrinks).
+        let byte_delta = bytes.len() as isize - inode.size as isize;
+        if byte_delta > 0 {
+            let (cur_files, cur_bytes) = self.catalog.quota_stats();
+            self.quota.check_stats(
+                &self.config.quotas,
+                cur_files,
+                cur_bytes,
+                0,
+                byte_delta,
+            )?;
+        }
+
+        // Store version before compression (versions hold original content).
         self.versioning.store_version(path, bytes.to_vec());
         self.versioning
             .prune(path, self.config.versioning.keep_latest);
+        if let Some(budget) = self.config.versioning.max_version_bytes {
+            if self.versioning.total_bytes() > budget {
+                self.versioning.prune_to_budget(budget);
+            }
+        }
+
+        // Compress if enabled; inode.size always tracks logical (uncompressed) size.
+        let compress = self.config.performance.compression_enabled
+            && self.compression.should_compress(bytes);
+        let stored_bytes = if compress {
+            self.compression.compress(bytes)?
+        } else {
+            bytes.to_vec()
+        };
+
+        let inode = self.catalog.get_mut(path).expect("path still exists");
+        inode.modified_at = SystemTime::now();
+        inode.metadata.compressed = compress;
+        inode.size = bytes.len(); // logical size
+        let inode_id = inode.id;
+        self.blocks.write(inode_id, stored_bytes);
+        self.hot_paths.record_write(path, bytes.len());
         self.journal
             .record("write_file", path, format!("bytes={}", bytes.len()));
         self.auto_optimize_storage("write_file");
@@ -257,19 +325,41 @@ impl CoreFsService {
     /// blob is exclusively owned.  Callers must ensure sequential append semantics; for
     /// random writes use `write_file` instead.
     pub fn extend_file(&mut self, path: &str, extra: &[u8]) -> CoreFsResult<()> {
-        let inode = self
-            .catalog
-            .get_mut(path)
-            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+        // Phase 1: gather what we need before any mutation.
+        let (inode_id, inode_kind, was_compressed) = {
+            let inode = self
+                .catalog
+                .get(path)
+                .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+            (inode.id, inode.kind, inode.metadata.compressed)
+        };
 
-        if inode.kind != InodeKind::File {
+        if inode_kind != InodeKind::File {
             return Err(CoreFsError::InvalidInput(format!(
                 "extend is only supported for files: {path}"
             )));
         }
 
+        // Phase 2: if the block was previously compressed, decompress and rewrite
+        // it as raw bytes before appending — mixing compressed and raw data is invalid.
+        if was_compressed {
+            let record = self
+                .blocks
+                .read(inode_id)
+                .ok_or_else(|| CoreFsError::State(format!("missing data blocks for {path}")))?;
+            let decompressed = self.compression.decompress(&record.bytes)?;
+            self.blocks.write(inode_id, decompressed);
+            let inode = self.catalog.get_mut(path).expect("path still exists");
+            inode.metadata.compressed = false;
+        }
+
+        // Phase 3: append the new bytes (always uncompressed for extend).
+        let inode = self
+            .catalog
+            .get_mut(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
         inode.modified_at = SystemTime::now();
-        inode.size = self.blocks.append_to_inode(inode.id, extra);
+        inode.size = self.blocks.append_to_inode(inode_id, extra);
         self.hot_paths.record_write(path, extra.len());
         self.journal
             .record("extend_file", path, format!("extra_bytes={}", extra.len()));
@@ -285,7 +375,11 @@ impl CoreFsService {
             .blocks
             .read(inode.id)
             .ok_or_else(|| CoreFsError::State(format!("missing data blocks for {path}")))?;
-        Ok(record.bytes.clone())
+        if inode.metadata.compressed {
+            self.compression.decompress(&record.bytes)
+        } else {
+            Ok(record.bytes.clone())
+        }
     }
 
     pub fn delete_file(&mut self, path: &str, secure: bool) -> CoreFsResult<()> {
@@ -614,6 +708,35 @@ impl CoreFsService {
             .collect()
     }
 
+    /// All snapshots in creation order.
+    pub fn snapshots(&self) -> &[Snapshot] {
+        &self.snapshots
+    }
+
+    /// Content of `path` at the latest version at or before `at`.
+    /// Returns `None` if no version exists at or before that instant.
+    pub fn version_bytes_at(&self, path: &str, at: SystemTime) -> Option<Vec<u8>> {
+        self.versioning
+            .version_at_or_before(path, at)
+            .map(|v| v.bytes.clone())
+    }
+
+    /// Content of `path` at a specific version ID.
+    pub fn version_bytes_by_id(&self, path: &str, version_id: u64) -> Option<Vec<u8>> {
+        self.versioning
+            .version_by_id(path, version_id)
+            .map(|v| v.bytes.clone())
+    }
+
+    /// `(version_id, created_at)` pairs for all versions of `path`, oldest first.
+    pub fn file_version_ids(&self, path: &str) -> Vec<(u64, SystemTime)> {
+        self.versioning
+            .list_versions(path)
+            .iter()
+            .map(|v| (v.version_id, v.created_at))
+            .collect()
+    }
+
     pub fn volume_name(&self) -> &str {
         &self.volume.name
     }
@@ -719,6 +842,8 @@ impl CoreFsService {
                 state.journal_runtime,
             ),
             versioning: VersioningService::from_versions(state.versions),
+            compression: CompressionService,
+            quota: QuotaService,
             recovery,
             integrity: IntegrityService,
             indexing: IndexingService,

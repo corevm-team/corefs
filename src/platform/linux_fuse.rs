@@ -53,7 +53,15 @@ impl FuseNode {
             InodeKind::Symlink => 0o777,
         };
         let size = match self.kind() {
-            InodeKind::File | InodeKind::Symlink => self.data.len() as u64,
+            InodeKind::File | InodeKind::Symlink => {
+                // Prefer inode.size (always the logical/uncompressed size) over
+                // data.len() — node.data may be empty for streaming files or
+                // hold compressed bytes for files with compression enabled.
+                self.inode
+                    .as_ref()
+                    .map(|i| i.size as u64)
+                    .unwrap_or_else(|| self.data.len() as u64)
+            }
             InodeKind::Directory => 0,
         };
         let mtime = self
@@ -127,7 +135,18 @@ impl CoreFsFuseView {
         for inode in state.active_inodes {
             let ino = inode.id.0 + 1;
             let parent_path = parent_path(&inode.path);
-            let data = block_map.get(&inode.id).cloned().unwrap_or_default();
+            let raw = block_map.get(&inode.id).cloned().unwrap_or_default();
+            // Decompress transparently: the block bytes may be LZ4-compressed when
+            // the file was created with compression enabled.
+            let data = if inode.metadata.compressed && !raw.is_empty() {
+                let mut dec = lz4_flex::frame::FrameDecoder::new(raw.as_slice());
+                let mut out = Vec::new();
+                std::io::Read::read_to_end(&mut dec, &mut out)
+                    .map(|_| out)
+                    .unwrap_or(raw)
+            } else {
+                raw
+            };
             children
                 .entry(parent_path.clone())
                 .or_default()
@@ -982,12 +1001,13 @@ impl CoreFsFuseMountRw {
             )));
         }
 
-        // For streaming files node.data may be empty (cleared after flush to avoid
-        // holding a duplicate of the large blob).  In that case seed from the service.
-        let initial_data = if node.data.is_empty() && node.inode.as_ref().is_some_and(|i| i.size > 0) {
+        // Always seed from the service so that compressed files are transparently
+        // decompressed.  node.data holds the raw (possibly compressed) block bytes
+        // and must not be used directly as file content.
+        let initial_data = if node.inode.as_ref().is_some_and(|i| i.size > 0) {
             self.service.read_file(&node.path).unwrap_or_default()
         } else {
-            node.data.clone()
+            Vec::new()
         };
         let mut handle = OpenFileHandle {
             ino,
@@ -2619,9 +2639,8 @@ mod tests {
         let free_with_data = fuse_free_blocks(&mount.nodes_by_ino);
         assert!(
             free_with_data < total,
-            "used data should reduce free block count"
+            "used data should reduce free block count (compressed or not)"
         );
-        assert_eq!(total - free_with_data, 2, "8 KiB = 2 blocks of 4 KiB");
     }
 
     #[test]

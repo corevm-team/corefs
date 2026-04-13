@@ -1,3 +1,4 @@
+pub mod compression;
 pub mod hot_paths;
 pub mod indexing;
 pub mod integrity;

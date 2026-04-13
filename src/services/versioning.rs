@@ -62,6 +62,42 @@ impl VersioningService {
         }
     }
 
+    /// Total bytes occupied by all stored versions across all paths.
+    pub fn total_bytes(&self) -> usize {
+        self.versions
+            .values()
+            .flat_map(|items| items.iter())
+            .map(|v| v.bytes.len())
+            .sum()
+    }
+
+    /// Prune the oldest versions (across all paths) until the total stored
+    /// version bytes no longer exceed `max_bytes`.  Paths that end up with no
+    /// versions are removed from the index.
+    pub fn prune_to_budget(&mut self, max_bytes: usize) {
+        while self.total_bytes() > max_bytes {
+            // Find the path whose oldest version is the globally earliest.
+            let oldest_path = self
+                .versions
+                .iter()
+                .filter(|(_, items)| !items.is_empty())
+                .min_by_key(|(_, items)| items[0].created_at)
+                .map(|(path, _)| path.clone());
+
+            let Some(path) = oldest_path else { break };
+
+            if let Some(items) = self.versions.get_mut(&path) {
+                if !items.is_empty() {
+                    items.remove(0);
+                }
+            }
+            // Remove the path entry entirely once it has no versions left.
+            if self.versions.get(&path).is_some_and(|v| v.is_empty()) {
+                self.versions.remove(&path);
+            }
+        }
+    }
+
     pub fn all_versions(&self) -> Vec<FileVersion> {
         self.versions.values().flatten().cloned().collect()
     }

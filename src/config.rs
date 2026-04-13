@@ -12,6 +12,11 @@ pub struct VersioningPolicy {
     pub keep_latest: usize,
     pub auto_prune: bool,
     pub expose_time_travel: bool,
+    /// Maximum total bytes that all stored versions may occupy.
+    /// When this limit is exceeded after a write, the oldest versions across
+    /// all paths are pruned until the total drops back below the threshold.
+    /// `None` disables byte-budget pruning (count-based `keep_latest` still applies).
+    pub max_version_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +64,7 @@ impl Default for CoreFsConfig {
                 keep_latest: 16,
                 auto_prune: true,
                 expose_time_travel: true,
+                max_version_bytes: Some(64 * 1024 * 1024), // 64 MiB default budget
             },
             security: SecurityPolicy {
                 encryption_at_rest: true,

@@ -33,6 +33,38 @@ impl QuotaService {
         }
     }
 
+    /// Enforce quota using pre-computed stats (from `Catalog::quota_stats`).
+    /// Avoids cloning all inodes; preferred over `enforce_delta` for hot paths.
+    pub fn check_stats(
+        &self,
+        policy: &QuotaPolicy,
+        current_files: usize,
+        current_bytes: usize,
+        file_delta: isize,
+        byte_delta: isize,
+    ) -> CoreFsResult<()> {
+        let projected_files = apply_delta(current_files, file_delta)?;
+        let projected_bytes = apply_delta(current_bytes, byte_delta)?;
+
+        if let Some(limit) = policy.max_files
+            && projected_files > limit
+        {
+            return Err(CoreFsError::PolicyViolation(format!(
+                "quota exceeded: projected files {projected_files} > limit {limit}"
+            )));
+        }
+
+        if let Some(limit) = policy.max_bytes
+            && projected_bytes > limit
+        {
+            return Err(CoreFsError::PolicyViolation(format!(
+                "quota exceeded: projected bytes {projected_bytes} > limit {limit}"
+            )));
+        }
+
+        Ok(())
+    }
+
     pub fn enforce_delta(
         &self,
         policy: &QuotaPolicy,
