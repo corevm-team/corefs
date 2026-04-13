@@ -6,7 +6,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
-use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EROFS};
+use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOTDIR, ENOTEMPTY, EROFS};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -551,10 +551,12 @@ impl CoreFsFuseMountRw {
         }
     }
 
-    /// Save the volume image to disk. Returns true on success.
-    fn persist(&mut self) -> bool {
+    /// Save the volume image to disk.
+    fn persist(&mut self) -> CoreFsResult<()> {
         if self.flush_dirty_open_files().is_err() {
-            return false;
+            return Err(CoreFsError::State(
+                "failed to flush dirty Linux FUSE write cache".to_string(),
+            ));
         }
         self.service.commit_write_transaction();
         self.service.mark_clean_shutdown();
@@ -562,11 +564,11 @@ impl CoreFsFuseMountRw {
             Ok(()) => {
                 self.pending_wal = None;
                 self.dirty = false;
-                true
+                Ok(())
             }
-            Err(_) => {
+            Err(error) => {
                 self.service.mark_unclean_shutdown();
-                false
+                Err(error)
             }
         }
     }
@@ -780,6 +782,10 @@ impl CoreFsFuseMountRw {
         self.flush_file_handle(fh)?;
         self.open_files.remove(&fh);
         Ok(())
+    }
+
+    fn statfs_view(&self) -> (u64, u64) {
+        fuse_capacity_blocks(&self.image_path, &self.nodes_by_ino)
     }
 }
 
@@ -1220,10 +1226,11 @@ impl Filesystem for CoreFsFuseMountRw {
     }
 
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
+        let (total_blocks, free_blocks) = self.statfs_view();
         reply.statfs(
-            fuse_total_blocks(),
-            fuse_free_blocks(&self.nodes_by_ino),
-            fuse_free_blocks(&self.nodes_by_ino),
+            total_blocks,
+            free_blocks,
+            free_blocks,
             self.nodes_by_ino.len() as u64,
             fuse_free_inodes(self.nodes_by_ino.len()),
             FUSE_BLOCK_SIZE,
@@ -1244,8 +1251,11 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EIO);
             return;
         }
-        if (self.dirty || self.service.had_unclean_shutdown()) && !self.persist() {
-            reply.error(EIO);
+        if self.dirty || self.service.had_unclean_shutdown() {
+            match self.persist() {
+                Ok(()) => reply.ok(),
+                Err(error) => reply.error(persist_errno(&error)),
+            }
         } else {
             reply.ok();
         }
@@ -1263,10 +1273,9 @@ impl Filesystem for CoreFsFuseMountRw {
             reply.error(EIO);
             return;
         }
-        if self.persist() {
-            reply.ok();
-        } else {
-            reply.error(EIO);
+        match self.persist() {
+            Ok(()) => reply.ok(),
+            Err(error) => reply.error(persist_errno(&error)),
         }
     }
 
@@ -1365,6 +1374,55 @@ fn fuse_free_blocks(nodes: &HashMap<u64, FuseNode>) -> u64 {
 /// Estimate free inode slots against the same virtual capacity.
 fn fuse_free_inodes(active: usize) -> u64 {
     FUSE_TOTAL_BLOCKS.saturating_sub(active as u64)
+}
+
+fn fuse_capacity_blocks(image_path: &Path, nodes: &HashMap<u64, FuseNode>) -> (u64, u64) {
+    let used_bytes: u64 = nodes.values().map(|n| n.data.len() as u64).sum();
+    let used_blocks = used_bytes.div_ceil(FUSE_BLOCK_SIZE as u64);
+    let fallback_free = FUSE_TOTAL_BLOCKS.saturating_sub(used_blocks);
+
+    let Some(backing_free_bytes) = backing_store_free_bytes(image_path) else {
+        return (FUSE_TOTAL_BLOCKS, fallback_free);
+    };
+    let current_image_size = std::fs::metadata(image_path).map(|meta| meta.len()).unwrap_or(0);
+
+    // We persist atomically via sibling tmp file + rename, so growth is limited
+    // by free host space minus the current on-disk image footprint.
+    let writable_growth_bytes = backing_free_bytes.saturating_sub(current_image_size);
+    let writable_growth_blocks = writable_growth_bytes / FUSE_BLOCK_SIZE as u64;
+    let total_blocks = used_blocks
+        .saturating_add(writable_growth_blocks)
+        .min(FUSE_TOTAL_BLOCKS);
+    let free_blocks = total_blocks.saturating_sub(used_blocks);
+
+    (total_blocks, free_blocks)
+}
+
+fn backing_store_free_bytes(image_path: &Path) -> Option<u64> {
+    let probe = if image_path.exists() {
+        image_path
+    } else {
+        image_path.parent().unwrap_or_else(|| Path::new("."))
+    };
+    let c_path = std::ffi::CString::new(probe.as_os_str().as_encoded_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if rc != 0 {
+        return None;
+    }
+    Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+}
+
+fn persist_errno(error: &CoreFsError) -> i32 {
+    if error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("no space left on device")
+    {
+        ENOSPC
+    } else {
+        EIO
+    }
 }
 
 fn demo_fs() -> CoreFsResult<CoreFsService> {
@@ -1765,7 +1823,7 @@ mod tests {
         let mut mount = CoreFsFuseMountRw::from_service(fs, path.clone());
         mount.dirty = true;
 
-        assert!(mount.persist());
+        assert!(mount.persist().is_ok());
         assert!(!mount.dirty);
 
         // reload and verify content survived
@@ -1802,7 +1860,7 @@ mod tests {
             "load recovers runtime state"
         );
 
-        assert!(mount.persist());
+        assert!(mount.persist().is_ok());
         let clean_loaded = CoreFsService::load_image_from_path(&path).expect("clean reload");
         assert!(!clean_loaded.had_unclean_shutdown());
 

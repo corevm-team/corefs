@@ -37,6 +37,7 @@
 - spezialisierte Binärlayouts für Inode-, Journal- und Snapshot-Segmente innerhalb des Volume-Images
 - Linux-Testadapter über FUSE zum read-only und read-write Mounten von `.img`-Dateien
 - Linux-FUSE-Read-/Write-Caching auf File-Handle-Ebene mit Write-Back-Flush und Read-Serving aus dem Open-Handle-Cache
+- backing-store-aware `statfs`-Kapazitaetsmeldung fuer Linux-FUSE und sauberere `ENOSPC`-Rueckgabe bei Platzmangel im `.img`-Persistenzpfad
 - Erzeugen von Dateien, Verzeichnissen und symbolischen Links
 - Lesen und Schreiben von Dateiinhalten
 - Journaling von Operationen

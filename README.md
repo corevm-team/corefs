@@ -86,6 +86,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Lesen und Schreiben von Inhalten
 - Linux-FUSE-Adapter mit `.img`-Dateien als Mount-Backend (read-only und read-write mit Writeback)
 - Linux-FUSE-Read-/Write-Caching auf File-Handle-Ebene mit Write-Back-Flush ueber `flush`/`fsync`/`release`
+- backing-store-aware `statfs`-Kapazitaetsmeldung fuer Linux-FUSE und `ENOSPC`-Rueckgabe bei Platzmangel im `.img`-Persistenzpfad
 - Journaling von Operationen
 - transaktionales Journal mit `tx_begin`/`tx_commit`/`tx_abort`, Pending-Transaktionen und Recovery-Markern
 - persistente physische Volume-Allokation pro Dateiinhalt mit stabilen `device_block`-/`allocated_blocks`-Metadaten im Volume-Image
