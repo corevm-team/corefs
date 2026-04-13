@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `119/119` Tests erfolgreich  
+**Test-Status:** `129/129` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -38,7 +38,7 @@
 - Linux-Testadapter über FUSE zum read-only und read-write Mounten von `.img`-Dateien
 - Linux-FUSE-Read-/Write-Caching auf File-Handle-Ebene mit Write-Back-Flush und Read-Serving aus dem Open-Handle-Cache
 - backing-store-aware `statfs`-Kapazitaetsmeldung fuer Linux-FUSE und sauberere `ENOSPC`-Rueckgabe bei Platzmangel im `.img`-Persistenzpfad
-- treibernahe Linux-FUSE-Tests fuer Open/Truncate, Read-Cache, Write-Back-Flush, Release und Persistenzverhalten
+- treibernahe Linux-FUSE-Tests fuer Open/Truncate, Read-Cache, Write-Back-Flush, Release, Persistenzverhalten, Snapshot-Overlays und Time-Travel-Parsing
 - Fix fuer neu angelegte Dateien im Linux-FUSE-RW-Pfad: `create` liefert jetzt sofort einen gueltigen Write-Back-Handle fuer nachfolgende Schreibzugriffe
 - Linux-End-to-End-Testskript fuer `mkfs-image`, RW-Mount, Shell-Dateioperationen, optionalen `unzip`-Workload, Umount und Read-only-Revalidierung
 - Erzeugen von Dateien, Verzeichnissen und symbolischen Links
@@ -69,6 +69,10 @@
 - synthetischer Performance-Benchmark für Datei-, Snapshot- und Persistenzpfade
 - Markdown-Protokollierung von Benchmark-Ergebnissen
 - konfigurierbare Benchmark-Profile für unterschiedliche Lastbilder
+- Streaming-Writes im Linux-FUSE-RW-Mount: sequenzielle Schreibzugriffe ab 32 MiB werden als Zwischenflushes an den Service delegiert statt vollständig im RAM gebuffert, wodurch der Peak-Speicherbedarf auf `O(Threshold)` statt `O(Dateigrösse)` begrenzt wird
+- FUSE-Schreibdurchsatz-Optimierungen: `FUSE_WRITEBACK_CACHE` (Kernel-seitiges Schreib-Batching) und `max_write = 1 MiB` (weniger Kernel↔Daemon-Roundtrips), O(n²)-Klon-Bug in `write_to_handle` behoben (vorher: `node.data.clone()` bei jedem Write-Call)
+- WAL-Vereinfachung für Dateidaten: `PatchExtent`-Records werden nicht mehr pro Flush geschrieben, da der atomare Image-Save (write→rename) hinreichende Crash-Safety bietet; strukturelle Ops (CreateFile, TruncateInode etc.) bleiben vollständig WAL-geschützt
+- inkrementelle Prüfsummenfortschreibung in `BlockStore::append_to_inode`: `O(extra.len())` statt `O(gesamt)`, Rekey der Blob-Map nach Checksum-Änderung
 
 ### Plattform- und Integrationsmodell
 
@@ -77,6 +81,7 @@
 - Tool-Registry für `mkfs`, `fsck` und Administration
 - Tool-Registry für Benchmarking
 - Linux-FUSE-Mountpfad für Image-basierte Integrationstests inklusive RW-Writeback und Dirty/Clean-Session-Markierung
+- virtuelle Read-only-Overlays im Linux-FUSE-RW-Mount: `.snapshots/<id>-<name>/` für Snapshot-Browsing und `file@<spec>` für Time-Travel-Adressierung
 
 ### Qualitätssicherung
 
@@ -101,8 +106,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - Hot/Cold-Storage und Tiering-Strategien
 - echte Kompression und echte Verschlüsselung
 - Quota-Durchsetzung
-- Time-Travel-Adressierung
-- automatische Versionenbereinigung bei Platzdruck
+- Time-Travel-Adressierung im FUSE-RW-Mount über `@`-Syntax ist für Lookup und Read umgesetzt; fehlt noch: Adressierung im Read-only-Mount, persistente Zugriffspfade als reale Symlinks, automatische Versionenbereinigung bei Platzdruck
 - fsck als weiter auszubauendes Reparatur- und Korrekturwerkzeug für stärker beschädigte Segmenttabellen, tiefere Blockdeskriptor-Rekonstruktion, Datensegment-Validierung und echte Datenheilung
 - native Kernel-/VFS-Integration für das eigene Betriebssystem
 - Fremdsystem-Adapter als reale Laufzeitkomponenten
@@ -162,6 +166,7 @@ Die Datei [features_corefs.md](/daten1/development/brian/corefs/features_corefs.
 - strukturelle Prüfung persistierter Volume-Images
 - Linux-Nutzung und Testbarkeit über gemountete `.img`-Dateien
 - profilbasierte Performance-Messung mit variablen Parametern
+- Snapshot-Browsing und Time-Travel im Linux-FUSE-RW-Mount (`.snapshots/` und `@`-Syntax)
 
 Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 
@@ -205,7 +210,8 @@ Nur teilweise oder noch konzeptionell abgebildet sind aktuell:
 ## Wichtige Hinweise
 
 - Das Projekt ist aktuell ein strukturierter, getesteter Kern-, Persistenz- und Volume-Layout-Prototyp und noch kein produktionsreifes Dateisystem.
-- Der Linux-Mountpfad unterstützt inzwischen read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung, transaktionales Journal-Writeback, persistente physische Volume-Allokation, freie Extent-Wiederverwendung, ein persistentes `FREE`-Segment mit Allocator-Policy, aktive Defragmentierung und ein integriertes extent- und device-blockadressiertes Pending-WAL im Volume, ist aber noch kein vollständiges produktionsnahes Device-WAL mit Hintergrund-Compaction oder Copy-on-Write-Moves.
+- Der Linux-Mountpfad unterstützt read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung, transaktionales Journal-Writeback, persistente physische Volume-Allokation, freie Extent-Wiederverwendung, ein persistentes `FREE`-Segment mit Allocator-Policy, aktive Defragmentierung, ein integriertes extent- und device-blockadressiertes Pending-WAL im Volume sowie virtuelle Read-only-Overlays für Snapshot-Browsing (`.snapshots/`) und Time-Travel (`file@<spec>`), ist aber noch kein vollständiges produktionsnahes Device-WAL mit Hintergrund-Compaction oder Copy-on-Write-Moves.
+- Die virtuellen FUSE-Overlays belegen INO-Bereiche im oberen `u64`-Raum (ab `u64::MAX/4` abwärts für dynamische Knoten, `u64::MAX/2+1_000_000` für Snapshot-Root-Dirs, `u64::MAX-1` für `.snapshots/`) und sind vollständig write-protected (EROFS bei jeder Mutation).
 - Performance-Messungen werden jetzt über `benchmark` und `benchmark-log` reproduzierbar ausführbar.
 - Die vorhandene Testsuite ist stark für die aktuelle In-Memory-Implementierung, aber keine Garantie für `100%` messbare Coverage, da in der Umgebung keine Coverage-Tools installiert sind.
 - `.codex` ist inzwischen als projektinterne Vorgabedatei befüllt.
