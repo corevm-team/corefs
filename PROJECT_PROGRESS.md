@@ -40,6 +40,7 @@
 - backing-store-aware `statfs`-Kapazitaetsmeldung fuer Linux-FUSE und sauberere `ENOSPC`-Rueckgabe bei Platzmangel im `.img`-Persistenzpfad
 - treibernahe Linux-FUSE-Tests fuer Open/Truncate, Read-Cache, Write-Back-Flush, Release und Persistenzverhalten
 - Fix fuer neu angelegte Dateien im Linux-FUSE-RW-Pfad: `create` liefert jetzt sofort einen gueltigen Write-Back-Handle fuer nachfolgende Schreibzugriffe
+- Linux-End-to-End-Testskript fuer `mkfs-image`, RW-Mount, Shell-Dateioperationen, optionalen `unzip`-Workload, Umount und Read-only-Revalidierung
 - Erzeugen von Dateien, Verzeichnissen und symbolischen Links
 - Lesen und Schreiben von Dateiinhalten
 - Journaling von Operationen

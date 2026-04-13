@@ -89,6 +89,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - backing-store-aware `statfs`-Kapazitaetsmeldung fuer Linux-FUSE und `ENOSPC`-Rueckgabe bei Platzmangel im `.img`-Persistenzpfad
 - treibernahe Linux-FUSE-Tests fuer Handle-Open, Truncate, Read-Cache, Write-Back-Flush, Release und Persistenzpfade
 - Fix fuer neu angelegte Dateien im Linux-FUSE-RW-Pfad: `create` liefert jetzt sofort einen gueltigen Write-Back-Handle fuer anschliessende `write()`-Aufrufe
+- Linux-End-to-End-Testskript fuer `mkfs-image`, RW-Mount, Shell-Dateioperationen, optionalen `unzip`-Workload, Umount und Read-only-Revalidierung
 - Journaling von Operationen
 - transaktionales Journal mit `tx_begin`/`tx_commit`/`tx_abort`, Pending-Transaktionen und Recovery-Markern
 - persistente physische Volume-Allokation pro Dateiinhalt mit stabilen `device_block`-/`allocated_blocks`-Metadaten im Volume-Image
@@ -238,6 +239,18 @@ Benchmark protokollieren:
 
 ```bash
 cargo run -- benchmark-log ./PERFORMANCE_LOG.md
+```
+
+Linux-FUSE-End-to-End-Testskript:
+
+```bash
+./scripts/corefs-e2e-linux-rw.sh
+```
+
+Optional mit ZIP-Workload:
+
+```bash
+./scripts/corefs-e2e-linux-rw.sh ./scripts/corefs-e2e.img ./scripts/mnt/corefs-e2e /pfad/zu/test.zip
 ```
 
 Verfuegbare Profile:
