@@ -322,6 +322,7 @@ where
             })?;
             #[cfg(target_os = "linux")]
             {
+                crate::storage::block_device::raw::check_device_permissions(device_path)?;
                 let info = crate::storage::block_device::raw::probe_device(device_path)?;
                 if !info.is_safe_to_format() {
                     for blocker in info.format_blockers() {
@@ -364,6 +365,7 @@ where
             })?;
             #[cfg(target_os = "linux")]
             {
+                crate::storage::block_device::raw::check_device_permissions(device_path)?;
                 let device =
                     crate::storage::block_device::raw::RawBlockDevice::open(device_path, false)?;
                 linux_fuse::mount_device_rw(Box::new(device), mount_point)?;

@@ -391,6 +391,51 @@ pub mod raw {
         }
     }
 
+    /// Checks whether the current process has the permissions needed
+    /// to open a block device for read-write access.
+    ///
+    /// Returns `Ok(())` if access is likely possible, or a descriptive
+    /// error explaining what is missing (not root, no capability, no
+    /// write permission on the device node).
+    pub fn check_device_permissions(path: impl AsRef<Path>) -> CoreFsResult<()> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Err(CoreFsError::NotFound(format!(
+                "device not found: {}",
+                path.display()
+            )));
+        }
+
+        // Check if running as root (euid == 0).
+        let euid = unsafe { libc::geteuid() };
+        if euid == 0 {
+            return Ok(());
+        }
+
+        // Not root — check if the device node is writable by the current user.
+        let result = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path);
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                Err(CoreFsError::PolicyViolation(format!(
+                    "permission denied: {} — block device access requires root \
+                     or write permission on the device node.\n\
+                     Try: sudo corefs <command> {}",
+                    path.display(),
+                    path.display()
+                )))
+            }
+            Err(e) => Err(CoreFsError::State(format!(
+                "cannot open {}: {e}",
+                path.display()
+            ))),
+        }
+    }
+
     /// Probes a block device and returns safety-relevant metadata.
     ///
     /// This does **not** open the device for writing — it only reads

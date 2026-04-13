@@ -448,10 +448,25 @@ struct VirtFile {
     modified_at: SystemTime,
 }
 
+/// Backing store for the FUSE RW mount: either a file path or a block device.
+enum FuseBacking {
+    File(PathBuf),
+    Device(Box<dyn crate::storage::block_device::BlockDevice>),
+}
+
+impl std::fmt::Debug for FuseBacking {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::File(path) => write!(f, "File({:?})", path),
+            Self::Device(dev) => write!(f, "Device({:?})", dev.geometry()),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct CoreFsFuseMountRw {
     service: CoreFsService,
-    image_path: PathBuf,
+    backing: FuseBacking,
     pending_wal: Option<VolumeWal>,
     nodes_by_ino: HashMap<u64, FuseNode>,
     ino_by_path: HashMap<String, u64>,
@@ -545,10 +560,10 @@ fn days_since_epoch(y: u64, m: u64, d: u64) -> Option<u64> {
 }
 
 impl CoreFsFuseMountRw {
-    fn from_service(service: CoreFsService, image_path: PathBuf) -> Self {
+    fn from_service(service: CoreFsService, backing: FuseBacking) -> Self {
         let mut mount = Self {
             service,
-            image_path,
+            backing,
             pending_wal: None,
             nodes_by_ino: HashMap::new(),
             ino_by_path: HashMap::new(),
@@ -569,7 +584,25 @@ impl CoreFsFuseMountRw {
         let mut service = CoreFsService::load_image_from_path(&image_path)?;
         service.mark_unclean_shutdown();
         service.save_image_to_path(&image_path)?;
-        Ok(Self::from_service(service, image_path))
+        Ok(Self::from_service(service, FuseBacking::File(image_path)))
+    }
+
+    fn open_device_session(
+        service: CoreFsService,
+        device: Box<dyn crate::storage::block_device::BlockDevice>,
+    ) -> CoreFsResult<Self> {
+        Ok(Self::from_service(service, FuseBacking::Device(device)))
+    }
+
+    /// Persists the current service state to the backing store.
+    fn persist(&mut self) -> CoreFsResult<()> {
+        match &mut self.backing {
+            FuseBacking::File(path) => self.service.save_image_to_path(path),
+            FuseBacking::Device(dev) => {
+                let state = self.service.persisted_state();
+                crate::storage::volume_image::save_to_device(dev.as_mut(), &state)
+            }
+        }
     }
 
     // ── Virtual node helpers ─────────────────────────────────────────────────
@@ -955,8 +988,8 @@ impl CoreFsFuseMountRw {
         }
     }
 
-    /// Save the volume image to disk.
-    fn persist(&mut self) -> CoreFsResult<()> {
+    /// Flush all pending writes and save the volume to the backing store.
+    fn flush_to_backing(&mut self) -> CoreFsResult<()> {
         if self.flush_dirty_open_files().is_err() {
             return Err(CoreFsError::State(
                 "failed to flush dirty Linux FUSE write cache".to_string(),
@@ -965,7 +998,7 @@ impl CoreFsFuseMountRw {
         self.service.commit_write_transaction();
         self.service.clear_pending_wal();
         self.service.mark_clean_shutdown();
-        match self.service.save_image_to_path(&self.image_path) {
+        match self.persist() {
             Ok(()) => {
                 self.pending_wal = None;
                 self.dirty = false;
@@ -981,14 +1014,14 @@ impl CoreFsFuseMountRw {
     fn ensure_mutation_session(&mut self, label: &str) -> CoreFsResult<()> {
         if !self.service.had_unclean_shutdown() {
             self.service.mark_unclean_shutdown();
-            self.service.save_image_to_path(&self.image_path)?;
+            self.persist()?;
         }
         if !self.service.has_pending_transaction() {
             let transaction_id = self.service.begin_write_transaction(label);
             let wal = VolumeWal::new(transaction_id, label);
             self.service.set_pending_wal(wal.clone());
             self.pending_wal = Some(wal);
-            self.service.save_image_to_path(&self.image_path)?;
+            self.persist()?;
         }
         Ok(())
     }
@@ -1006,7 +1039,7 @@ impl CoreFsFuseMountRw {
 
     fn record_wal_operation_and_save(&mut self, operation: WalOperation) -> CoreFsResult<()> {
         self.record_wal_operation(operation)?;
-        self.service.save_image_to_path(&self.image_path)
+        self.persist()
     }
 
     fn open_file_handle(&mut self, ino: u64, flags: i32) -> CoreFsResult<u64> {
@@ -1247,7 +1280,7 @@ impl CoreFsFuseMountRw {
         // For non-zero writes: the data is in the service and will be committed
         // atomically by the image save; no WAL entry required.
 
-        self.service.save_image_to_path(&self.image_path)?;
+        self.persist()?;
 
         // Sync node.data once from the service so subsequent opens seed correct content.
         // For large streaming files node.data is not kept in RAM — the service blob
@@ -1286,7 +1319,16 @@ impl CoreFsFuseMountRw {
     }
 
     fn statfs_view(&self) -> (u64, u64) {
-        fuse_capacity_blocks(&self.image_path, &self.nodes_by_ino)
+        match &self.backing {
+            FuseBacking::File(path) => fuse_capacity_blocks(path, &self.nodes_by_ino),
+            FuseBacking::Device(dev) => {
+                let used_bytes: u64 = self.nodes_by_ino.values().map(|n| n.data.len() as u64).sum();
+                let used_blocks = used_bytes.div_ceil(FUSE_BLOCK_SIZE as u64);
+                let total_blocks = dev.capacity() / FUSE_BLOCK_SIZE as u64;
+                let free_blocks = total_blocks.saturating_sub(used_blocks);
+                (total_blocks, free_blocks)
+            }
+        }
     }
 }
 
@@ -2000,7 +2042,7 @@ impl Filesystem for CoreFsFuseMountRw {
 
     fn destroy(&mut self) {
         if self.dirty || self.service.had_unclean_shutdown() {
-            let _ = self.persist();
+            let _ = self.flush_to_backing();
         }
     }
 
@@ -2232,10 +2274,9 @@ pub fn mount_image_rw(
 
 /// Mounts a CoreFS volume from a [`BlockDevice`] read-write via FUSE.
 ///
-/// The device is loaded into memory, served through the existing FUSE RW
-/// infrastructure, and flushed back to the device on sync/unmount.  This
-/// reuses the proven FUSE RW stack; a future iteration may add on-demand
-/// sector I/O.
+/// The device is loaded into memory, served through the FUSE RW stack,
+/// and flushed directly back to the device on sync/unmount — no temporary
+/// image file is created.
 pub fn mount_device_rw(
     mut device: Box<dyn crate::storage::block_device::BlockDevice>,
     mount_point: impl AsRef<Path>,
@@ -2249,28 +2290,15 @@ pub fn mount_device_rw(
         crate::storage::volume_image::save_to_device(device.as_mut(), &recovered_state)?;
     }
 
-    // Write an unclean-shutdown marker to the device before mounting.
+    // Write an unclean-shutdown marker directly to the device.
     service.mark_unclean_shutdown();
     let dirty_state = service.persisted_state();
     crate::storage::volume_image::save_to_device(device.as_mut(), &dirty_state)?;
 
-    // Use a temporary image file as the FUSE backing store during the mount.
-    let tmp_dir = std::env::temp_dir();
-    let tmp_name = format!(
-        "corefs-device-mount-{}-{}.img",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
-    let tmp_path = tmp_dir.join(tmp_name);
-    service.save_image_to_path(&tmp_path)?;
-
     let fs_name = format!("corefs:{}", service.volume_name());
-    let mount = CoreFsFuseMountRw::from_service(service, tmp_path.clone());
+    let mount = CoreFsFuseMountRw::open_device_session(service, device)?;
 
-    let result = fuser::mount2(
+    fuser::mount2(
         mount,
         mount_point,
         &[
@@ -2284,17 +2312,7 @@ pub fn mount_device_rw(
             "failed to mount CoreFS device on {}: {error}",
             mount_point.display()
         ))
-    });
-
-    // After unmount: write the final state from the temp image back to the device.
-    if tmp_path.exists() {
-        if let Ok(final_state) = crate::storage::volume_image::load_volume_image(&tmp_path) {
-            let _ = crate::storage::volume_image::save_to_device(device.as_mut(), &final_state);
-        }
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-
-    result
+    })
 }
 
 /// Formats a [`BlockDevice`] with a new empty CoreFS volume.
@@ -2483,7 +2501,7 @@ mod tests {
         fs.create_directory("/docs").expect("dir");
         fs.create_file("/docs/readme.txt", b"hello", &[])
             .expect("file");
-        CoreFsFuseMountRw::from_service(fs, path)
+        CoreFsFuseMountRw::from_service(fs, FuseBacking::File(path))
     }
 
     #[test]
@@ -2794,7 +2812,7 @@ mod tests {
         // Empty mount: all blocks should be free.
         let empty = CoreFsFuseMountRw::from_service(
             CoreFsService::format(CoreFsConfig::default()),
-            PathBuf::from("/tmp/test.img"),
+            FuseBacking::File(PathBuf::from("/tmp/test.img")),
         );
         let total = fuse_total_blocks();
         let free_empty = fuse_free_blocks(&empty.nodes_by_ino);
@@ -2804,7 +2822,7 @@ mod tests {
         let mut fs = CoreFsService::format(CoreFsConfig::default());
         fs.create_file("/big.bin", &vec![0u8; 8192], &[])
             .expect("file");
-        let mount = CoreFsFuseMountRw::from_service(fs, PathBuf::from("/tmp/test.img"));
+        let mount = CoreFsFuseMountRw::from_service(fs, FuseBacking::File(PathBuf::from("/tmp/test.img")));
         let free_with_data = fuse_free_blocks(&mount.nodes_by_ino);
         assert!(
             free_with_data < total,
@@ -2851,7 +2869,7 @@ mod tests {
         fs.create_directory("/src/utils").expect("subdir");
         fs.create_file("/src/utils/helper.rs", b"//h", &[])
             .expect("file");
-        let mut mount = CoreFsFuseMountRw::from_service(fs, PathBuf::from("/tmp/test.img"));
+        let mut mount = CoreFsFuseMountRw::from_service(fs, FuseBacking::File(PathBuf::from("/tmp/test.img")));
 
         mount
             .service
@@ -2890,10 +2908,10 @@ mod tests {
         let mut fs = CoreFsService::format(CoreFsConfig::default());
         fs.create_file("/hello.txt", b"persisted", &[])
             .expect("file");
-        let mut mount = CoreFsFuseMountRw::from_service(fs, path.clone());
+        let mut mount = CoreFsFuseMountRw::from_service(fs, FuseBacking::File(path.clone()));
         mount.dirty = true;
 
-        assert!(mount.persist().is_ok());
+        assert!(mount.flush_to_backing().is_ok());
         assert!(!mount.dirty);
 
         // reload and verify content survived
@@ -3004,7 +3022,7 @@ mod tests {
         fs.create_snapshot("snap1");
         // Now write v2 so the live file differs from the snapshot.
         fs.write_file("/data/hello.txt", b"v2 content").expect("write v2");
-        CoreFsFuseMountRw::from_service(fs, path)
+        CoreFsFuseMountRw::from_service(fs, FuseBacking::File(path))
     }
 
     #[test]
