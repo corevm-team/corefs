@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `165/165` Tests erfolgreich  
+**Test-Status:** `181/181` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -86,6 +86,9 @@
 - Scoped Snapshots: `create_snapshot_scoped(name, scope_root)` erfasst nur Pfade unter `scope_root`; `create_snapshot(name)` delegiert auf `scope_root="/"`
 - Snapshot-Diff: `diff_snapshots(a_id, b_id)` klassifiziert Dateien als added/removed/modified/unchanged zwischen zwei Snapshots
 - FUSE `copy_file_range`: serverseitige Kopie zwischen zwei offenen File-Handles ohne Kernel↔Userspace-Roundtrips; liest aus Source-Handle (oder virtuellem Snapshot-Node), schreibt in Destination-Handle; EROFS für virtuelle Destinations
+- Verschlüsselung ruhender Daten: `EncryptionService` mit ChaCha20-Poly1305 (AEAD), 256-Bit-Schlüssel, zufällige 12-Byte-Nonce pro Verschlüsselung; Pipeline: compress → encrypt → store; read → decrypt → decompress; `inode.metadata.encrypted` Flag pro Datei; Schlüssel-Ableitung für Tests via `derive_key_from()`; FUSE-Read-only-Mount unterstützt transparente Entschlüsselung
+- expliziter Deduplizierungs-Pass: `BlockStore::dedup_pass()` mit 3-Phasen-Scan (ref_count-Audit, Hash-Kollisions-Erkennung, byte-identische Konsolidierung); `CoreFsService::run_dedup()` hinter `config.performance.deduplication_enabled` konfigurierbar
+- erweiterte In-Memory-Konsistenzprüfung: `IntegrityService::deep_fsck()` validiert Katalog↔Block-Konsistenz, Checksum-Integrität, Entschlüsselungs- und Dekomprimierungs-Pipeline, `inode.size`-Abgleich, verwaiste Blöcke; `FsckReport` mit Detailkategorien (orphaned_blocks, missing_blocks, size_mismatches, compression_errors, encryption_errors, checksum_failures)
 
 ### Plattform- und Integrationsmodell
 
@@ -112,11 +115,9 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - produktionsnahes blockorientiertes On-Disk-Format
 - echter Blockdevice-Zugriff (`BlockDevice`-Trait, `RawDevice`-Implementierung, `mkfs /dev/sdX1`, On-Demand Sektor-I/O, TRIM/Discard) — siehe Phase 1b
 - persistentes physisch device-blockadressiertes Write-Ahead-Log direkt im Volume statt des aktuellen extent-orientierten Pending-WAL
-- Deduplizierung
 - Self-Healing mit Redundanzquellen
 - Cluster-Synchronisation
 - Hot/Cold-Storage und Tiering-Strategien
-- echte Verschlüsselung
 - echtes Copy-on-Write auf Datenträgerebene (physische Block-Sharing auf persistierten Medien; aktuell: logisches CoW im In-Memory-Modell)
 - Time-Travel-Adressierung im FUSE-RW-Mount über `@`-Syntax ist für Lookup und Read umgesetzt; fehlt noch: Adressierung im Read-only-Mount, persistente Zugriffspfade als reale Symlinks
 - fsck als weiter auszubauendes Reparatur- und Korrekturwerkzeug für stärker beschädigte Segmenttabellen, tiefere Blockdeskriptor-Rekonstruktion, Datensegment-Validierung und echte Datenheilung
@@ -151,8 +152,10 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - Sicherheit
 - Synchronisationsstatus
 - Kompression (LZ4 frame via `lz4_flex`)
+- Verschlüsselung (ChaCha20-Poly1305 via `chacha20poly1305`)
 - Quota-Enforcement
 - Copy-on-Write mit Blob-Referenz-Zählung, CoW-Klons und Snapshot-Pinning
+- Deduplizierung (aktiver Scan-Pass mit ref_count-Audit und Konsolidierung)
 
 ### `src/platform`
 
