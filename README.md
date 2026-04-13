@@ -21,7 +21,7 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `112/112` Tests erfolgreich
+- Test-Status: `114/114` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -80,7 +80,7 @@ Einfacher Einstieg für Demo- und Verwaltungsoperationen.
 Der Prototyp deckt bereits folgende Bereiche ab:
 
 - Formatierung eines CoreFS-Volumes im In-Memory-Modell
-- Speichern und Laden eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks (`SUPR` und `SUP2`), Generation Countern, Prüfsummen, Clean/Unclean-Markierung und binären Segment-Frames für Fachsegmente wie `AINO`, `DINO`, `JOUR`, `TXNJ`, `VERS`, `SNAP`, `BLKD` und `DATA`
+- Speichern und Laden eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks (`SUPR` und `SUP2`), Generation Countern, Prüfsummen, Clean/Unclean-Markierung und binären Segment-Frames für Fachsegmente wie `AINO`, `DINO`, `JOUR`, `TXNJ`, `HOTP`, `VERS`, `SNAP`, `BLKD` und `DATA`
 - spezialisierte Binärlayouts für Inode-, Journal- und Snapshot-Segmente statt allgemeiner Serde-Serialisierung
 - Dateien, Verzeichnisse und symbolische Links
 - Lesen und Schreiben von Inhalten
@@ -92,6 +92,7 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - persistentes `FREE`-Segment im Volume-Image mit Free-List-Metadaten und persistenter Allocator-Policy
 - aktive Defragmentierung/Compaction fuer belegte Extents inklusive Service-API und CLI-Kommandos `defrag` und `defrag-image`
 - Fragmentierungsmetriken, persistente Auto-Compaction-Policy und Optimierungspfade ueber `optimize` und `optimize-image`
+- gezielte Heat-aware Extent-Reallocation mit persistierter Hot-Path-Telemetrie fuer priorisierte Platzierung haeufig genutzter Inodes
 - integriertes Pending-WAL im Volume-Image fuer den RW-Mount
 - extent- und device-blockadressierte WAL-Records ueber `inode + device_block + block_offset + inode_offset` fuer partielle File-Patches und Truncates statt nur grober Vollwrites
 - Basis-Versionierung

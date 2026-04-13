@@ -7,6 +7,7 @@ use crate::domain::volume::VolumeDescriptor;
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::platform::runtime::RuntimeIntegrationBlueprint;
 use crate::platform::tools::ToolRegistry;
+use crate::services::hot_paths::{HotPathRecord, HotPathService};
 use crate::services::indexing::IndexingService;
 use crate::services::integrity::{IntegrityReport, IntegrityService};
 use crate::services::journal::{JournalRecoverySummary, JournalRuntimeState, JournalService};
@@ -17,7 +18,7 @@ use crate::services::versioning::VersioningService;
 use crate::storage::allocator::InodeAllocator;
 use crate::storage::block_store::{
     AllocatorPolicy, BlockStore, DefragmentationReport, FragmentationReport, FreeExtentRecord,
-    OptimizationReport,
+    HeatReallocationReport, OptimizationReport,
 };
 use crate::storage::catalog::Catalog;
 use crate::storage::volume_image;
@@ -67,6 +68,7 @@ pub struct PersistedState {
     pub deleted_inodes: Vec<Inode>,
     pub allocator_policy: AllocatorPolicy,
     pub free_extents: Vec<FreeExtentRecord>,
+    pub hot_path_records: Vec<HotPathRecord>,
     pub block_records: Vec<crate::storage::block_store::BlockRecord>,
     pub journal_entries: Vec<crate::services::journal::JournalEntry>,
     pub journal_runtime: JournalRuntimeState,
@@ -88,6 +90,7 @@ pub struct CoreFsService {
     recovery: RecoveryService,
     integrity: IntegrityService,
     indexing: IndexingService,
+    hot_paths: HotPathService,
     security: SecurityService,
     sync: SyncService,
     clean_unmount: bool,
@@ -114,6 +117,7 @@ impl CoreFsService {
             recovery: RecoveryService::default(),
             integrity: IntegrityService,
             indexing: IndexingService,
+            hot_paths: HotPathService::default(),
             security: SecurityService,
             sync: SyncService::default(),
             clean_unmount: true,
@@ -162,6 +166,7 @@ impl CoreFsService {
         }
 
         self.catalog.insert(inode);
+        self.hot_paths.record_write(path, bytes.len());
         self.journal
             .record("create_file", path, format!("bytes={}", bytes.len()));
         self.auto_optimize_storage("create_file");
@@ -193,6 +198,7 @@ impl CoreFsService {
             FileMetadata::default(),
         );
         self.catalog.insert(inode);
+        self.hot_paths.record_metadata(path);
         self.journal.record("create_directory", path, "");
         Ok(())
     }
@@ -214,6 +220,7 @@ impl CoreFsService {
         );
         inode.size = self.blocks.write(inode_id, target.as_bytes().to_vec());
         self.catalog.insert(inode);
+        self.hot_paths.record_metadata(path);
         self.journal
             .record("create_symlink", path, format!("target={target}"));
         self.auto_optimize_storage("create_symlink");
@@ -234,6 +241,7 @@ impl CoreFsService {
 
         inode.modified_at = SystemTime::now();
         inode.size = self.blocks.write(inode.id, bytes.to_vec());
+        self.hot_paths.record_write(path, bytes.len());
         self.versioning.store_version(path, bytes.to_vec());
         self.versioning
             .prune(path, self.config.versioning.keep_latest);
@@ -270,11 +278,13 @@ impl CoreFsService {
                 .ok_or_else(|| CoreFsError::State(format!("missing data blocks for {path}")))?;
             self.security.secure_delete_bytes(&mut record.bytes);
             self.allocator.release(inode.id);
+            self.hot_paths.record_metadata(path);
             self.journal.record("secure_delete", path, "blocks_zeroed");
             self.auto_optimize_storage("secure_delete");
         } else {
             self.recovery.remember(inode.clone());
             self.catalog.move_to_deleted(inode.clone());
+            self.hot_paths.record_metadata(path);
             self.journal.record("delete", path, "recoverable=true");
         }
 
@@ -292,6 +302,7 @@ impl CoreFsService {
         };
 
         self.catalog.insert(inode);
+        self.hot_paths.record_metadata(path);
         self.journal.record("restore", path, "");
         Ok(())
     }
@@ -380,8 +391,11 @@ impl CoreFsService {
     }
 
     pub fn optimize_storage(&mut self) -> OptimizationReport {
-        let report = self.blocks.optimize();
-        if let Some(defragmentation) = &report.defragmentation {
+        let prioritized = self.prioritized_hot_inodes(8);
+        let report = self.blocks.optimize_with_priorities(&prioritized);
+        if let Some(heat_reallocation) = &report.heat_reallocation {
+            self.record_heat_reallocation_journal("optimize_storage", heat_reallocation);
+        } else if let Some(defragmentation) = &report.defragmentation {
             self.journal.record(
                 "optimize_storage",
                 "/",
@@ -622,6 +636,8 @@ impl CoreFsService {
                 self.catalog.insert(inode);
             }
         }
+        self.hot_paths.record_metadata(from);
+        self.hot_paths.record_metadata(to);
         self.journal.record("rename", from, format!("to={to}"));
         Ok(())
     }
@@ -636,6 +652,7 @@ impl CoreFsService {
             deleted_inodes: self.catalog.deleted_entries(),
             allocator_policy: self.blocks.allocator_policy().clone(),
             free_extents: self.blocks.free_extents(),
+            hot_path_records: self.hot_paths.records(),
             block_records: self.blocks.records(),
             journal_entries: self.journal.entries().to_vec(),
             journal_runtime: self.journal.runtime_state().clone(),
@@ -680,6 +697,7 @@ impl CoreFsService {
             recovery,
             integrity: IntegrityService,
             indexing: IndexingService,
+            hot_paths: HotPathService::from_records(state.hot_path_records),
             security: SecurityService,
             sync: SyncService::from_statuses(state.sync_statuses),
             clean_unmount: state.clean_unmount,
@@ -728,8 +746,11 @@ impl CoreFsService {
         if !before.needs_compaction {
             return;
         }
-        let report = self.blocks.optimize();
-        if let Some(defragmentation) = report.defragmentation {
+        let prioritized = self.prioritized_hot_inodes(8);
+        let report = self.blocks.optimize_with_priorities(&prioritized);
+        if let Some(heat_reallocation) = &report.heat_reallocation {
+            self.record_heat_reallocation_journal("auto_optimize_storage", heat_reallocation);
+        } else if let Some(defragmentation) = report.defragmentation {
             self.journal.record(
                 "auto_optimize_storage",
                 "/",
@@ -742,6 +763,32 @@ impl CoreFsService {
                 ),
             );
         }
+    }
+
+    fn prioritized_hot_inodes(&self, limit: usize) -> Vec<InodeId> {
+        self.hot_paths
+            .hottest_paths(limit)
+            .into_iter()
+            .filter_map(|entry| self.inode_for_path(&entry.path))
+            .collect()
+    }
+
+    fn record_heat_reallocation_journal(
+        &mut self,
+        operation: &str,
+        report: &HeatReallocationReport,
+    ) {
+        self.journal.record(
+            operation,
+            "/",
+            format!(
+                "heat_reallocation prioritized_inodes={} promoted_hot_inodes={} moved_entries={} final_device_blocks={}",
+                report.prioritized_inodes,
+                report.promoted_hot_inodes,
+                report.moved_entries,
+                report.final_device_blocks
+            ),
+        );
     }
 }
 
@@ -1219,7 +1266,8 @@ mod tests {
 
         let report = fs.optimize_storage();
 
-        assert!(report.defragmentation.is_some());
+        assert!(report.heat_reallocation.is_some());
+        assert!(report.defragmentation.is_none());
         assert!(report.before.fragmentation_percent >= 25);
         assert_eq!(report.after.fragmentation_percent, 0);
     }
@@ -1248,6 +1296,22 @@ mod tests {
         assert!(
             fs.journal_entries() >= 1,
             "auto optimization should leave a journal trail"
+        );
+    }
+
+    #[test]
+    fn persisted_state_round_trips_hot_path_records() {
+        let mut fs = test_fs();
+        fs.create_file("/hot.txt", b"hello", &[]).expect("file");
+        fs.write_file("/hot.txt", b"hello-world").expect("write");
+
+        let state = fs.export_state();
+
+        assert!(
+            state.hot_path_records.iter().any(|record| {
+                record.path == "/hot.txt" && record.write_ops >= 2 && record.bytes_written >= 16
+            }),
+            "expected hot path telemetry to be exported"
         );
     }
 }

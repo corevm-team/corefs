@@ -405,6 +405,7 @@ mod tests {
             )],
             allocator_policy: crate::storage::block_store::AllocatorPolicy::default(),
             free_extents: Vec::new(),
+            hot_path_records: Vec::new(),
             block_records: vec![
                 BlockRecord {
                     inode: crate::domain::inode::InodeId(1),

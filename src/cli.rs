@@ -75,11 +75,21 @@ where
         "optimize" => {
             let report = fs.optimize_storage();
             println!(
-                "optimize before={} after={} compacted={}",
+                "optimize before={} after={} heat_reallocated={} compacted={}",
                 report.before.fragmentation_percent,
                 report.after.fragmentation_percent,
+                report.heat_reallocation.is_some(),
                 report.defragmentation.is_some()
             );
+            if let Some(heat) = report.heat_reallocation {
+                println!(
+                    "prioritized_inodes={} promoted_hot_inodes={} moved_entries={} final_device_blocks={}",
+                    heat.prioritized_inodes,
+                    heat.promoted_hot_inodes,
+                    heat.moved_entries,
+                    heat.final_device_blocks
+                );
+            }
             if let Some(defrag) = report.defragmentation {
                 println!(
                     "moved_entries={} reclaimed_gaps={} final_device_blocks={}",
@@ -219,11 +229,21 @@ where
             loaded.save_image_to_path(path)?;
             println!("optimize-image ok: {path}");
             println!(
-                "before={} after={} compacted={}",
+                "before={} after={} heat_reallocated={} compacted={}",
                 report.before.fragmentation_percent,
                 report.after.fragmentation_percent,
+                report.heat_reallocation.is_some(),
                 report.defragmentation.is_some()
             );
+            if let Some(heat) = report.heat_reallocation {
+                println!(
+                    "prioritized_inodes={} promoted_hot_inodes={} moved_entries={} final_device_blocks={}",
+                    heat.prioritized_inodes,
+                    heat.promoted_hot_inodes,
+                    heat.moved_entries,
+                    heat.final_device_blocks
+                );
+            }
             if let Some(defrag) = report.defragmentation {
                 println!(
                     "moved_entries={} reclaimed_gaps={} final_device_blocks={}",

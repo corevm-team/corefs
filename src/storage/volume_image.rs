@@ -6,6 +6,7 @@ use crate::domain::metadata::{ContentClass, FileMetadata};
 use crate::domain::snapshot::Snapshot;
 use crate::domain::volume::VolumeDescriptor;
 use crate::error::{CoreFsError, CoreFsResult};
+use crate::services::hot_paths::HotPathRecord;
 use crate::services::journal::JournalEntry;
 use crate::services::journal::JournalRuntimeState;
 use crate::services::journal::{JournalRepairSummary, reconcile_persisted_state};
@@ -25,9 +26,9 @@ const SEGMENT_ENTRY_SIZE: usize = 24;
 const HEADER_SIZE: usize = 16;
 const SUPERBLOCK_SIZE: usize = 56;
 const SEGMENT_FRAME_SIZE: usize = 24;
-const EXPECTED_SEGMENT_KINDS: [[u8; 4]; 14] = [
+const EXPECTED_SEGMENT_KINDS: [[u8; 4]; 15] = [
     *b"SUPR", *b"SUP2", *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC",
-    *b"SNAP", *b"TXNJ", *b"FREE", *b"BLKD", *b"DATA",
+    *b"HOTP", *b"SNAP", *b"TXNJ", *b"FREE", *b"BLKD", *b"DATA",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +59,11 @@ struct VersionSegment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SyncSegment {
     sync_statuses: Vec<SyncStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HotPathSegment {
+    records: Vec<HotPathRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +182,13 @@ pub fn save_volume_image(path: impl AsRef<Path>, state: &PersistedState) -> Core
             *b"SYNC",
             &SyncSegment {
                 sync_statuses: state.sync_statuses.clone(),
+            },
+            path,
+        )?,
+        serialize_segment(
+            *b"HOTP",
+            &HotPathSegment {
+                records: state.hot_path_records.clone(),
             },
             path,
         )?,
@@ -1207,6 +1220,9 @@ fn persisted_state_from_entries(
     let sync = deserialize_optional_segment::<SyncSegment>(bytes, entries, b"SYNC", path)?
         .map(|segment| segment.sync_statuses)
         .unwrap_or_default();
+    let hot_paths = deserialize_optional_segment::<HotPathSegment>(bytes, entries, b"HOTP", path)?
+        .map(|segment| segment.records)
+        .unwrap_or_default();
     let snapshots = match find_segment(entries, b"SNAP") {
         Ok(entry) => deserialize_snapshot_segment(bytes, entry, path)?,
         Err(_) => SnapshotSegment {
@@ -1254,6 +1270,7 @@ fn persisted_state_from_entries(
         deleted_inodes: deleted,
         allocator_policy: free_space.policy,
         free_extents,
+        hot_path_records: hot_paths,
         block_records,
         journal_entries: journal,
         journal_runtime: journal_runtime.runtime,
@@ -1316,6 +1333,9 @@ fn persisted_state_without_blocks(
     let sync = deserialize_optional_segment::<SyncSegment>(bytes, entries, b"SYNC", path)?
         .map(|segment| segment.sync_statuses)
         .unwrap_or_default();
+    let hot_paths = deserialize_optional_segment::<HotPathSegment>(bytes, entries, b"HOTP", path)?
+        .map(|segment| segment.records)
+        .unwrap_or_default();
     let snapshots = match find_segment(entries, b"SNAP") {
         Ok(entry) => deserialize_snapshot_segment(bytes, entry, path)?,
         Err(_) => SnapshotSegment {
@@ -1340,6 +1360,7 @@ fn persisted_state_without_blocks(
         deleted_inodes: deleted,
         allocator_policy: AllocatorPolicy::default(),
         free_extents: Vec::new(),
+        hot_path_records: hot_paths,
         block_records: Vec::new(),
         journal_entries: journal,
         journal_runtime: journal_runtime.runtime,
@@ -1524,8 +1545,8 @@ fn reconstruct_directory_from_payloads(
     offset = align_up(offset + SUPERBLOCK_SIZE, SEGMENT_ALIGNMENT);
 
     for kind in [
-        *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC", *b"SNAP", *b"TXNJ",
-        *b"FREE",
+        *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC", *b"HOTP", *b"SNAP",
+        *b"TXNJ", *b"FREE",
     ] {
         let length = detect_framed_segment_length(bytes, offset, &kind, path)?;
         entries.push(SegmentEntry {
@@ -1792,7 +1813,7 @@ fn superblock_clean(entries: &[SegmentEntry], bytes: &[u8], path: &Path) -> Core
 fn validate_required_segments(entries: &[SegmentEntry]) -> CoreFsResult<()> {
     for kind in [
         *b"SUPR", *b"SUP2", *b"CNFG", *b"VOLM", *b"AINO", *b"DINO", *b"JOUR", *b"VERS", *b"SYNC",
-        *b"SNAP", *b"TXNJ", *b"BLKD", *b"DATA",
+        *b"HOTP", *b"SNAP", *b"TXNJ", *b"BLKD", *b"DATA",
     ] {
         let _ = find_segment(entries, &kind)?;
     }
@@ -1879,6 +1900,14 @@ mod tests {
             deleted_inodes: Vec::new(),
             allocator_policy: AllocatorPolicy::default(),
             free_extents: Vec::new(),
+            hot_path_records: vec![HotPathRecord {
+                path: "/hot.txt".to_string(),
+                read_ops: 0,
+                write_ops: 3,
+                metadata_ops: 1,
+                bytes_read: 0,
+                bytes_written: 4096,
+            }],
             block_records: Vec::new(),
             journal_entries: Vec::new(),
             journal_runtime: JournalRuntimeState::default(),
@@ -1927,6 +1956,7 @@ mod tests {
         assert_eq!(loaded.snapshots.len(), 1);
         assert_eq!(loaded.allocator_policy, state.allocator_policy);
         assert_eq!(loaded.free_extents, state.free_extents);
+        assert_eq!(loaded.hot_path_records, state.hot_path_records);
         assert_eq!(loaded.block_records, state.block_records);
 
         let _ = fs::remove_file(path);
@@ -2083,6 +2113,7 @@ mod tests {
             deleted_inodes: vec![deleted_inode],
             allocator_policy: AllocatorPolicy::default(),
             free_extents: Vec::new(),
+            hot_path_records: Vec::new(),
             block_records: vec![
                 BlockRecord {
                     inode: InodeId(1),
@@ -2209,6 +2240,7 @@ mod tests {
             deleted_inodes: Vec::new(),
             allocator_policy: AllocatorPolicy::default(),
             free_extents: Vec::new(),
+            hot_path_records: Vec::new(),
             block_records: vec![BlockRecord {
                 inode: InodeId(7),
                 bytes: b"hello".to_vec(),

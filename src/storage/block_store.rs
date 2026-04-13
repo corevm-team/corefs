@@ -1,6 +1,6 @@
 use crate::domain::inode::InodeId;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockRecord {
@@ -92,7 +92,16 @@ pub struct FragmentationReport {
 pub struct OptimizationReport {
     pub before: FragmentationReport,
     pub after: FragmentationReport,
+    pub heat_reallocation: Option<HeatReallocationReport>,
     pub defragmentation: Option<DefragmentationReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeatReallocationReport {
+    pub prioritized_inodes: usize,
+    pub promoted_hot_inodes: usize,
+    pub moved_entries: usize,
+    pub final_device_blocks: u64,
 }
 
 #[derive(Debug)]
@@ -356,10 +365,25 @@ impl BlockStore {
     }
 
     pub fn optimize(&mut self) -> OptimizationReport {
+        self.optimize_with_priorities(&[])
+    }
+
+    pub fn optimize_with_priorities(&mut self, prioritized: &[InodeId]) -> OptimizationReport {
         let before = self.fragmentation_report();
         let threshold = self.policy.fragmentation_threshold_percent.min(100);
         let should_compact = before.fragmentation_percent >= threshold && before.free_extents > 1;
-        let defragmentation = if should_compact {
+        let heat_reallocation = if !prioritized.is_empty()
+            && (should_compact || self.has_misplaced_priorities(prioritized))
+        {
+            Some(self.reallocate_prioritized_extents(prioritized))
+        } else {
+            None
+        };
+        let after_heat = self.fragmentation_report();
+        let defragmentation = if heat_reallocation.is_none()
+            && after_heat.fragmentation_percent >= threshold
+            && after_heat.free_extents > 1
+        {
             Some(self.defragment())
         } else {
             None
@@ -369,7 +393,81 @@ impl BlockStore {
         OptimizationReport {
             before,
             after,
+            heat_reallocation,
             defragmentation,
+        }
+    }
+
+    fn has_misplaced_priorities(&self, prioritized: &[InodeId]) -> bool {
+        let mut entries: Vec<_> = self.blocks.values().collect();
+        entries.sort_by_key(|entry| entry.device_block);
+        let prioritized: Vec<_> = prioritized
+            .iter()
+            .copied()
+            .filter(|inode| self.blocks.contains_key(inode))
+            .collect();
+        if prioritized.is_empty() {
+            return false;
+        }
+
+        entries
+            .iter()
+            .take(prioritized.len())
+            .map(|entry| entry.inode)
+            .ne(prioritized)
+    }
+
+    pub fn reallocate_prioritized_extents(
+        &mut self,
+        prioritized: &[InodeId],
+    ) -> HeatReallocationReport {
+        let priority_map: HashMap<InodeId, usize> = prioritized
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, inode)| self.blocks.contains_key(inode))
+            .map(|(index, inode)| (inode, index))
+            .collect();
+        let prioritized_inodes = priority_map.len();
+
+        let mut entries: Vec<_> = self
+            .blocks
+            .iter()
+            .map(|(inode, entry)| (*inode, entry.clone()))
+            .collect();
+        entries.sort_by(|left, right| {
+            let left_rank = priority_map.get(&left.0).copied().unwrap_or(usize::MAX);
+            let right_rank = priority_map.get(&right.0).copied().unwrap_or(usize::MAX);
+            left_rank
+                .cmp(&right_rank)
+                .then_with(|| left.1.device_block.cmp(&right.1.device_block))
+        });
+
+        let mut cursor = 0u64;
+        let mut moved_entries = 0usize;
+        let mut promoted_hot_inodes = 0usize;
+
+        for (inode, entry) in &mut entries {
+            let original = entry.device_block;
+            if entry.device_block != cursor {
+                entry.device_block = cursor;
+                moved_entries += 1;
+                if priority_map.contains_key(inode) && cursor < original {
+                    promoted_hot_inodes += 1;
+                }
+            }
+            cursor = cursor.saturating_add(entry.allocated_blocks);
+        }
+
+        self.blocks = entries.into_iter().collect();
+        self.free_extents.clear();
+        self.next_device_block = cursor;
+
+        HeatReallocationReport {
+            prioritized_inodes,
+            promoted_hot_inodes,
+            moved_entries,
+            final_device_blocks: cursor,
         }
     }
 
@@ -869,9 +967,60 @@ mod tests {
 
         let report = store.optimize();
 
+        assert!(report.heat_reallocation.is_none());
         assert!(report.defragmentation.is_some());
         assert_eq!(report.before.fragmentation_percent, 50);
         assert_eq!(report.after.fragmentation_percent, 0);
         assert_eq!(store.read(InodeId(2)).expect("record").device_block, 1);
+    }
+
+    #[test]
+    fn prioritize_reallocation_promotes_hot_inodes_to_front() {
+        let records = vec![
+            BlockRecord {
+                inode: InodeId(1),
+                bytes: b"aa".to_vec(),
+                checksum: checksum(b"aa"),
+                device_block: 2,
+                allocated_blocks: 1,
+            },
+            BlockRecord {
+                inode: InodeId(2),
+                bytes: b"bb".to_vec(),
+                checksum: checksum(b"bb"),
+                device_block: 0,
+                allocated_blocks: 1,
+            },
+            BlockRecord {
+                inode: InodeId(3),
+                bytes: b"cc".to_vec(),
+                checksum: checksum(b"cc"),
+                device_block: 4,
+                allocated_blocks: 1,
+            },
+        ];
+        let free_extents = vec![
+            FreeExtentRecord {
+                device_block: 1,
+                allocated_blocks: 1,
+            },
+            FreeExtentRecord {
+                device_block: 3,
+                allocated_blocks: 1,
+            },
+        ];
+        let mut store = BlockStore::from_records_with_allocator(
+            records,
+            4,
+            AllocatorPolicy::default(),
+            free_extents,
+        );
+
+        let report = store.reallocate_prioritized_extents(&[InodeId(3), InodeId(1)]);
+
+        assert_eq!(report.prioritized_inodes, 2);
+        assert_eq!(report.promoted_hot_inodes, 2);
+        assert_eq!(store.read(InodeId(3)).expect("record").device_block, 0);
+        assert_eq!(store.read(InodeId(1)).expect("record").device_block, 1);
     }
 }

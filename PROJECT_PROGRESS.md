@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `112/112` Tests erfolgreich  
+**Test-Status:** `114/114` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -45,6 +45,7 @@
 - persistentes `FREE`-Segment mit Free-List-Metadaten und persistenter Allocator-Policy
 - aktive Defragmentierung/Compaction fuer belegte Extents inklusive Service- und CLI-Pfad
 - Fragmentierungsmetriken, persistente Auto-Compaction-Policy und explizite Optimierungspfade fuer Live-Instanzen und Volume-Images
+- gezielte Heat-aware Extent-Reallocation auf Basis persistierter Hot-Path-Telemetrie fuer priorisierte Platzierung haeufig genutzter Inodes
 - integriertes Pending-WAL im Volume-Image fuer RW-Sessions
 - extent- und device-blockadressierte WAL-Records ueber `inode + device_block + block_offset + inode_offset` fuer partielle File-Patches und Truncates
 - automatische Versionierung im Basismodell
