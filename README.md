@@ -21,7 +21,7 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `119/119` Tests erfolgreich
+- Test-Status: `129/129` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -68,7 +68,7 @@ Anwendungsnahe Funktionsmodule:
 Plattformadapter und optionale Integrationspfade:
 
 - `runtime.rs` — plattformneutrales Blueprint-Modell für VFS-Integration
-- `linux_fuse.rs` — Linux-FUSE-Adapter (read-only und read-write) mit `.img`-Dateien als Backend
+- `linux_fuse.rs` — Linux-FUSE-Adapter (read-only und read-write) mit `.img`-Dateien als Backend, inkl. virtuellen Read-only-Overlays für Snapshots (`.snapshots/`) und Time-Travel (`file@<spec>`)
 - `performance.rs` / `tools.rs` — synthetisches Benchmark-Framework mit konfigurierbaren Profilen
 
 ### `src/cli.rs`
@@ -86,8 +86,10 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - Lesen und Schreiben von Inhalten
 - Linux-FUSE-Adapter mit `.img`-Dateien als Mount-Backend (read-only und read-write mit Writeback)
 - Linux-FUSE-Read-/Write-Caching auf File-Handle-Ebene mit Write-Back-Flush ueber `flush`/`fsync`/`release`
+- Streaming-Writes: sequentielle Schreibzugriffe ab 32 MiB werden als Zwischenflushes delegiert, Peak-RAM bleibt auf O(32 MiB) begrenzt statt O(Dateigrösse)
+- FUSE-Durchsatz-Optimierungen: `FUSE_WRITEBACK_CACHE` (Kernel-seitiges Schreib-Batching) und `max_write = 1 MiB` für weniger Roundtrips
 - backing-store-aware `statfs`-Kapazitaetsmeldung fuer Linux-FUSE und `ENOSPC`-Rueckgabe bei Platzmangel im `.img`-Persistenzpfad
-- treibernahe Linux-FUSE-Tests fuer Handle-Open, Truncate, Read-Cache, Write-Back-Flush, Release und Persistenzpfade
+- treibernahe Linux-FUSE-Tests fuer Handle-Open, Truncate, Read-Cache, Write-Back-Flush, Release, Persistenzpfade, Snapshot-Overlays und Time-Travel-Parsing
 - Fix fuer neu angelegte Dateien im Linux-FUSE-RW-Pfad: `create` liefert jetzt sofort einen gueltigen Write-Back-Handle fuer anschliessende `write()`-Aufrufe
 - Linux-End-to-End-Testskript fuer `mkfs-image`, RW-Mount, Shell-Dateioperationen, optionalen `unzip`-Workload, Umount und Read-only-Revalidierung
 - Journaling von Operationen
@@ -100,8 +102,10 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 - gezielte Heat-aware Extent-Reallocation mit persistierter Hot-Path-Telemetrie fuer priorisierte Platzierung haeufig genutzter Inodes
 - integriertes Pending-WAL im Volume-Image fuer den RW-Mount
 - extent- und device-blockadressierte WAL-Records ueber `inode + device_block + block_offset + inode_offset` fuer partielle File-Patches und Truncates statt nur grober Vollwrites
-- Basis-Versionierung
-- Snapshots
+- Basis-Versionierung mit automatischer Versionshistorie pro Datei
+- Snapshots mit Erfassung aller aktiven Pfade zum Aufnahmezeitpunkt
+- Snapshot-Browsing über `.snapshots/<id>-<name>/` im gemounteten RW-Dateisystem (virtuelle Read-only-Ordnerstruktur)
+- Time-Travel-Zugriff auf historische Dateiversionen über `file@YYYY-MM-DD`, `file@YYYY-MM-DDTHH:MM` und `file@vN` im gemounteten RW-Dateisystem
 - Recoverable Delete und Secure Delete
 - Checksummenbasierte Integritätsprüfung
 - Scrubbing über vorhandene Datenblöcke
@@ -137,7 +141,6 @@ Diese Punkte sind vorgesehen, aber aktuell noch nicht als echte produktionsnahe 
 - Hot/Cold-Storage
 - echte Kompression und Verschlüsselung
 - Quotas mit Durchsetzung
-- Time-Travel-Zugriff
 - native Kernel-/VFS-Integration
 
 ## Voraussetzungen
@@ -356,6 +359,44 @@ cargo run -- load-image ./corefs-linux.img
 cargo run -- read /etc/corefs.conf
 ```
 
+### Snapshot-Browsing über `.snapshots/`
+
+Im RW-Mount erscheint ein virtuelles Verzeichnis `.snapshots/` direkt im Root des Dateisystems. Es enthält für jeden vorhandenen Snapshot ein Read-only-Unterverzeichnis mit der Baumstruktur zum Aufnahmezeitpunkt:
+
+```bash
+# Snapshot anlegen (CLI oder programmatisch)
+cargo run -- snapshot nightly
+
+# Im gemounteten RW-Mount
+ls /tmp/corefs-mnt/.snapshots/
+# → 1-nightly/
+
+ls /tmp/corefs-mnt/.snapshots/1-nightly/etc/
+# → corefs.conf  (Inhalt wie zum Snapshot-Zeitpunkt)
+
+cat /tmp/corefs-mnt/.snapshots/1-nightly/etc/corefs.conf
+# → historischer Inhalt, auch wenn die Datei live überschrieben wurde
+```
+
+Schreibversuche in `.snapshots/` geben `EROFS` zurück.
+
+### Time-Travel-Zugriff über `@`-Syntax
+
+Im RW-Mount kann jede Datei mit einem `@`-Suffix versehen werden, um eine historische Version direkt zu lesen, ohne den Snapshot-Ordner aufzurufen:
+
+```bash
+# Version vom bestimmten Datum
+cat /tmp/corefs-mnt/etc/corefs.conf@2026-04-13
+
+# Version mit Uhrzeit
+cat /tmp/corefs-mnt/etc/corefs.conf@2026-04-13T10:30
+
+# Bestimmte Versionsnummer
+cat /tmp/corefs-mnt/etc/corefs.conf@v2
+```
+
+Diese Time-Travel-Dateien sind ebenfalls Read-only (`EROFS` bei Schreibversuchen). Die Versionshistorie wird automatisch bei jedem Schreibzugriff auf eine Datei aufgezeichnet.
+
 ### Unterstützte Operationen im RW-Modus
 
 | Operation | Verhalten |
@@ -368,6 +409,8 @@ cargo run -- read /etc/corefs.conf
 | Datei löschen (`rm`) | Soft-delete, Inode bleibt als gelöscht markiert |
 | Leeres Verzeichnis löschen (`rmdir`) | entfernt Verzeichnis-Inode; nicht-leere Dirs werden abgelehnt |
 | Schreiben bei geschlossenem Handle | persistiert das Image automatisch (`flush`) |
+| `.snapshots/<id>-<name>/...` lesen | historischer Snapshot-Inhalt (Read-only) |
+| `datei@<spec>` lesen | historische Dateiversion per Datum oder ID (Read-only) |
 
 > **Hinweis:** Der FUSE-Adapter ist ein Integrations- und Testpfad, kein produktionsreifes Dateisystem. Er steht nur auf Linux-Builds zur Verfügung.
 
