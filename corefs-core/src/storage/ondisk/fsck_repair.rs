@@ -27,6 +27,9 @@
 //! | `ODF.INODE.ATTR_UNALLOCATED`        | mark the attr block as allocated                    |
 //! | anything else                       | reported in `unfixable`; caller-side intervention   |
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::bitmap::Bitmap;
 use super::checksum::Crc32c;
 use super::fsck::{FsckIssue, FsckReport, Severity};
@@ -263,11 +266,7 @@ fn parse_block_from_message(msg: &str) -> Option<u64> {
 }
 
 fn now_secs() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    crate::platform::Timestamp::now().as_secs() as i64
 }
 
 // Ensure LayoutGeometry import is used in release builds too.

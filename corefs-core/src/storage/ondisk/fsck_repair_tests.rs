@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::app::PersistedState;
 use crate::config::CoreFsConfig;
 use crate::domain::volume::VolumeDescriptor;
 use crate::services::journal::JournalRuntimeState;
@@ -11,6 +10,7 @@ use crate::storage::block_store::AllocatorPolicy;
 use crate::storage::ondisk::fsck::check;
 use crate::storage::ondisk::layout::BLOCK_SIZE;
 use crate::storage::ondisk::volume::{FormatOptions, format_device, save_state};
+use crate::storage::persisted_state::PersistedState;
 
 fn make_dev() -> MemoryDevice {
     let mut dev = MemoryDevice::new(4096 * BLOCK_SIZE, 4096).unwrap();

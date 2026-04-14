@@ -95,7 +95,6 @@
 
 pub mod benchmark;
 pub mod concurrency;
-pub mod fsck_repair;
 pub mod property;
 pub mod reader;
 pub mod resilience;
@@ -105,8 +104,8 @@ pub mod stress;
 
 pub use corefs_core::storage::ondisk::{
     allocator, attr_block, bitmap, block_group, checksum, dir_entry, extent_tree, fault_injection,
-    fsck, grouped, inode, journal, journaled, layout, multi_group_allocator, native, refcount,
-    superblock, tiering, volume, xattr,
+    fsck, fsck_repair, grouped, inode, journal, journaled, layout, multi_group_allocator, native,
+    refcount, superblock, tiering, volume, xattr,
 };
 
 // Tests for `fsck` live in this main crate because they depend on

@@ -32,6 +32,8 @@ pub mod xattr;
 // PersistedState-Serialisierung und `Timestamp::now` — beides steht nur mit
 // aktiviertem `std`-Feature zur Verfügung.
 #[cfg(feature = "std")]
+pub mod fsck_repair;
+#[cfg(feature = "std")]
 pub mod grouped;
 #[cfg(feature = "std")]
 pub mod journaled;
