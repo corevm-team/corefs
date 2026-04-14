@@ -1603,7 +1603,7 @@ impl Filesystem for CoreFsFuseMountRw {
                             fs_path: file_path,
                             version_id,
                         };
-                        let mtime = SystemTime::now();
+                        let mtime = Timestamp::now();
                         let ino = self.get_or_create_virt_file(
                             key,
                             VirtFile {
@@ -2403,7 +2403,7 @@ impl Filesystem for CoreFsFuseMountRw {
         }
 
         // ── Snapshot root dir (.snapshots/snap-N-name/) or deeper snapshot virt_dir ──
-        let snapshot_info: Option<(u64, SystemTime)> =
+        let snapshot_info: Option<(u64, Timestamp)> =
             if let Some(info) = self.snapshot_for_subdir_ino(ino) {
                 Some(info)
             } else if let Some(d) = self.virt_dirs.get(&ino) {

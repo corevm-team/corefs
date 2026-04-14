@@ -429,10 +429,10 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [x] `scrub::scrub_image(path, ScrubMode) -> Result<ScrubImageReport>` mit drei Modi: `Full`, `StructuralOnly`, `ReadOnly`
 - [x] `dump::superblock(path) -> Result<SuperblockReport>`
 - [x] `dump::inode(path, slot) -> Result<InodeDumpReport>`
-- [ ] `defrag::run(device, policy) -> Result<Report>`
-- [ ] `resize::grow(device, new_size) -> Result<Report>`
-- [ ] `tier::migrate(device, policy) -> Result<Report>`
-- [ ] `snapshot::{create, list, delete, restore}` als Library-APIs
+- [x] `defrag::defrag_image(path) -> Result<DefragImageReport>` (Block-Store-Compaction inkl. Persist)
+- [ ] `resize::grow(device, new_size) -> Result<Report>` (geplant — benötigt Superblock-Rewrite + Geometrie-Recompute)
+- [ ] `tier::migrate(device, policy) -> Result<Report>` (geplant — benötigt separate Hot- und Cold-Devices)
+- [x] `snapshot::{list, create, delete, restore}` als Library-APIs (alle vier über `OdfFileSession`)
 - [x] Strukturierte `Report`-Typen mit `summary` / `render_text` / `render_json` (`Report`-Trait + `to_pretty_json`-Helper)
 - [ ] `corefs-cli` auf `corefs-tools` umgestellt — Linux-CLI-Verhalten unverändert
 

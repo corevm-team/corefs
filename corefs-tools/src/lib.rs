@@ -41,15 +41,16 @@
 //! | [`dump`]     | partial | `superblock`, `inode` — decode and display structures |
 //! | [`scrub`]    | partial | `scrub_image` — fsck + repair + data-crc, three modes |
 //! | [`repair`]   | partial | `repair_image` — applies auto-fixes from an fsck pass |
-//! | `defrag`     | planned | live/offline defragmentation                          |
-//! | `resize`     | planned | grow an existing volume                               |
-//! | `tier`       | planned | hot/cold tiering policies                             |
-//! | `snapshot`   | planned | create / list / delete / restore                      |
+//! | [`snapshot`] | done    | `list`, `create`, `delete`, `restore`                |
+//! | [`defrag`]   | partial | `defrag_image` — block-store compaction              |
+//! | `resize`     | planned | grow an existing volume (needs superblock rewrite)   |
+//! | `tier`       | planned | hot/cold tiering policies (needs hot+cold devices)   |
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(rustdoc::broken_intra_doc_links)]
 
+pub mod defrag;
 pub mod dump;
 pub mod error;
 pub mod fsck;
@@ -57,6 +58,7 @@ pub mod mkfs;
 pub mod repair;
 pub mod report;
 pub mod scrub;
+pub mod snapshot;
 
 pub use error::{ToolsError, ToolsResult};
 pub use report::Report;
