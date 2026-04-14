@@ -41,6 +41,7 @@ pub mod journaled;
 pub mod native;
 pub mod reader;
 pub mod scrub;
+pub mod session;
 pub mod volume;
 
 pub use checksum::Crc32c;

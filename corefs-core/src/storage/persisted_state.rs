@@ -33,6 +33,53 @@ use crate::storage::volume_wal::VolumeWal;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
+impl PersistedState {
+    /// Konstruiert einen leeren `PersistedState` aus einer Konfiguration und
+    /// einem Erstellungszeitstempel.
+    ///
+    /// no_std-fähig: der Aufrufer liefert die Zeit explizit. Alle Listen
+    /// (Inodes, Block-Records, Journal-Entries, Snapshots, …) starten leer;
+    /// `next_snapshot_id` ist `0`, `clean_unmount` ist `true`,
+    /// `pending_wal` ist `None`.
+    ///
+    /// Diese Konstruktion ist die Grundlage für den NATIVE-Mode-Initialisierungs-
+    /// Pfad: nach [`crate::storage::ondisk::volume::format_device`] wird
+    /// `save_state_native(device, &PersistedState::empty_at(...))` aufgerufen,
+    /// um das Volume in das Native-Layout zu überführen.
+    #[must_use]
+    pub fn empty_at(config: CoreFsConfig, created_at: crate::platform::Timestamp) -> Self {
+        let volume = VolumeDescriptor::from_config_at(&config, created_at);
+        Self {
+            config,
+            volume,
+            clean_unmount: true,
+            pending_wal: None,
+            active_inodes: Vec::new(),
+            deleted_inodes: Vec::new(),
+            allocator_policy: AllocatorPolicy::default(),
+            free_extents: Vec::new(),
+            hot_path_records: Vec::new(),
+            block_records: Vec::new(),
+            journal_entries: Vec::new(),
+            journal_runtime: JournalRuntimeState::default(),
+            versions: Vec::new(),
+            sync_statuses: Vec::new(),
+            snapshots: Vec::new(),
+            next_snapshot_id: 0,
+        }
+    }
+
+    /// Konstruiert einen leeren `PersistedState` mit der aktuellen Systemzeit.
+    ///
+    /// Bequemere Variante von [`PersistedState::empty_at`] für std-basierte
+    /// Umgebungen.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn empty(config: CoreFsConfig) -> Self {
+        Self::empty_at(config, crate::platform::Timestamp::now())
+    }
+}
+
 /// Vollständiger, persistierbarer Zustand eines CoreFS-Volumes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedState {
@@ -98,6 +145,32 @@ mod tests {
             snapshots: Vec::new(),
             next_snapshot_id: 0,
         };
+        let bytes = crate::bincode_compat::serialize(&state).expect("serialize ok");
+        let decoded: PersistedState =
+            crate::bincode_compat::deserialize(&bytes).expect("deserialize ok");
+        assert_eq!(state, decoded);
+    }
+
+    #[test]
+    fn empty_at_yields_clean_unmount_and_no_inodes() {
+        let state =
+            PersistedState::empty_at(CoreFsConfig::default(), crate::platform::Timestamp::EPOCH);
+        assert!(state.clean_unmount);
+        assert!(state.pending_wal.is_none());
+        assert!(state.active_inodes.is_empty());
+        assert!(state.deleted_inodes.is_empty());
+        assert!(state.block_records.is_empty());
+        assert!(state.journal_entries.is_empty());
+        assert!(state.snapshots.is_empty());
+        assert_eq!(state.next_snapshot_id, 0);
+        assert_eq!(state.volume.name, "corefs");
+        assert_eq!(state.volume.created_at, crate::platform::Timestamp::EPOCH);
+    }
+
+    #[test]
+    fn empty_at_round_trips_via_bincode_compat() {
+        let state =
+            PersistedState::empty_at(CoreFsConfig::default(), crate::platform::Timestamp::EPOCH);
         let bytes = crate::bincode_compat::serialize(&state).expect("serialize ok");
         let decoded: PersistedState =
             crate::bincode_compat::deserialize(&bytes).expect("deserialize ok");
