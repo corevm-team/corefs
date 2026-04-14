@@ -866,6 +866,66 @@ fn read_inode_at_slot(
     OnDiskInode::decode(&buf[offset as usize..offset as usize + INODE_RECORD_SIZE])
 }
 
+/// Public variant of [`read_all_extent_bytes`] used by the grouped
+/// layout.  Callers outside this module get the same semantics.
+pub fn read_all_extent_bytes_public(
+    device: &dyn BlockDevice,
+    inode: &OnDiskInode,
+) -> CoreFsResult<Vec<u8>> {
+    read_all_extent_bytes(device, inode)
+}
+
+/// Serialize the ancillary bincode blob (everything except per-inode
+/// state) and append a CRC32C trailer.  Exposed for the grouped
+/// implementation.
+pub fn build_ancillary_bytes(state: &PersistedState) -> CoreFsResult<Vec<u8>> {
+    let ancillary = AncillaryState::from(state);
+    let anc_bytes = bincode::serialize(&ancillary).map_err(|e| {
+        CoreFsError::State(format!("native: ancillary serialize failed: {e}"))
+    })?;
+    let anc_crc = Crc32c::hash(&anc_bytes);
+    let mut out = anc_bytes;
+    out.extend_from_slice(&anc_crc.to_le_bytes());
+    Ok(out)
+}
+
+/// Decode the ancillary payload (sans CRC trailer) back into its
+/// opaque internal struct.  Exposed for the grouped implementation.
+pub fn decode_ancillary(payload: &[u8]) -> CoreFsResult<AncillaryStateRef> {
+    bincode::deserialize::<AncillaryState>(payload)
+        .map_err(|e| CoreFsError::State(format!("native: ancillary deserialize failed: {e}")))
+        .map(AncillaryStateRef)
+}
+
+/// Convert an ancillary struct back into a bare `PersistedState`
+/// skeleton (without per-inode data).  Callers then fill in
+/// `active_inodes`, `deleted_inodes`, and `block_records`.
+pub fn ancillary_into_state(anc: AncillaryStateRef) -> PersistedState {
+    let a = anc.0;
+    PersistedState {
+        config: a.config,
+        volume: a.volume,
+        clean_unmount: a.clean_unmount,
+        pending_wal: a.pending_wal,
+        active_inodes: Vec::new(),
+        deleted_inodes: Vec::new(),
+        allocator_policy: a.allocator_policy,
+        free_extents: a.free_extents,
+        hot_path_records: a.hot_path_records,
+        block_records: Vec::new(),
+        journal_entries: a.journal_entries,
+        journal_runtime: a.journal_runtime,
+        versions: a.versions,
+        sync_statuses: a.sync_statuses,
+        snapshots: a.snapshots,
+        next_snapshot_id: a.next_snapshot_id,
+    }
+}
+
+/// Opaque wrapper exposing [`AncillaryState`] to grouped callers
+/// without leaking its internal fields.
+pub struct AncillaryStateRef(AncillaryState);
+
 fn read_all_extent_bytes(
     device: &dyn BlockDevice,
     inode: &OnDiskInode,
