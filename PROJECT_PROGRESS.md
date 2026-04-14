@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `534/534` Tests erfolgreich  
+**Test-Status:** `567/567` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -252,9 +252,13 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
   - **CLI-Integration**: `mkfs-odf`, `fsck-odf`, `inspect-odf`, `migrate-to-odf` (liest legacy `volume_image` und schreibt Native-ODF), `mount-odf` (Linux), `odf-session-demo`
   - **Session-Layer** (`session.rs`): `OdfFileSession` (file-backed) + `OdfDeviceSession` (BlockDevice-backed) als ODF-native Äquivalente von `VolumeSession`/`DeviceVolumeSession` — `format_new`/`open`/`open_or_format`/`flush`/`mutate`; Flush geht immer durch `save_state_native_incremental`, Open ruft `recover_pending_transactions` auf damit Crashes transparent repliziert werden; `FlushReport` exponiert created/updated/removed/unchanged je Mutation
   - **On-Demand-Reader** (`reader.rs`): `OdfReader` lädt beim `open` nur Superblock + Inode-Bitmap; `list_inodes()` walkt Slots mit einem Block-Read pro Eintrag; `slot_for_domain_id`/`slot_for_path` mit Memoisierung; `read_on_disk_inode`/`read_inode_metadata`/`read_file_content`/`read_file_by_path` für punktuellen Zugriff; `data_crc` wird beim Lesen cross-geprüft, tamper-detection on-the-fly
+  - **Fault-Injection** (`fault_injection.rs`): `FaultyDevice<D>` wrapper mit konfigurierbaren Fehlerquellen — `fail_after_writes(N)`, `fail_after_bytes_written` (ENOSPC-Sim), `silent_corrupt_writes` (Bit-Rot), `fail_writes_in_range` (Bad-Sector), `fail_sync` (Power-Loss zwischen Write und Barrier), `stop_after_n_writes` (stiller Write-Drop); `FaultStats` als beobachtbare Counter
+  - **Resilienz-Szenarien** (`resilience.rs`): 10 End-to-End-Invarianten gegen den ODF-Save/Load-Stack — Crash-nach-Commit/vor-Apply wird durch Replay recovered, Sync-Failure beim Commit sichtbar, silenter Data-Block-Flip durch `data_crc` gefangen, silenter Bitmap-Flip durch Bitmap-CRC gefangen, Primary-SB-Wipe fällt auf Redundanz zurück, ENOSPC-Abbruch lässt vorherige Generation loadbar, fsck meldet strukturellen Schaden, Power-Loss-Simulation panict nie, Journaled-Save survives full Crash-Roundtrip
+  - **Stress- und Skalierungstests** (`stress.rs`): 1000 kleine Files Roundtrip, 150 tiefe Directory-Ebenen, 1-MB-File als kontinuierliche Extent-Allocation, 200 inkrementelle Save-Zyklen mit O(1)-Churn, 30 Delete/Recreate-Zyklen wo der Allocator Blöcke zurückrecycelt, fsck-Walk über 500 Inodes
+  - **Concurrency-Tests** (`concurrency.rs`): demonstriert was sicher ist und was nicht — CRC32C über N Threads (stateless), disjoint Bitmaps parallel mutiert und gemerged, N Reader unter `Arc<Mutex>` auf geteiltem Device, Single-Writer-Multi-Reader-Snapshot-Pattern, Session-Move zwischen Threads (Send), Snapshot-Reader sehen Mutations nach dem Snapshot nicht, `Send`-Bounds compile-time verifiziert
   - **FUSE-ODF-Mount** (`mount_odf_image`): Read-only-FUSE-Mount eines ODF-Images, lädt state via `FileImageDevice::open(..., read_only=true)` + `load_state_native`, verwendet das bestehende `CoreFsFuseView`-Gerüst — kein Duplikat der 2500-Zeilen-FUSE-Mount-Infrastruktur nötig
   - Top-Level-APIs `format_device`/`save_state`/`load_state`/`inspect` (Blob-Modus) + `save_state_native`/`load_state_native` (Native-Modus) auf beliebigen `BlockDevice`-Implementierungen
-  - Getestet mit **207 Unit-Tests** (Layout-Planer, CRC32C-Testvektoren, Superblock-Roundtrip+Korruptionsprüfung, Bitmap-Allokation, Inode-Record-Roundtrip, Extent-Chain-Roundtrip+Loop-Detection, Dir-Block-Roundtrip+Pack, Attr-Block-Roundtrip, Xattr-Block-Roundtrip+Principal-Reject, Allocator-First/Best-Fit+Inode-Slots, Journal-Commit/Replay/Abort/Partial-Discard/Multi-Txn-Ordering, Format+Save+Load-Roundtrip, redundanter Superblock-Fallback, Native-Roundtrip-Scenarios, Encryption-Flag-Propagation, fsck-Clean/Corrupt/Read-Only, Micro-Benchmark, CLI-End-to-End) plus 2 neue CLI-Integrations-Tests
+  - Getestet mit **240 Unit-Tests** (Layout-Planer, CRC32C-Testvektoren, Superblock-Roundtrip+Korruptionsprüfung, Bitmap-Allokation, Inode-Record-Roundtrip, Extent-Chain-Roundtrip+Loop-Detection, Dir-Block-Roundtrip+Pack, Attr-Block-Roundtrip, Xattr-Block-Roundtrip+Principal-Reject, Allocator-First/Best-Fit+Inode-Slots, Journal-Commit/Replay/Abort/Partial-Discard/Multi-Txn-Ordering, Format+Save+Load-Roundtrip, redundanter Superblock-Fallback, Native-Roundtrip-Scenarios, Encryption-Flag-Propagation, fsck-Clean/Corrupt/Read-Only, Micro-Benchmark, CLI-End-to-End) plus 2 neue CLI-Integrations-Tests
 
 ### `src/services`
 
