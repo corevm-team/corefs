@@ -447,18 +447,18 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 ### 5.5 AnyOS — Kernel-Treiber-Pfad (direkter CoreFS-Treiber)
 
 - [x] Modul `anyos/kernel/src/fs/corefs/` anlegen ([anyos/kernel/src/fs/corefs/mod.rs](../anyos/kernel/src/fs/corefs/mod.rs))
-- [ ] `BlockDevice`-Impl (CoreFS-Trait) als Adapter auf `drivers/storage` (LBA↔Byte-Offset-Mapping)
+- [x] `BlockDevice`-Impl (CoreFS-Trait) als Adapter auf `drivers/storage` (LBA↔Byte-Offset-Mapping) — `BlockDeviceAdapter` inkl. `SectorIo`-Trait-Indirektion für Tests, partition-relatives Addressing, TRIM aktuell no-op
 - [~] `Clock`-Impl aus AnyOS-Zeitquelle (`KernelClock`-Stub vorhanden, liefert `Timestamp::EPOCH`; echte RTC-Anbindung folgt)
 - [~] `Rng`-Impl aus AnyOS-Entropiequelle (`KernelRng` mit xorshift64 + explizitem Seed; echter Entropiepool-Anschluss folgt)
 - [x] `corefs-core` als Path-Dependency in `kernel/Cargo.toml` (default-features-off, ohne `crypto`-Feature wegen poly1305-SIMD)
 - [x] Kernel-Build mit `corefs-core` clean (`cargo +nightly build -p anyos_kernel --target x86_64-anyos.json -Z build-std=core,alloc -Z json-target-spec`)
-- [ ] `Filesystem`-Trait ([kernel/src/fs/vfs/types.rs](../anyos/kernel/src/fs/vfs/types.rs)) implementieren: Delegation an `corefs-core::CoreFs`
-- [ ] `FsType::CoreFs` im VFS-Enum ergänzen
-- [ ] Superblock-Magic-Erkennung in der Boot-/Partitions-Detection
+- [~] `Filesystem`-Trait ([kernel/src/fs/vfs/types.rs](../anyos/kernel/src/fs/vfs/types.rs)) implementieren — `CoreFsDriver` (read-only) deckt `read`/`lookup`/`readdir` via `OdfReader` ab; `write`/`create`/`delete` liefern bewusst `PermissionDenied` bis zum Write-Path-Nachzug
+- [x] `FsType::CoreFs` im VFS-Enum ergänzen
+- [x] Superblock-Magic-Erkennung in der Boot-/Partitions-Detection — `fs::corefs::probe::detect(disk_id, partition_lba)` prüft ODF_MAGIC am Primär-Superblock (Block 1 = LBA 8 partition-relativ)
 - [ ] Block-Cache-Integration ([kernel/src/fs/blockcache.rs](../anyos/kernel/src/fs/blockcache.rs)) via BlockDevice-Wrapper
-- [ ] Mount als Root-FS möglich
-- [ ] Read-Path funktional (readdir, read, getattr)
-- [ ] Write-Path funktional (create, write, unlink, mkdir, rename, …)
+- [~] Mount als Root-FS möglich — `fs::vfs::mount_corefs(path, disk, lba, sectors, device_id)` konstruiert den Treiber read-only und registriert den Mount; Boot-Auto-Detect über `probe::detect` und Dispatch durch die bestehenden VFS-Match-Arme folgen
+- [~] Read-Path funktional (readdir, read, getattr) — read-only über `OdfReader`, path-cache bei erster Lookup-Anfrage; voll dispatched erst nach Wire-up durch die VFS-Match-Arme
+- [ ] Write-Path funktional (create, write, unlink, mkdir, rename, …) — Nachzug über `ondisk::native::{load_state_native, save_state_native}`
 - [ ] Unclean-Mount-Recovery über WAL bei Boot
 - [ ] Kernel-Integration-Tests mit vorbereitetem CoreFS-Image
 
