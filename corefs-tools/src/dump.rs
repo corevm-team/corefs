@@ -10,8 +10,10 @@
 
 use crate::error::ToolsResult;
 use crate::report::{Report, to_pretty_json};
-use corefs::storage::block_device::FileImageDevice;
+use corefs::storage::block_device::{BlockDevice, FileImageDevice};
+use corefs::storage::ondisk::inode::{FLAG_HAS_EXTENT_INDEX, OnDiskInode, OnDiskKind};
 use corefs::storage::ondisk::layout::{BLOCK_SIZE, PRIMARY_SUPERBLOCK_BLOCK};
+use corefs::storage::ondisk::reader::OdfReader;
 use corefs::storage::ondisk::superblock::{LAYOUT_MODE_NATIVE, Superblock};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -183,8 +185,206 @@ pub fn superblock(path: impl AsRef<Path>) -> ToolsResult<SuperblockReport> {
     })
 }
 
-/// Bedarfsabhängige `BlockDevice`-Verwendung erfordert den read_at-Trait.
-use corefs::storage::block_device::BlockDevice;
+// =====================================================================
+// dump::inode
+// =====================================================================
+
+/// Eintrag in der `extents`-Liste eines Inode-Reports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtentEntry {
+    /// Logischer Startblock des Extents innerhalb der Datei.
+    pub logical_block: u32,
+    /// Länge des Extents in Blöcken.
+    pub length_blocks: u32,
+    /// Physikalischer Startblock auf dem zugrundeliegenden Device.
+    pub physical_block: u64,
+}
+
+/// Strukturierter Report einer Inode-Dump-Operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InodeDumpReport {
+    /// Pfad des inspizierten Volumes.
+    pub image_path: String,
+    /// Inode-Slot-Nummer im On-Disk-Inode-Table.
+    pub slot: u64,
+    /// Inode-Kind als String (`File`, `Directory`, `Symlink`, `Unused`, `SystemPayload`).
+    pub kind: String,
+    /// POSIX-Mode-Bits.
+    pub mode: u32,
+    /// POSIX-Owner-UID.
+    pub uid: u32,
+    /// POSIX-Owner-GID.
+    pub gid: u32,
+    /// `link_count`-Feld des Inodes.
+    pub link_count: u32,
+    /// `flags`-Bitmaske (siehe `FLAG_*`-Konstanten in `corefs::storage::ondisk::inode`).
+    pub flags: u32,
+    /// Logische Dateigröße in Bytes.
+    pub size_bytes: u64,
+    /// Anzahl tatsächlich allozierter Datenblöcke.
+    pub blocks_allocated: u64,
+    /// crtime in Sekunden seit Epoche.
+    pub created_at_secs: i64,
+    /// mtime in Sekunden seit Epoche.
+    pub modified_at_secs: i64,
+    /// ctime in Sekunden seit Epoche.
+    pub changed_at_secs: i64,
+    /// atime in Sekunden seit Epoche.
+    pub accessed_at_secs: i64,
+    /// Inode-Generation-Counter.
+    pub generation: u64,
+    /// Extents, die in diesem Slot direkt eingebettet sind. Bei
+    /// `flags & FLAG_HAS_EXTENT_INDEX` ist die vollständige Liste über
+    /// `index_block_addr` erreichbar.
+    pub extents: Vec<ExtentEntry>,
+    /// Root-Block der indirekten Extent-Index-Kette (0 = keine).
+    pub index_block_addr: u64,
+    /// Block-Adresse des Xattr/ACL-Records (0 = keine).
+    pub xattr_block_addr: u64,
+    /// Domain-Inode-ID, die zu diesem Slot korrespondiert (0 für System-Slots).
+    pub domain_inode_id: u64,
+    /// CRC32C über den Plain-Text-Inhalt der Datei.
+    pub data_crc: u64,
+    /// `true`, wenn das Inode per `FLAG_HAS_EXTENT_INDEX` auf eine externe
+    /// Extent-Liste verweist.
+    pub has_external_extent_index: bool,
+}
+
+impl Report for InodeDumpReport {
+    fn summary(&self) -> String {
+        format!(
+            "inode slot {} ({}, mode 0o{:o}, {} bytes, {} extents)",
+            self.slot,
+            self.kind,
+            self.mode & 0o7777,
+            self.size_bytes,
+            self.extents.len(),
+        )
+    }
+
+    fn render_text(&self) -> String {
+        let mut out = String::new();
+        out.push_str("inode dump\n");
+        out.push_str("──────────\n");
+        out.push_str(&format!("image path        : {}\n", self.image_path));
+        out.push_str(&format!("slot              : {}\n", self.slot));
+        out.push_str(&format!("kind              : {}\n", self.kind));
+        out.push_str(&format!("mode              : 0o{:o}\n", self.mode & 0o7777));
+        out.push_str(&format!("uid / gid         : {} / {}\n", self.uid, self.gid));
+        out.push_str(&format!("link count        : {}\n", self.link_count));
+        out.push_str(&format!("flags             : 0x{:08x}\n", self.flags));
+        out.push_str(&format!("size              : {} bytes\n", self.size_bytes));
+        out.push_str(&format!("blocks allocated  : {}\n", self.blocks_allocated));
+        out.push_str(&format!(
+            "crtime / mtime    : {} / {}\n",
+            self.created_at_secs, self.modified_at_secs
+        ));
+        out.push_str(&format!(
+            "ctime / atime     : {} / {}\n",
+            self.changed_at_secs, self.accessed_at_secs
+        ));
+        out.push_str(&format!("generation        : {}\n", self.generation));
+        out.push_str(&format!("domain inode id   : {}\n", self.domain_inode_id));
+        out.push_str(&format!("data crc          : 0x{:016x}\n", self.data_crc));
+        out.push_str(&format!("xattr block addr  : {}\n", self.xattr_block_addr));
+        out.push_str(&format!("index block addr  : {}\n", self.index_block_addr));
+        out.push_str(&format!(
+            "extents (embedded): {}{}\n",
+            self.extents.len(),
+            if self.has_external_extent_index {
+                " (external index present — see index_block_addr)"
+            } else {
+                ""
+            }
+        ));
+        for (i, e) in self.extents.iter().enumerate() {
+            out.push_str(&format!(
+                "  [{i}] logical={} physical={} len={}\n",
+                e.logical_block, e.physical_block, e.length_blocks
+            ));
+        }
+        out
+    }
+
+    fn render_json(&self) -> String {
+        to_pretty_json(self)
+    }
+}
+
+/// Liest und dekodiert den Inode-Slot `slot` aus der Image-Datei `path`.
+///
+/// Schlägt fehl, wenn `slot` außerhalb des Inode-Tables liegt oder im
+/// Inode-Bitmap als `unused` markiert ist.
+///
+/// # Beispiel
+///
+/// ```no_run
+/// use corefs_tools::dump::inode;
+/// use corefs_tools::Report;
+///
+/// let report = inode("/tmp/demo.img", 0).unwrap();
+/// println!("{}", report.render_text());
+/// ```
+pub fn inode(path: impl AsRef<Path>, slot: u64) -> ToolsResult<InodeDumpReport> {
+    let path = path.as_ref();
+    let device = FileImageDevice::open(path, true)?;
+    let reader = OdfReader::open(&device)?;
+    let rec = reader.read_on_disk_inode(slot)?;
+    Ok(inode_report_from_record(
+        path.display().to_string(),
+        slot,
+        &rec,
+    ))
+}
+
+fn inode_report_from_record(image_path: String, slot: u64, rec: &OnDiskInode) -> InodeDumpReport {
+    InodeDumpReport {
+        image_path,
+        slot,
+        kind: kind_to_string(rec.kind),
+        mode: rec.mode,
+        uid: rec.uid,
+        gid: rec.gid,
+        link_count: rec.link_count,
+        flags: rec.flags,
+        size_bytes: rec.size_bytes,
+        blocks_allocated: rec.blocks_allocated,
+        created_at_secs: rec.created_at,
+        modified_at_secs: rec.modified_at,
+        changed_at_secs: rec.changed_at,
+        accessed_at_secs: rec.accessed_at,
+        generation: rec.generation,
+        extents: rec
+            .extents
+            .iter()
+            .map(|e| ExtentEntry {
+                logical_block: e.logical_block,
+                length_blocks: e.length_blocks,
+                physical_block: e.physical_block,
+            })
+            .collect(),
+        index_block_addr: rec.index_block_addr,
+        xattr_block_addr: rec.xattr_block_addr,
+        domain_inode_id: rec.domain_inode_id,
+        data_crc: rec.data_crc,
+        has_external_extent_index: rec.flags & FLAG_HAS_EXTENT_INDEX != 0,
+    }
+}
+
+fn kind_to_string(k: OnDiskKind) -> String {
+    match k {
+        OnDiskKind::Unused => "Unused",
+        OnDiskKind::File => "File",
+        OnDiskKind::Directory => "Directory",
+        OnDiskKind::Symlink => "Symlink",
+        OnDiskKind::SystemPayload => "SystemPayload",
+    }
+    .to_string()
+}
+
+// =====================================================================
+// shared helpers
+// =====================================================================
 
 fn decode_label(bytes: &[u8; 32]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());

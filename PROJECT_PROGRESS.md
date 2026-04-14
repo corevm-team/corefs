@@ -423,12 +423,12 @@ Ziel: CoreFS als natives Dateisystem des eigenen Betriebssystems AnyOS (`/daten1
 
 Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate); shrinkt zu `no_std + alloc`, sobald `storage`/`services` migriert sind. Einheitliches `Report`-Trait mit `summary`/`render_text`/`render_json`. Einheitlicher `ToolsError` (Core/Io/InvalidArgument).
 
-- [x] `mkfs::format_image(path, capacity, options) -> Result<MkfsReport>` (File-Image-basiert; Block-Device-Variante folgt)
+- [x] `mkfs::format_image(path, capacity, options) -> Result<MkfsReport>` (File-Image-basiert, Default-Layout `Native`; Block-Device-Variante folgt)
 - [x] `fsck::check_image(path) -> Result<FsckCheckReport>` (Read-only)
-- [ ] `fsck::repair(device, policy) -> Result<Report>`
-- [ ] `scrub::run(device, plan) -> Result<ScrubReport>`
+- [x] `repair::repair_image(path) -> Result<RepairImageReport>` (idempotent; appliziert Auto-Fixes als einzige Journal-Transaktion)
+- [x] `scrub::scrub_image(path, ScrubMode) -> Result<ScrubImageReport>` mit drei Modi: `Full`, `StructuralOnly`, `ReadOnly`
 - [x] `dump::superblock(path) -> Result<SuperblockReport>`
-- [ ] `dump::inode(device, inode_id) -> InodeDump`
+- [x] `dump::inode(path, slot) -> Result<InodeDumpReport>`
 - [ ] `defrag::run(device, policy) -> Result<Report>`
 - [ ] `resize::grow(device, new_size) -> Result<Report>`
 - [ ] `tier::migrate(device, policy) -> Result<Report>`

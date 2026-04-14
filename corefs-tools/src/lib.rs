@@ -38,9 +38,9 @@
 //! |--------------|--------|--------------------------------------------------------|
 //! | [`mkfs`]     | partial | `format_image` — format a fresh ODF volume in a file |
 //! | [`fsck`]     | partial | `check_image` — read-only consistency check          |
-//! | [`dump`]     | partial | `superblock` — decode and display the superblock     |
-//! | `scrub`      | planned | self-healing + data-crc verification                  |
-//! | `repair`     | planned | consumes an `FsckReport`, applies auto-fixes          |
+//! | [`dump`]     | partial | `superblock`, `inode` — decode and display structures |
+//! | [`scrub`]    | partial | `scrub_image` — fsck + repair + data-crc, three modes |
+//! | [`repair`]   | partial | `repair_image` — applies auto-fixes from an fsck pass |
 //! | `defrag`     | planned | live/offline defragmentation                          |
 //! | `resize`     | planned | grow an existing volume                               |
 //! | `tier`       | planned | hot/cold tiering policies                             |
@@ -54,7 +54,9 @@ pub mod dump;
 pub mod error;
 pub mod fsck;
 pub mod mkfs;
+pub mod repair;
 pub mod report;
+pub mod scrub;
 
 pub use error::{ToolsError, ToolsResult};
 pub use report::Report;

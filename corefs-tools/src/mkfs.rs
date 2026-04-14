@@ -9,13 +9,27 @@
 
 use crate::error::{ToolsError, ToolsResult};
 use crate::report::{Report, to_pretty_json};
+use corefs::app::CoreFsService;
+use corefs::config::CoreFsConfig;
 use corefs::storage::block_device::FileImageDevice;
+use corefs::storage::ondisk::native::save_state_native;
 use corefs::storage::ondisk::volume::{FormatOptions, format_device};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Default-Sektorgröße für neu erzeugte Image-Dateien.
 pub const DEFAULT_SECTOR_SIZE: u32 = 4096;
+
+/// Layout-Modus, in dem die formatierte Volume-Datei vorliegt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayoutMode {
+    /// Native per-Inode-Layout (jeder Domain-Inode hat einen eigenen ODF-Slot).
+    /// **Default**, da alle weiteren Tool-Operationen (`fsck`, `scrub`, `dump::inode`)
+    /// nur auf Native-Mode-Volumes funktionieren.
+    Native,
+    /// Blob-Layout (`PersistedState` lebt im System-Payload-Inode). Legacy-Pfad.
+    Blob,
+}
 
 /// Optionen für [`format_image`].
 #[derive(Debug, Clone)]
@@ -32,6 +46,11 @@ pub struct FormatImageOptions {
     pub journal_blocks: Option<u64>,
     /// Sektorgröße der zu erzeugenden Image-Datei. Muss eine Zweierpotenz sein.
     pub sector_size: u32,
+    /// Ziel-Layout-Modus. Default: [`LayoutMode::Native`].
+    pub layout_mode: LayoutMode,
+    /// CoreFS-Konfiguration, die in das Volume eingebettet wird.
+    /// `None` ⇒ [`CoreFsConfig::default`].
+    pub config: Option<CoreFsConfig>,
 }
 
 impl Default for FormatImageOptions {
@@ -42,6 +61,8 @@ impl Default for FormatImageOptions {
             inode_count: None,
             journal_blocks: None,
             sector_size: DEFAULT_SECTOR_SIZE,
+            layout_mode: LayoutMode::Native,
+            config: None,
         }
     }
 }
@@ -156,6 +177,21 @@ pub fn format_image(
 
     let format_report = format_device(&mut device, &format_opts)?;
 
+    // Switch to NATIVE layout if requested. `format_device` produces a BLOB-mode
+    // volume; the canonical path to NATIVE is to seed an empty CoreFsService
+    // and persist its state via `save_state_native` — analogous to what
+    // `OdfFileSession::format_new` does internally.
+    let final_generation = match options.layout_mode {
+        LayoutMode::Blob => format_report.generation,
+        LayoutMode::Native => {
+            let cfg = options.config.clone().unwrap_or_default();
+            let service = CoreFsService::format(cfg);
+            let state = service.persisted_state();
+            let report = save_state_native(&mut device, &state)?;
+            report.generation
+        }
+    };
+
     Ok(MkfsReport {
         image_path: path.display().to_string(),
         label: options.label.clone(),
@@ -163,7 +199,7 @@ pub fn format_image(
         total_blocks: format_report.geometry.total_blocks,
         inode_count: format_report.geometry.inode_count,
         journal_blocks: format_report.geometry.journal_blocks,
-        generation: format_report.generation,
+        generation: final_generation,
         uuid_hex: hex_encode(&format_report.uuid),
     })
 }
