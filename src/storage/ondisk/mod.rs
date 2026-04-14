@@ -59,6 +59,7 @@
 pub mod allocator;
 pub mod bitmap;
 pub mod checksum;
+pub mod extent_tree;
 pub mod inode;
 pub mod journal;
 pub mod layout;

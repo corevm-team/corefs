@@ -120,6 +120,10 @@ pub fn format_device(
         accessed_at: now,
         generation: 1,
         extents: Vec::new(),
+        index_block_addr: 0,
+        xattr_block_addr: 0,
+        domain_inode_id: 0,
+        data_crc: 0,
     };
     let sys_enc = system_inode.encode()?;
     table[..super::inode::INODE_RECORD_SIZE].copy_from_slice(&sys_enc);
@@ -226,6 +230,10 @@ pub fn save_state(
             length_blocks: payload_blocks_needed as u32,
             physical_block: payload_start,
         }],
+        index_block_addr: 0,
+        xattr_block_addr: 0,
+        domain_inode_id: 0,
+        data_crc: u64::from(Crc32c::hash(&payload)),
     };
     write_inode_record(device, &geom, 0, &system_inode)?;
 

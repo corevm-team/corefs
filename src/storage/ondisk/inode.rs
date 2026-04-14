@@ -14,7 +14,7 @@
 //!   8      4    uid
 //!  12      4    gid
 //!  16      4    link_count
-//!  20      4    flags
+//!  20      4    flags           (FLAG_* bits — see constants)
 //!  24      8    size_bytes
 //!  32      8    blocks_allocated
 //!  40      8    created_at
@@ -25,9 +25,21 @@
 //!  80      4    extent_count
 //!  84      4    reserved0
 //!  88    128    extents[8] × (u64 physical, u32 logical, u32 length_blocks)
-//! 216     36    reserved_tail
-//! 252      4    crc32c          (over the 256-byte record with crc bytes = 0)
+//! 216      8    index_block_addr (root of the indirect extent-tree chain)
+//! 224      8    xattr_block_addr (optional ACL/xattr region, 0 = none)
+//! 232      8    domain_inode_id  (cross-ref to the domain Inode ID)
+//! 240      8    data_crc         (CRC32C over the inode's logical data)
+//! 248      4    reserved_tail
+//! 252      4    crc32c           (over the record with crc bytes = 0)
 //! ```
+//!
+//! Flag bits:
+//! * [`FLAG_HAS_EXTENT_INDEX`] — extents are stored in the index-block chain
+//!   pointed to by `index_block_addr`; inline extent slots are ignored.
+//! * [`FLAG_ENCRYPTED`]        — data blocks are encrypted at rest.
+//! * [`FLAG_COMPRESSED`]       — data blocks are compressed.
+//! * [`FLAG_HAS_XATTRS`]       — `xattr_block_addr` points at a valid xattr
+//!   block holding key/value pairs and ACL entries.
 
 use super::checksum::Crc32c;
 use crate::error::{CoreFsError, CoreFsResult};
@@ -38,6 +50,15 @@ pub const INODE_RECORD_SIZE: usize = 256;
 pub const INODE_CHECKSUM_OFFSET: usize = INODE_RECORD_SIZE - 4;
 /// Maximum number of extents storable directly in one record.
 pub const MAX_INLINE_EXTENTS: usize = 8;
+
+/// Flag — this inode uses the indirect extent-tree chain.
+pub const FLAG_HAS_EXTENT_INDEX: u32 = 1 << 0;
+/// Flag — data blocks of this inode are encrypted at rest.
+pub const FLAG_ENCRYPTED: u32 = 1 << 1;
+/// Flag — data blocks of this inode are LZ4-compressed.
+pub const FLAG_COMPRESSED: u32 = 1 << 2;
+/// Flag — `xattr_block_addr` is valid and points at an xattr block.
+pub const FLAG_HAS_XATTRS: u32 = 1 << 3;
 
 /// Logical kind of a stored on-disk inode.
 #[repr(u16)]
@@ -94,6 +115,15 @@ pub struct OnDiskInode {
     pub accessed_at: i64,
     pub generation: u64,
     pub extents: Vec<Extent>,
+    /// Root block of the indirect extent-tree chain (0 = none).
+    pub index_block_addr: u64,
+    /// Block address of the xattr/ACL record (0 = none).
+    pub xattr_block_addr: u64,
+    /// Domain-level inode ID this on-disk record corresponds to
+    /// (0 for system inodes that have no domain counterpart).
+    pub domain_inode_id: u64,
+    /// CRC32C over the inode's logical data (plain-text, pre-encryption).
+    pub data_crc: u64,
 }
 
 impl OnDiskInode {
@@ -115,6 +145,10 @@ impl OnDiskInode {
             accessed_at: 0,
             generation: 0,
             extents: Vec::new(),
+            index_block_addr: 0,
+            xattr_block_addr: 0,
+            domain_inode_id: 0,
+            data_crc: 0,
         }
     }
 
@@ -153,7 +187,12 @@ impl OnDiskInode {
             rec[off + 12..off + 16].copy_from_slice(&ext.length_blocks.to_le_bytes());
             off += 16;
         }
-        // Tail stays zero.  Compute CRC over record with checksum slot zero.
+        // Extension fields at 216..248.
+        rec[216..224].copy_from_slice(&self.index_block_addr.to_le_bytes());
+        rec[224..232].copy_from_slice(&self.xattr_block_addr.to_le_bytes());
+        rec[232..240].copy_from_slice(&self.domain_inode_id.to_le_bytes());
+        rec[240..248].copy_from_slice(&self.data_crc.to_le_bytes());
+        // reserved_tail at 248..252 stays zero.  Compute CRC over record.
         let checksum = Crc32c::hash(&rec);
         rec[INODE_CHECKSUM_OFFSET..INODE_CHECKSUM_OFFSET + 4]
             .copy_from_slice(&checksum.to_le_bytes());
@@ -218,6 +257,10 @@ impl OnDiskInode {
             });
             off += 16;
         }
+        let index_block_addr = u64::from_le_bytes(rec[216..224].try_into().unwrap());
+        let xattr_block_addr = u64::from_le_bytes(rec[224..232].try_into().unwrap());
+        let domain_inode_id = u64::from_le_bytes(rec[232..240].try_into().unwrap());
+        let data_crc = u64::from_le_bytes(rec[240..248].try_into().unwrap());
 
         Ok(Self {
             version,
@@ -235,6 +278,10 @@ impl OnDiskInode {
             accessed_at,
             generation,
             extents,
+            index_block_addr,
+            xattr_block_addr,
+            domain_inode_id,
+            data_crc,
         })
     }
 }

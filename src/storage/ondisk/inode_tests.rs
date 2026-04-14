@@ -31,6 +31,10 @@ fn sample() -> OnDiskInode {
                 physical_block: 2000,
             },
         ],
+        index_block_addr: 0,
+        xattr_block_addr: 0,
+        domain_inode_id: 99,
+        data_crc: 0xDEAD_BEEF,
     }
 }
 
