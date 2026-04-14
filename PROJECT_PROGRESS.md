@@ -401,7 +401,7 @@ Ziel: CoreFS als natives Dateisystem des eigenen Betriebssystems AnyOS (`/daten1
 - [x] Crate `corefs-std` (std) — `Clock`-/`Rng`-Re-Exports + `StdRng`-Implementierung; langfristiger Sammelpunkt für `FileImageDevice`/`RawBlockDevice` (Migration mit storage)
 - [x] Crate `corefs-fuse-proto` (no_std + alloc) — AnyOS-natives Wire-Format: `Request`/`Reply`/`ReplyPayload`-Enums, `FrameHeader`, `Attr`, `DirEntry`, `StatFs`; `wire`-Modul mit bincode-Encode/Decode hinter `std`-Feature; `PROTOCOL_VERSION` (1.0)
 - [x] Crate `corefs-fuse-adapter` (no_std + alloc) — `Transport`- und `FuseHandler`-Traits, `SessionLoop` mit Destroy-Termination und Reply-Mirroring; bindet `corefs-core` + `corefs-fuse-proto`
-- [ ] Crate `corefs-cli` (std) — dünner Binary-Wrapper um `corefs-tools` (offen — `corefs::main` nutzt heute noch direkt die Service-APIs; chirurgischer Refactor in eigenem Commit)
+- [x] Crate `corefs-cli` (std) — dünner Binary-Wrapper um `corefs-tools` mit `dispatch`-Library für Unit-Testbarkeit; Subcommands `mkfs` / `fsck` / `repair` / `scrub` / `dump-superblock` / `dump-inode` / `snapshot {list,create,delete,restore}` / `defrag` / `help`; Text- und JSON-Output via `--json`-Flag; Exit-Codes 0/1/2 (Erfolg / Tool-Fehler / Usage-Fehler)
 - [x] Existierender Linux-`fuser`-Pfad ([src/platform/linux_fuse.rs](src/platform/linux_fuse.rs)) bleibt funktional (unverändert weitergeführt)
 - [x] Workspace-Tests grün (631 main + 21 corefs-core + 65 corefs-tools + 7 corefs-std + 7 corefs-fuse-proto + 6 corefs-fuse-adapter + Doctests)
 
@@ -434,7 +434,7 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [ ] `tier::migrate(device, policy) -> Result<Report>` (geplant — benötigt separate Hot- und Cold-Devices)
 - [x] `snapshot::{list, create, delete, restore}` als Library-APIs (alle vier über `OdfFileSession`)
 - [x] Strukturierte `Report`-Typen mit `summary` / `render_text` / `render_json` (`Report`-Trait + `to_pretty_json`-Helper)
-- [ ] `corefs-cli` auf `corefs-tools` umgestellt — Linux-CLI-Verhalten unverändert
+- [~] `corefs-cli` auf `corefs-tools` umgestellt — neues `corefs-cli`-Binary konsumiert ausschließlich `corefs-tools`-APIs (siehe 5.1). Das ältere `corefs`-Binary (`src/main.rs` + `src/cli.rs`) bleibt parallel als Demo-/Admin-Playground bestehen, bis seine Kommandos (Mount, Benchmark, Diagnose) ebenfalls auf die neue Toolchain migriert sind.
 
 ### 5.4 FUSE-Crates (AnyOS-Wire)
 

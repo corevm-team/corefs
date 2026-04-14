@@ -6,6 +6,7 @@ members = [
     "corefs-std",
     "corefs-fuse-proto",
     "corefs-fuse-adapter",
+    "corefs-cli",
 ]
 resolver = "2"
 

@@ -1,0 +1,20 @@
+[package]
+name = "corefs-cli"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+description = "Schlanke Kommandozeilen-Frontend um die corefs-tools-Operationen (mkfs, fsck, scrub, repair, dump, snapshot, defrag)."
+
+[lib]
+name = "corefs_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "corefs-cli"
+path = "src/main.rs"
+
+[dependencies]
+corefs-tools = { path = "../corefs-tools" }
+
+[dev-dependencies]
+serde_json = "1"
