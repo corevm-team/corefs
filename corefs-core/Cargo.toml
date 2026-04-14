@@ -8,18 +8,18 @@ description = "CoreFS core — plattformneutrale, no_std-fähige Domain- und Sto
 [features]
 default = []
 # `std` aktiviert std-Bequemlichkeiten (Display, std::error::Error-Impls,
-# From-Konvertierungen von std::time::SystemTime, …). `bincode` ist seit der
-# Wave-5-Migration unconditional verfügbar (no_std-fähige Variante 2.x,
-# gespiegelt über `crate::bincode_compat` auf das klassische 1.x-API). Damit
-# kompilieren auch die ehemals std-gebundenen ondisk-Treiber (volume, native,
-# grouped, journaled, fsck_repair, reader, scrub) im strikten
-# `no_std + alloc`-Modus und können im AnyOS-Kernel gelinkt werden.
-std = []
+# From-Konvertierungen von std::time::SystemTime, …) und zieht die
+# `getrandom`-Erweiterung von `chacha20poly1305` nach, damit die bequeme
+# `EncryptionService::encrypt`-Variante (mit OS-CSPRNG-Nonce) verfügbar
+# ist. Ohne `std` ist die Crate strikt `no_std + alloc` und nutzt
+# `EncryptionService::encrypt_with_rng(plaintext, &mut dyn Rng)` —
+# der Aufrufer liefert eine eigene CSPRNG-Implementierung.
+std = ["chacha20poly1305/getrandom"]
 
 [dependencies]
 serde = { workspace = true }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more", "serde"] }
-chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "getrandom"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 bincode = { workspace = true }
 
 [dev-dependencies]

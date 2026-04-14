@@ -5,9 +5,10 @@ use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use chacha20poly1305::ChaCha20Poly1305;
-use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
+use chacha20poly1305::aead::{Aead, KeyInit};
 
 use crate::error::{CoreFsError, CoreFsResult};
+use crate::platform::Rng;
 
 /// Nonce length (12 bytes) prepended to every ciphertext.
 const NONCE_LEN: usize = 12;
@@ -68,27 +69,56 @@ impl EncryptionService {
         data.len() >= MIN_ENCRYPT_BYTES && self.key.is_some()
     }
 
-    /// Encrypts `plaintext` with ChaCha20-Poly1305.
+    /// Verschlüsselt `plaintext` mit ChaCha20-Poly1305 und einer vom Aufrufer
+    /// gelieferten Zufallsquelle.
     ///
-    /// Returns `nonce (12 B) || ciphertext || tag (16 B)`.
+    /// Liefert `nonce (12 B) || ciphertext || tag (16 B)`. no_std-fähig.
+    /// Der Aufrufer ist dafür verantwortlich, dass `rng` kryptografisch
+    /// sichere Zufallsbytes liefert (z. B. ein OS-CSPRNG oder ein
+    /// hardware-gestützter Generator).
     ///
-    /// Fails if no key has been set.
-    pub fn encrypt(&self, plaintext: &[u8]) -> CoreFsResult<Vec<u8>> {
+    /// Fehler, wenn kein Schlüssel gesetzt ist.
+    pub fn encrypt_with_rng(&self, plaintext: &[u8], rng: &mut dyn Rng) -> CoreFsResult<Vec<u8>> {
         let key = self
             .key
             .as_ref()
             .ok_or_else(|| CoreFsError::State("encryption key not set".to_string()))?;
 
         let cipher = ChaCha20Poly1305::new_from_slice(key).expect("key length is always 32 bytes");
-        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        rng.fill_bytes(&mut nonce_bytes);
+        let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
-            .encrypt(&nonce, plaintext)
+            .encrypt(nonce, plaintext)
             .map_err(|e| CoreFsError::State(format!("encryption failed: {e}")))?;
 
         let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&nonce_bytes);
         out.extend_from_slice(&ciphertext);
         Ok(out)
+    }
+
+    /// Verschlüsselt `plaintext` mit dem OS-CSPRNG für die Nonce.
+    ///
+    /// Bequemere Variante von [`EncryptionService::encrypt_with_rng`] für
+    /// std-basierte Umgebungen. Nur mit aktiviertem `std`-Feature der
+    /// `corefs-core`-Crate verfügbar.
+    #[cfg(feature = "std")]
+    pub fn encrypt(&self, plaintext: &[u8]) -> CoreFsResult<Vec<u8>> {
+        struct OsBridge;
+        impl Rng for OsBridge {
+            fn fill_bytes(&mut self, dest: &mut [u8]) {
+                use chacha20poly1305::aead::{AeadCore, OsRng};
+                // Re-use chacha's bundled OsRng for byte filling. We chunk by
+                // 12 (the nonce size) which is what `generate_nonce` provides.
+                for chunk in dest.chunks_mut(12) {
+                    let n = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+                    chunk.copy_from_slice(&n[..chunk.len()]);
+                }
+            }
+        }
+        let mut rng = OsBridge;
+        self.encrypt_with_rng(plaintext, &mut rng)
     }
 
     /// Decrypts data previously produced by `encrypt`.
