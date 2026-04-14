@@ -23,6 +23,9 @@
 //! structure carries a CRC32C checksum so corruption can be detected
 //! independently of the payload format.
 
+use alloc::format;
+use alloc::string::ToString;
+
 use crate::error::{CoreFsError, CoreFsResult};
 
 /// Size of an on-disk block in bytes (4 KiB).

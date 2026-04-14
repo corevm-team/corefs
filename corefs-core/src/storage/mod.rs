@@ -13,3 +13,4 @@ pub mod allocator;
 pub mod block_device;
 pub mod block_store;
 pub mod catalog;
+pub mod ondisk;

@@ -1,6 +1,8 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+use alloc::vec;
+
 use super::Crc32c;
 
 #[test]

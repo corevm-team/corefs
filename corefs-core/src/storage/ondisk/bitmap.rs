@@ -7,6 +7,10 @@
 //! addressable unit (a block in the block bitmap, an inode in the inode
 //! bitmap).  Bit 0 of byte 0 represents unit 0.
 
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::error::{CoreFsError, CoreFsResult};
 
 use super::layout::{BITS_PER_BITMAP_BLOCK, BLOCK_SIZE};
