@@ -69,6 +69,7 @@ pub mod layout;
 pub mod native;
 pub mod superblock;
 pub mod volume;
+pub mod xattr;
 
 pub use volume::{
     FormatOptions, FormatReport, SaveReport, VolumeInfo, format_device, inspect, load_state,

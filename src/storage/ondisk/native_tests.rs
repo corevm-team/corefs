@@ -215,6 +215,42 @@ fn corrupted_attr_block_is_reported() {
 }
 
 #[test]
+fn encryption_flag_propagates_to_on_disk_inode() {
+    let mut dev = fresh_device(4096);
+    format_device(&mut dev, &default_options()).unwrap();
+    let mut state = empty_state();
+    let mut meta = FileMetadata::default();
+    meta.encrypted = true;
+    meta.compressed = true;
+    state.active_inodes.push(Inode {
+        id: InodeId(77),
+        kind: InodeKind::File,
+        path: "/secret".into(),
+        size: 0,
+        created_at: t(0),
+        modified_at: t(0),
+        changed_at: t(0),
+        metadata: meta,
+    });
+    save_state_native(&mut dev, &state).unwrap();
+
+    // Read the on-disk inode for slot 10 (first user slot).
+    let sb_bytes = dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap();
+    let sb = crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();
+    let geom = sb.geometry();
+    let (block, offset) = geom.inode_record_location(FIRST_USER_INODE_SLOT).unwrap();
+    let buf = dev.read_at(block * BLOCK_SIZE, BLOCK_SIZE).unwrap();
+    let on_disk = crate::storage::ondisk::inode::OnDiskInode::decode(
+        &buf[offset as usize..offset as usize + crate::storage::ondisk::inode::INODE_RECORD_SIZE],
+    )
+    .unwrap();
+    assert!(on_disk.flags & crate::storage::ondisk::inode::FLAG_ENCRYPTED != 0);
+    assert!(on_disk.flags & crate::storage::ondisk::inode::FLAG_COMPRESSED != 0);
+    assert!(on_disk.flags & crate::storage::ondisk::inode::FLAG_HAS_XATTRS != 0);
+    assert_eq!(on_disk.domain_inode_id, 77);
+}
+
+#[test]
 fn root_inode_pointer_records_directory() {
     let mut dev = fresh_device(4096);
     format_device(&mut dev, &default_options()).unwrap();

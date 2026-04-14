@@ -416,6 +416,12 @@ fn write_inode(
     if deleted {
         flags |= FLAG_DELETED;
     }
+    if inode.metadata.encrypted {
+        flags |= super::inode::FLAG_ENCRYPTED;
+    }
+    if inode.metadata.compressed {
+        flags |= super::inode::FLAG_COMPRESSED;
+    }
     let data_crc = if !content.is_empty() {
         u64::from(Crc32c::hash(content))
     } else {
