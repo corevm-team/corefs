@@ -421,17 +421,19 @@ Ziel: CoreFS als natives Dateisystem des eigenen Betriebssystems AnyOS (`/daten1
 
 ### 5.3 Tool-Logik extrahieren nach `corefs-tools`
 
-- [ ] `mkfs::format(device, params) -> Result<Report>`
-- [ ] `fsck::check(device, mode) -> Result<Report>`
+Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate); shrinkt zu `no_std + alloc`, sobald `storage`/`services` migriert sind. Einheitliches `Report`-Trait mit `summary`/`render_text`/`render_json`. Einheitlicher `ToolsError` (Core/Io/InvalidArgument).
+
+- [x] `mkfs::format_image(path, capacity, options) -> Result<MkfsReport>` (File-Image-basiert; Block-Device-Variante folgt)
+- [x] `fsck::check_image(path) -> Result<FsckCheckReport>` (Read-only)
 - [ ] `fsck::repair(device, policy) -> Result<Report>`
-- [ ] `scrub::run(device, range) -> Result<Report>`
-- [ ] `dump::superblock(device) -> SuperblockInfo`
+- [ ] `scrub::run(device, plan) -> Result<ScrubReport>`
+- [x] `dump::superblock(path) -> Result<SuperblockReport>`
 - [ ] `dump::inode(device, inode_id) -> InodeDump`
 - [ ] `defrag::run(device, policy) -> Result<Report>`
 - [ ] `resize::grow(device, new_size) -> Result<Report>`
 - [ ] `tier::migrate(device, policy) -> Result<Report>`
 - [ ] `snapshot::{create, list, delete, restore}` als Library-APIs
-- [ ] Strukturierte `Report`-Typen (keine String-Rückgaben im Kern)
+- [x] Strukturierte `Report`-Typen mit `summary` / `render_text` / `render_json` (`Report`-Trait + `to_pretty_json`-Helper)
 - [ ] `corefs-cli` auf `corefs-tools` umgestellt — Linux-CLI-Verhalten unverändert
 
 ### 5.4 FUSE-Crates (AnyOS-Wire)
