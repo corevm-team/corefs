@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use alloc::string::{String, ToString};
+use alloc::{vec, vec::Vec};
 
 #[test]
 fn display_returns_inner_message_for_each_error_variant() {

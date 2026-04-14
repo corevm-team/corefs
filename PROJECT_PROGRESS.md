@@ -396,7 +396,7 @@ Ziel: CoreFS als natives Dateisystem des eigenen Betriebssystems AnyOS (`/daten1
 ### 5.1 Workspace-Split in CoreFS
 
 - [x] Cargo-Workspace in `corefs/` anlegen (root-Manifest mit `.`, `corefs-core`, `corefs-tools`, `corefs-std`, `corefs-fuse-proto`, `corefs-fuse-adapter` als Member; `[workspace.package]` und `[workspace.dependencies]` zentralisiert)
-- [~] Crate `corefs-core` (no_std + alloc) — `domain/` + `config` + `platform` strikt no_std+alloc und vollständig migriert; `storage` + `services` weiter im main crate (späterer Migrationsschritt)
+- [~] Crate `corefs-core` (no_std + alloc) — `domain/` + `config` + `platform` + `error` + `storage::block_device` (Trait, `DeviceGeometry`, `MemoryDevice`, Alignment-Helfer) strikt no_std+alloc und migriert; restliches `storage` (BlockStore, Catalog, Allocator, ondisk/) + `services` weiter im main crate (späterer Migrationsschritt)
 - [x] Crate `corefs-tools` (std, später no_std) — Operation-APIs: mkfs, fsck, repair, scrub, dump, defrag, snapshot (8/10 implementiert; resize+tier als planned dokumentiert; siehe 5.3)
 - [x] Crate `corefs-std` (std) — `Clock`-/`Rng`-Re-Exports + `StdRng`-Implementierung; langfristiger Sammelpunkt für `FileImageDevice`/`RawBlockDevice` (Migration mit storage)
 - [x] Crate `corefs-fuse-proto` (no_std + alloc) — AnyOS-natives Wire-Format: `Request`/`Reply`/`ReplyPayload`-Enums, `FrameHeader`, `Attr`, `DirEntry`, `StatFs`; `wire`-Modul mit bincode-Encode/Decode hinter `std`-Feature; `PROTOCOL_VERSION` (1.0)

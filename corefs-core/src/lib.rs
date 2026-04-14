@@ -45,6 +45,8 @@ extern crate alloc;
 pub mod platform;
 pub mod config;
 pub mod domain;
+pub mod error;
+pub mod storage;
 
 /// Versions-String der `corefs-core`-Crate (aus `Cargo.toml`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

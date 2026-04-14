@@ -1,134 +1,26 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+//! Std-seitige Backends für [`crate::storage::block_device::BlockDevice`].
+//!
+//! Die plattformneutralen Definitionen ([`BlockDevice`], [`DeviceGeometry`],
+//! [`MemoryDevice`], Sektor-Konstanten, Alignment-Helfer) leben jetzt in
+//! [`corefs_core::storage::block_device`] und werden hier transparent
+//! re-exportiert. Nur die std-/Linux-spezifischen Backends ([`FileImageDevice`]
+//! und [`raw::RawBlockDevice`]) sowie die Verifikations-Helfer
+//! ([`sanity_check_writable`], [`verify_device_capacity`]) leben weiterhin
+//! in dieser Datei.
+
 use crate::error::{CoreFsError, CoreFsResult};
-use std::fmt;
 use std::path::{Path, PathBuf};
 
-// ---------------------------------------------------------------------------
-// Sector size constants
-// ---------------------------------------------------------------------------
-
-/// Traditional hard-disk sector size (512 bytes).
-pub const SECTOR_SIZE_512: u32 = 512;
-
-/// Advanced-format / NVMe / flash sector size (4096 bytes).
-pub const SECTOR_SIZE_4K: u32 = 4096;
-
-// ---------------------------------------------------------------------------
-// DeviceGeometry — physical parameters of the underlying device
-// ---------------------------------------------------------------------------
-
-/// Describes the physical geometry of a block device or image file.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceGeometry {
-    /// Logical sector size in bytes (minimum addressable unit).
-    pub sector_size: u32,
-    /// Total number of sectors on the device.
-    pub sector_count: u64,
-    /// Total capacity in bytes (`sector_size * sector_count`).
-    pub capacity_bytes: u64,
-    /// `true` if the device is read-only (e.g. write-protected USB stick).
-    pub read_only: bool,
-}
-
-// ---------------------------------------------------------------------------
-// BlockDevice trait — the core abstraction
-// ---------------------------------------------------------------------------
-
-/// Abstraction over a raw, sector-addressable storage medium.
-///
-/// Implementations exist for file-backed images ([`FileImageDevice`]) and,
-/// on Linux, for raw block devices (`RawBlockDevice` — Linux-only, see
-/// the `#[cfg(target_os = "linux")]` module below).
-///
-/// All offsets and lengths are in **bytes** and must be aligned to the
-/// device's sector size.  Implementations return
-/// [`CoreFsError::InvalidInput`] for misaligned operations and
-/// [`CoreFsError::State`] for I/O failures.
-pub trait BlockDevice: fmt::Debug + Send {
-    /// Returns the physical geometry of the device.
-    fn geometry(&self) -> &DeviceGeometry;
-
-    /// Reads `length` bytes starting at byte offset `offset`.
-    ///
-    /// Both `offset` and `length` must be multiples of the sector size.
-    fn read_at(&self, offset: u64, length: u64) -> CoreFsResult<Vec<u8>>;
-
-    /// Writes `data` starting at byte offset `offset`.
-    ///
-    /// `offset` must be a multiple of the sector size.
-    /// `data.len()` must be a multiple of the sector size.
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> CoreFsResult<()>;
-
-    /// Flushes any buffered writes to persistent storage.
-    fn sync(&mut self) -> CoreFsResult<()>;
-
-    /// Informs the device that the byte range `[offset, offset + length)` is
-    /// no longer in use and may be discarded (TRIM / UNMAP).
-    ///
-    /// `offset` and `length` must be multiples of the sector size.
-    /// Devices that do not support TRIM return `Ok(())` silently.
-    fn trim(&mut self, offset: u64, length: u64) -> CoreFsResult<()>;
-
-    /// Returns `true` if the device supports TRIM / discard.
-    fn supports_trim(&self) -> bool;
-
-    /// Returns the total capacity in bytes.
-    fn capacity(&self) -> u64 {
-        self.geometry().capacity_bytes
-    }
-
-    /// Returns the sector size in bytes.
-    fn sector_size(&self) -> u32 {
-        self.geometry().sector_size
-    }
-
-    /// Returns `true` if the device is read-only.
-    fn is_read_only(&self) -> bool {
-        self.geometry().read_only
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Alignment helpers
-// ---------------------------------------------------------------------------
-
-fn check_alignment(offset: u64, length: u64, sector_size: u32) -> CoreFsResult<()> {
-    let ss = u64::from(sector_size);
-    if offset % ss != 0 {
-        return Err(CoreFsError::InvalidInput(format!(
-            "offset {offset} is not aligned to sector size {sector_size}"
-        )));
-    }
-    if length % ss != 0 {
-        return Err(CoreFsError::InvalidInput(format!(
-            "length {length} is not aligned to sector size {sector_size}"
-        )));
-    }
-    Ok(())
-}
-
-fn check_bounds(offset: u64, length: u64, capacity: u64) -> CoreFsResult<()> {
-    let end = offset.checked_add(length).ok_or_else(|| {
-        CoreFsError::InvalidInput(format!("offset {offset} + length {length} overflows u64"))
-    })?;
-    if end > capacity {
-        return Err(CoreFsError::InvalidInput(format!(
-            "access past end of device: offset {offset} + length {length} = {end} > capacity {capacity}"
-        )));
-    }
-    Ok(())
-}
-
-fn check_write_permission(read_only: bool) -> CoreFsResult<()> {
-    if read_only {
-        return Err(CoreFsError::PolicyViolation(
-            "device is read-only".to_string(),
-        ));
-    }
-    Ok(())
-}
+// Re-exports der no_std-Definitionen aus corefs-core. So bleiben alle
+// `use crate::storage::block_device::{BlockDevice, DeviceGeometry, …}`-Pfade
+// in den Konsumenten unverändert lauffähig.
+pub use corefs_core::storage::block_device::{
+    BlockDevice, DeviceGeometry, MemoryDevice, SECTOR_SIZE_4K, SECTOR_SIZE_512,
+    check_alignment, check_bounds, check_write_permission,
+};
 
 // ---------------------------------------------------------------------------
 // Fake-stick detection helpers
@@ -962,161 +854,6 @@ pub mod raw {
     }
 }
 
-// ===========================================================================
-// MemoryDevice — in-memory block device for testing
-// ===========================================================================
-
-/// A [`crate::storage::block_device::BlockDevice`] backed entirely by an in-memory buffer.
-///
-/// Useful for unit tests and as a reference implementation.
-#[derive(Debug, Clone)]
-pub struct MemoryDevice {
-    data: Vec<u8>,
-    geometry: DeviceGeometry,
-    trim_supported: bool,
-    trimmed_ranges: Vec<(u64, u64)>,
-}
-
-impl MemoryDevice {
-    /// Creates a new zero-filled in-memory device.
-    pub fn new(capacity_bytes: u64, sector_size: u32) -> CoreFsResult<Self> {
-        if capacity_bytes == 0 {
-            return Err(CoreFsError::InvalidInput(
-                "capacity must be greater than zero".to_string(),
-            ));
-        }
-        if sector_size == 0 || (sector_size & (sector_size - 1)) != 0 {
-            return Err(CoreFsError::InvalidInput(format!(
-                "sector size {sector_size} must be a power of two"
-            )));
-        }
-        if capacity_bytes % u64::from(sector_size) != 0 {
-            return Err(CoreFsError::InvalidInput(format!(
-                "capacity {capacity_bytes} must be a multiple of sector size {sector_size}"
-            )));
-        }
-        Ok(Self {
-            data: vec![0u8; capacity_bytes as usize],
-            geometry: DeviceGeometry {
-                sector_size,
-                sector_count: capacity_bytes / u64::from(sector_size),
-                capacity_bytes,
-                read_only: false,
-            },
-            trim_supported: true,
-            trimmed_ranges: Vec::new(),
-        })
-    }
-
-    /// Creates a read-only in-memory device from existing data.
-    pub fn from_bytes(data: Vec<u8>, sector_size: u32) -> CoreFsResult<Self> {
-        let capacity_bytes = data.len() as u64;
-        if capacity_bytes == 0 {
-            return Err(CoreFsError::InvalidInput(
-                "capacity must be greater than zero".to_string(),
-            ));
-        }
-        if capacity_bytes % u64::from(sector_size) != 0 {
-            return Err(CoreFsError::InvalidInput(format!(
-                "data length {} must be a multiple of sector size {sector_size}",
-                data.len()
-            )));
-        }
-        Ok(Self {
-            data,
-            geometry: DeviceGeometry {
-                sector_size,
-                sector_count: capacity_bytes / u64::from(sector_size),
-                capacity_bytes,
-                read_only: false,
-            },
-            trim_supported: true,
-            trimmed_ranges: Vec::new(),
-        })
-    }
-
-    /// Enables or disables TRIM support (for testing trim code paths).
-    pub fn set_trim_supported(&mut self, supported: bool) {
-        self.trim_supported = supported;
-    }
-
-    /// Sets the device as read-only (for testing write-protection code paths).
-    pub fn set_read_only(&mut self, read_only: bool) {
-        self.geometry.read_only = read_only;
-    }
-
-    /// Returns a snapshot of the underlying data buffer.
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Returns ranges that were trimmed since creation or last clear.
-    pub fn trimmed_ranges(&self) -> &[(u64, u64)] {
-        &self.trimmed_ranges
-    }
-
-    /// Clears the list of recorded TRIM ranges.
-    pub fn clear_trimmed_ranges(&mut self) {
-        self.trimmed_ranges.clear();
-    }
-}
-
-impl BlockDevice for MemoryDevice {
-    fn geometry(&self) -> &DeviceGeometry {
-        &self.geometry
-    }
-
-    fn read_at(&self, offset: u64, length: u64) -> CoreFsResult<Vec<u8>> {
-        check_alignment(offset, length, self.geometry.sector_size)?;
-        check_bounds(offset, length, self.geometry.capacity_bytes)?;
-        if length == 0 {
-            return Ok(Vec::new());
-        }
-        let start = offset as usize;
-        let end = start + length as usize;
-        Ok(self.data[start..end].to_vec())
-    }
-
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> CoreFsResult<()> {
-        check_write_permission(self.geometry.read_only)?;
-        let length = data.len() as u64;
-        check_alignment(offset, length, self.geometry.sector_size)?;
-        check_bounds(offset, length, self.geometry.capacity_bytes)?;
-        if data.is_empty() {
-            return Ok(());
-        }
-        let start = offset as usize;
-        let end = start + data.len();
-        self.data[start..end].copy_from_slice(data);
-        Ok(())
-    }
-
-    fn sync(&mut self) -> CoreFsResult<()> {
-        // No-op for memory device.
-        Ok(())
-    }
-
-    fn trim(&mut self, offset: u64, length: u64) -> CoreFsResult<()> {
-        if !self.trim_supported {
-            return Ok(());
-        }
-        check_alignment(offset, length, self.geometry.sector_size)?;
-        check_bounds(offset, length, self.geometry.capacity_bytes)?;
-        if length == 0 {
-            return Ok(());
-        }
-        // Zero-fill the trimmed range (simulates device discard behaviour).
-        let start = offset as usize;
-        let end = start + length as usize;
-        self.data[start..end].fill(0);
-        self.trimmed_ranges.push((offset, length));
-        Ok(())
-    }
-
-    fn supports_trim(&self) -> bool {
-        self.trim_supported
-    }
-}
 
 // ===========================================================================
 // Tests
