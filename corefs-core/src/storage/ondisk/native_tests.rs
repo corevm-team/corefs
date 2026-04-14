@@ -2,18 +2,17 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::app::PersistedState;
 use crate::config::CoreFsConfig;
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::domain::metadata::FileMetadata;
 use crate::domain::volume::VolumeDescriptor;
+use crate::platform::Timestamp;
 use crate::services::journal::JournalRuntimeState;
 use crate::storage::block_device::MemoryDevice;
 use crate::storage::block_store::{AllocatorPolicy, BlockRecord};
 use crate::storage::ondisk::layout::BLOCK_SIZE;
 use crate::storage::ondisk::volume::{FormatOptions, format_device};
-use corefs_core::platform::Timestamp;
-use std::time::UNIX_EPOCH;
+use crate::storage::persisted_state::PersistedState;
 
 fn fresh_device(blocks: u64) -> MemoryDevice {
     MemoryDevice::new(blocks * BLOCK_SIZE, 4096).unwrap()
@@ -51,7 +50,7 @@ fn empty_state() -> PersistedState {
 }
 
 fn t(epoch_offset: u64) -> Timestamp {
-    (UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + epoch_offset)).into()
+    Timestamp::from_secs(1_700_000_000 + epoch_offset)
 }
 
 fn sample_inode(id: u64, path: &str, kind: InodeKind, size: usize) -> Inode {
@@ -151,7 +150,7 @@ fn many_inodes_roundtrip() {
     assert_eq!(loaded.block_records.len(), 19);
 
     // Paths and ids preserved.
-    let paths: std::collections::HashSet<_> = loaded
+    let paths: hashbrown::HashSet<_> = loaded
         .active_inodes
         .iter()
         .map(|i| i.path.clone())
@@ -348,14 +347,14 @@ fn incremental_classifies_create_update_remove() {
 
     // Roundtrip: reloading must reflect the new state precisely.
     let loaded = load_state_native(&dev).unwrap();
-    let by_id: std::collections::HashMap<u64, &Inode> =
+    let by_id: hashbrown::HashMap<u64, &Inode> =
         loaded.active_inodes.iter().map(|i| (i.id.0, i)).collect();
     assert_eq!(by_id.len(), 3);
     assert!(by_id.contains_key(&1));
     assert!(by_id.contains_key(&2));
     assert!(!by_id.contains_key(&3));
     assert!(by_id.contains_key(&4));
-    let new_content: std::collections::HashMap<u64, &[u8]> = loaded
+    let new_content: hashbrown::HashMap<u64, &[u8]> = loaded
         .block_records
         .iter()
         .map(|r| (r.inode.0, r.bytes.as_slice()))

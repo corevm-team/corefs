@@ -35,13 +35,19 @@
 //! [`FLAG_DELETED`] below which marks an on-disk inode as logically
 //! removed but retained for recovery.
 
-use crate::app::PersistedState;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::error::{CoreFsError, CoreFsResult};
+use crate::platform::Timestamp;
 use crate::storage::block_device::BlockDevice;
 use crate::storage::block_store::BlockRecord;
+use crate::storage::persisted_state::PersistedState;
+use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
-use corefs_core::platform::Timestamp;
 
 use super::allocator::{AllocationStrategy, OndiskAllocator};
 use super::attr_block::AttrBlock;
@@ -169,8 +175,8 @@ pub fn save_state_native(
     write_inode_at_slot(device, &geom, ANCILLARY_INODE_SLOT, &anc_inode)?;
 
     // --- Build a bytes-per-inode map from block_records ------------------
-    let mut bytes_by_inode: std::collections::HashMap<InodeId, &[u8]> =
-        std::collections::HashMap::new();
+    let mut bytes_by_inode: HashMap<InodeId, &[u8]> =
+        HashMap::new();
     for rec in &state.block_records {
         bytes_by_inode.insert(rec.inode, rec.bytes.as_slice());
     }
@@ -412,8 +418,8 @@ pub fn save_state_native_incremental(
         slot: u64,
         on_disk: OnDiskInode,
     }
-    let mut existing: std::collections::HashMap<u64, ExistingSlot> =
-        std::collections::HashMap::new();
+    let mut existing: HashMap<u64, ExistingSlot> =
+        HashMap::new();
     for slot in FIRST_USER_INODE_SLOT..geom.inode_count {
         if !ibm.is_set(slot)? {
             continue;
@@ -426,8 +432,8 @@ pub fn save_state_native_incremental(
     }
 
     // Build a bytes-per-inode map.
-    let mut bytes_by_inode: std::collections::HashMap<InodeId, &[u8]> =
-        std::collections::HashMap::new();
+    let mut bytes_by_inode: HashMap<InodeId, &[u8]> =
+        HashMap::new();
     for rec in &state.block_records {
         bytes_by_inode.insert(rec.inode, rec.bytes.as_slice());
     }
@@ -440,12 +446,12 @@ pub fn save_state_native_incremental(
         deleted: bool,
         crc: u64,
     }
-    let mut desired: std::collections::HashMap<u64, DesiredSlot<'_>> =
-        std::collections::HashMap::new();
+    let mut desired: HashMap<u64, DesiredSlot<'_>> =
+        HashMap::new();
     fn build_desired<'a>(
         inode: &'a Inode,
         deleted: bool,
-        bytes_by_inode: &std::collections::HashMap<InodeId, &'a [u8]>,
+        bytes_by_inode: &HashMap<InodeId, &'a [u8]>,
     ) -> DesiredSlot<'a> {
         let bytes = bytes_by_inode.get(&inode.id).copied().unwrap_or(&[]);
         let crc = if !bytes.is_empty() {
