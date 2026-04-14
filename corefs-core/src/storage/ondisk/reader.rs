@@ -19,7 +19,11 @@
 //! memory (a few KiB for typical volumes); every other access is a
 //! targeted block read against the device.
 
-use std::collections::HashMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use hashbrown::HashMap;
 
 use crate::domain::inode::{Inode, InodeKind};
 use crate::error::{CoreFsError, CoreFsResult};
@@ -270,6 +274,6 @@ fn odk_to_kind(k: OnDiskKind) -> CoreFsResult<InodeKind> {
     })
 }
 
-#[cfg(test)]
-#[path = "reader_tests.rs"]
-mod tests;
+// Tests for `OdfReader` live in the main `corefs` crate because they
+// depend on `session::OdfDeviceSession`, which is std-bound (pulls in
+// filesystem-level services) and stays in the main crate.

@@ -1,10 +1,11 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
-use super::*;
 use crate::storage::block_device::MemoryDevice;
 use crate::storage::ondisk::layout::BLOCK_SIZE;
+use crate::storage::ondisk::reader::OdfReader;
 use crate::storage::ondisk::session::{OdfDeviceSession, OdfSessionOptions};
+use crate::storage::ondisk::superblock::LAYOUT_MODE_NATIVE;
 
 fn populated_device() -> Box<dyn crate::storage::block_device::BlockDevice> {
     let mut opts = OdfSessionOptions::with_defaults();

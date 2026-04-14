@@ -40,6 +40,8 @@ pub mod journaled;
 #[cfg(feature = "std")]
 pub mod native;
 #[cfg(feature = "std")]
+pub mod reader;
+#[cfg(feature = "std")]
 pub mod volume;
 
 pub use checksum::Crc32c;
