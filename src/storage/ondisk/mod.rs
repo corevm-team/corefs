@@ -60,6 +60,7 @@ pub mod allocator;
 pub mod bitmap;
 pub mod checksum;
 pub mod inode;
+pub mod journal;
 pub mod layout;
 pub mod superblock;
 pub mod volume;
