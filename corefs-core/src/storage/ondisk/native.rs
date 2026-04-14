@@ -140,7 +140,7 @@ pub fn save_state_native(
 
     // --- Ancillary blob at slot #1 ---------------------------------------
     let ancillary = AncillaryState::from(state);
-    let anc_bytes = bincode::serialize(&ancillary)
+    let anc_bytes = crate::bincode_compat::serialize(&ancillary)
         .map_err(|e| CoreFsError::State(format!("native: ancillary serialize failed: {e}")))?;
     let anc_crc = Crc32c::hash(&anc_bytes);
     let mut anc_payload = anc_bytes.clone();
@@ -267,7 +267,7 @@ pub fn load_state_native(device: &dyn BlockDevice) -> CoreFsResult<PersistedStat
             "native load: ancillary CRC mismatch".into(),
         ));
     }
-    let ancillary: AncillaryState = bincode::deserialize(payload).map_err(|e| {
+    let ancillary: AncillaryState = crate::bincode_compat::deserialize(payload).map_err(|e| {
         CoreFsError::State(format!("native load: ancillary deserialize failed: {e}"))
     })?;
 
@@ -297,7 +297,7 @@ pub fn load_state_native(device: &dyn BlockDevice) -> CoreFsResult<PersistedStat
         }
         let attr_buf = device.read_at(on_disk.xattr_block_addr * BLOCK_SIZE, BLOCK_SIZE)?;
         let attr = AttrBlock::decode(&attr_buf)?;
-        let inode: Inode = bincode::deserialize(&attr.payload).map_err(|e| {
+        let inode: Inode = crate::bincode_compat::deserialize(&attr.payload).map_err(|e| {
             CoreFsError::State(format!("native load: inode deserialize failed: {e}"))
         })?;
         let bytes = read_all_extent_bytes(device, &on_disk)?;
@@ -610,7 +610,7 @@ fn rewrite_ancillary(
         }
     }
     let ancillary = AncillaryState::from(state);
-    let anc_bytes = bincode::serialize(&ancillary)
+    let anc_bytes = crate::bincode_compat::serialize(&ancillary)
         .map_err(|e| CoreFsError::State(format!("native: ancillary serialize failed: {e}")))?;
     let anc_crc = Crc32c::hash(&anc_bytes);
     let mut payload = anc_bytes;
@@ -658,7 +658,7 @@ fn write_inode_record_at(
 ) -> CoreFsResult<()> {
     let (extents, index_block_addr, flags_has_index) =
         allocate_and_write_content(device, alloc, content)?;
-    let attr_bytes = bincode::serialize(inode)
+    let attr_bytes = crate::bincode_compat::serialize(inode)
         .map_err(|e| CoreFsError::State(format!("native: inode serialize failed: {e}")))?;
     if attr_bytes.len() > super::attr_block::ATTR_BLOCK_CAPACITY {
         return Err(CoreFsError::State(format!(
@@ -760,7 +760,7 @@ fn write_inode(
     let (extents, index_block_addr, flags_has_index) =
         allocate_and_write_content(device, alloc, content)?;
     // --- Allocate + write attr block containing the serialized Inode ---
-    let attr_bytes = bincode::serialize(inode)
+    let attr_bytes = crate::bincode_compat::serialize(inode)
         .map_err(|e| CoreFsError::State(format!("native: inode serialize failed: {e}")))?;
     if attr_bytes.len() > super::attr_block::ATTR_BLOCK_CAPACITY {
         return Err(CoreFsError::State(format!(
@@ -887,7 +887,7 @@ pub fn read_all_extent_bytes_public(
 /// implementation.
 pub fn build_ancillary_bytes(state: &PersistedState) -> CoreFsResult<Vec<u8>> {
     let ancillary = AncillaryState::from(state);
-    let anc_bytes = bincode::serialize(&ancillary)
+    let anc_bytes = crate::bincode_compat::serialize(&ancillary)
         .map_err(|e| CoreFsError::State(format!("native: ancillary serialize failed: {e}")))?;
     let anc_crc = Crc32c::hash(&anc_bytes);
     let mut out = anc_bytes;
@@ -898,7 +898,7 @@ pub fn build_ancillary_bytes(state: &PersistedState) -> CoreFsResult<Vec<u8>> {
 /// Decode the ancillary payload (sans CRC trailer) back into its
 /// opaque internal struct.  Exposed for the grouped implementation.
 pub fn decode_ancillary(payload: &[u8]) -> CoreFsResult<AncillaryStateRef> {
-    bincode::deserialize::<AncillaryState>(payload)
+    crate::bincode_compat::deserialize::<AncillaryState>(payload)
         .map_err(|e| CoreFsError::State(format!("native: ancillary deserialize failed: {e}")))
         .map(AncillaryStateRef)
 }
@@ -958,8 +958,18 @@ fn systime_to_secs(t: Timestamp) -> i64 {
     t.as_secs() as i64
 }
 
+#[cfg(feature = "std")]
 fn now_secs() -> i64 {
     systime_to_secs(Timestamp::now())
+}
+
+/// Im no_std-Build steht keine Wallclock zur Verfügung — der Treiber gibt
+/// `Timestamp::EPOCH` zurück. Hostseitige Aufrufer sollten Zeitstempel
+/// stattdessen explizit über die ohnehin bevorzugten `*_at(now: Timestamp)`-
+/// Pfade vorgeben.
+#[cfg(not(feature = "std"))]
+fn now_secs() -> i64 {
+    systime_to_secs(Timestamp::EPOCH)
 }
 
 #[cfg(test)]

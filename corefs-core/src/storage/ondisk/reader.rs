@@ -255,7 +255,7 @@ impl<'d> OdfReader<'d> {
             .device
             .read_at(rec.xattr_block_addr * BLOCK_SIZE, BLOCK_SIZE)?;
         let attr = AttrBlock::decode(&buf)?;
-        bincode::deserialize::<Inode>(&attr.payload)
+        crate::bincode_compat::deserialize::<Inode>(&attr.payload)
             .map(Some)
             .map_err(|e| CoreFsError::State(format!("OdfReader: attr deserialize failed: {e}")))
     }

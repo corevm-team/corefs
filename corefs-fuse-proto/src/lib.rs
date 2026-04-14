@@ -278,34 +278,42 @@ pub struct StatFs {
     pub namelen: u32,
 }
 
-#[cfg(feature = "std")]
 pub mod wire {
     //! Bincode-basierte Encode/Decode-Helfer.
     //!
-    //! Nur mit dem `std`-Feature verfügbar, da `bincode` 1.x `std::io`
-    //! benötigt. AnyOS-Kernel-Konsumenten liefern eigene Wire-Pfade.
+    //! Seit der Migration auf `bincode` 2.x (no_std-fähig) sind diese Helfer
+    //! unconditional verfügbar.  Sie verwenden `bincode::config::legacy()`,
+    //! das wire-byte-identisch zur `bincode` 1.x Default-Konfiguration ist.
+    //! AnyOS-Kernel-Konsumenten können diese Pfade direkt nutzen.
 
     use super::{ReplyFrame, RequestFrame};
     use alloc::vec::Vec;
+    use bincode::config::{Configuration, Fixint, LittleEndian, NoLimit, legacy};
+    use bincode::error::{DecodeError, EncodeError};
 
-    /// Serialisiert einen Request-Frame nach bincode.
-    pub fn encode_request(frame: &RequestFrame) -> Result<Vec<u8>, bincode::Error> {
-        bincode::serialize(frame)
+    #[inline]
+    const fn cfg() -> Configuration<LittleEndian, Fixint, NoLimit> {
+        legacy()
     }
 
-    /// Deserialisiert einen Request-Frame aus bincode-Bytes.
-    pub fn decode_request(bytes: &[u8]) -> Result<RequestFrame, bincode::Error> {
-        bincode::deserialize(bytes)
+    /// Serialisiert einen Request-Frame nach bincode (legacy/1.x-kompatibel).
+    pub fn encode_request(frame: &RequestFrame) -> Result<Vec<u8>, EncodeError> {
+        bincode::serde::encode_to_vec(frame, cfg())
     }
 
-    /// Serialisiert einen Reply-Frame nach bincode.
-    pub fn encode_reply(frame: &ReplyFrame) -> Result<Vec<u8>, bincode::Error> {
-        bincode::serialize(frame)
+    /// Deserialisiert einen Request-Frame aus bincode-Bytes (legacy/1.x-kompatibel).
+    pub fn decode_request(bytes: &[u8]) -> Result<RequestFrame, DecodeError> {
+        bincode::serde::decode_from_slice::<RequestFrame, _>(bytes, cfg()).map(|(v, _)| v)
     }
 
-    /// Deserialisiert einen Reply-Frame aus bincode-Bytes.
-    pub fn decode_reply(bytes: &[u8]) -> Result<ReplyFrame, bincode::Error> {
-        bincode::deserialize(bytes)
+    /// Serialisiert einen Reply-Frame nach bincode (legacy/1.x-kompatibel).
+    pub fn encode_reply(frame: &ReplyFrame) -> Result<Vec<u8>, EncodeError> {
+        bincode::serde::encode_to_vec(frame, cfg())
+    }
+
+    /// Deserialisiert einen Reply-Frame aus bincode-Bytes (legacy/1.x-kompatibel).
+    pub fn decode_reply(bytes: &[u8]) -> Result<ReplyFrame, DecodeError> {
+        bincode::serde::decode_from_slice::<ReplyFrame, _>(bytes, cfg()).map(|(v, _)| v)
     }
 }
 
@@ -324,7 +332,6 @@ mod tests {
         assert_eq!(PROTOCOL_VERSION & 0xFFFF, 0);
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn request_round_trips_via_bincode() {
         let frame = RequestFrame {
@@ -339,7 +346,6 @@ mod tests {
         assert_eq!(frame, decoded);
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn reply_round_trips_via_bincode_for_attr() {
         let frame = ReplyFrame {
@@ -363,7 +369,6 @@ mod tests {
         assert_eq!(frame, decoded);
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn reply_round_trips_via_bincode_for_error() {
         let frame = ReplyFrame {

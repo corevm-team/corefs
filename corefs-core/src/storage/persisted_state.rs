@@ -98,8 +98,9 @@ mod tests {
             snapshots: Vec::new(),
             next_snapshot_id: 0,
         };
-        let bytes = bincode::serialize(&state).expect("serialize ok");
-        let decoded: PersistedState = bincode::deserialize(&bytes).expect("deserialize ok");
+        let bytes = crate::bincode_compat::serialize(&state).expect("serialize ok");
+        let decoded: PersistedState =
+            crate::bincode_compat::deserialize(&bytes).expect("deserialize ok");
         assert_eq!(state, decoded);
     }
 }

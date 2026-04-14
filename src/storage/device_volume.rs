@@ -441,7 +441,8 @@ impl DeviceJournal {
 
         // Deserialize from the actual payload bytes (before padding).
         let deserialize_len = (payload_length as usize).min(payload_bytes.len());
-        let wal: Option<VolumeWal> = bincode::deserialize(&payload_bytes[..deserialize_len]).ok();
+        let wal: Option<VolumeWal> =
+            corefs_core::bincode_compat::deserialize(&payload_bytes[..deserialize_len]).ok();
 
         Ok(Self {
             offset: aligned_offset,
@@ -489,7 +490,7 @@ impl DeviceJournal {
         }
 
         let sector_size = device.sector_size() as u64;
-        let payload_bytes = bincode::serialize(wal)
+        let payload_bytes = corefs_core::bincode_compat::serialize(wal)
             .map_err(|e| CoreFsError::State(format!("failed to serialize journal entry: {e}")))?;
 
         let payload_offset = self.offset + align_up_u64(JOURNAL_HEADER_SIZE as u64, sector_size);

@@ -170,7 +170,7 @@ pub fn save_state(
     }
 
     // --- Serialise payload + CRC trailer ---------------------------------
-    let mut payload = bincode::serialize(state)
+    let mut payload = crate::bincode_compat::serialize(state)
         .map_err(|e| CoreFsError::State(format!("ODF: failed to serialize PersistedState: {e}")))?;
     let crc = Crc32c::hash(&payload);
     payload.extend_from_slice(&crc.to_le_bytes());
@@ -320,7 +320,7 @@ pub fn load_state(device: &dyn BlockDevice) -> CoreFsResult<PersistedState> {
         )));
     }
 
-    let state: PersistedState = bincode::deserialize(data).map_err(|e| {
+    let state: PersistedState = crate::bincode_compat::deserialize(data).map_err(|e| {
         CoreFsError::State(format!("ODF: failed to deserialize PersistedState: {e}"))
     })?;
     Ok(state)
@@ -542,8 +542,18 @@ fn read_inode_record(
     OnDiskInode::decode(&block_buf[start..start + super::inode::INODE_RECORD_SIZE])
 }
 
+#[cfg(feature = "std")]
 fn now_secs() -> i64 {
     Timestamp::now().as_secs() as i64
+}
+
+/// Im no_std-Build steht keine Wallclock zur Verfügung — der Treiber gibt
+/// `Timestamp::EPOCH` zurück. Hostseitige Aufrufer sollten Zeitstempel
+/// stattdessen explizit über die ohnehin bevorzugten `*_at(now: Timestamp)`-
+/// Pfade vorgeben.
+#[cfg(not(feature = "std"))]
+fn now_secs() -> i64 {
+    Timestamp::EPOCH.as_secs() as i64
 }
 
 #[cfg(test)]

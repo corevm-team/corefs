@@ -514,7 +514,7 @@ pub fn load_state_native_grouped(device: &dyn BlockDevice) -> CoreFsResult<Persi
         }
         let attr_buf = device.read_at(on_disk.xattr_block_addr * BLOCK_SIZE, BLOCK_SIZE)?;
         let attr = AttrBlock::decode(&attr_buf)?;
-        let inode: Inode = bincode::deserialize(&attr.payload).map_err(|e| {
+        let inode: Inode = crate::bincode_compat::deserialize(&attr.payload).map_err(|e| {
             CoreFsError::State(format!("grouped load: inode deserialize failed: {e}"))
         })?;
         let bytes = super::native::read_all_extent_bytes_public(device, &on_disk)?;
@@ -580,7 +580,7 @@ fn write_user_inode(
         (vec![ext], 0u64, false)
     };
 
-    let attr_bytes = bincode::serialize(inode)
+    let attr_bytes = crate::bincode_compat::serialize(inode)
         .map_err(|e| CoreFsError::State(format!("grouped: inode serialize failed: {e}")))?;
     if attr_bytes.len() > super::attr_block::ATTR_BLOCK_CAPACITY {
         return Err(CoreFsError::State(format!(
@@ -699,8 +699,18 @@ fn systime_to_secs(t: Timestamp) -> i64 {
     t.as_secs() as i64
 }
 
+#[cfg(feature = "std")]
 fn now_secs() -> i64 {
     systime_to_secs(Timestamp::now())
+}
+
+/// Im no_std-Build steht keine Wallclock zur Verfügung — der Treiber gibt
+/// `Timestamp::EPOCH` zurück. Hostseitige Aufrufer sollten Zeitstempel
+/// stattdessen explizit über die ohnehin bevorzugten `*_at(now: Timestamp)`-
+/// Pfade vorgeben.
+#[cfg(not(feature = "std"))]
+fn now_secs() -> i64 {
+    systime_to_secs(Timestamp::EPOCH)
 }
 
 #[cfg(test)]

@@ -299,6 +299,12 @@ mod tests {
     /// byte-identische Ausgabe zu `std::time::SystemTime`. Diese Eigenschaft
     /// ist die Basis dafür, dass bestehende Volume-Images nach dem Typ-Wechsel
     /// `SystemTime` → `Timestamp` unverändert lesbar bleiben.
+    ///
+    /// Seit der bincode-2-Migration läuft die Serialisierung über
+    /// [`crate::bincode_compat`], das `bincode::config::legacy()` verwendet
+    /// und damit byte-identische Wire-Bytes zur `bincode` 1.x Default-Konfig
+    /// erzeugt. Zusätzlich wird ein hartkodierter Erwartungs-Vektor (von
+    /// `bincode` 1.x produziert) als Fixpunkt geprüft.
     #[cfg(feature = "std")]
     #[test]
     fn wire_compatible_with_system_time_bincode() {
@@ -311,8 +317,8 @@ mod tests {
         ];
         for st in samples {
             let ts: Timestamp = st.into();
-            let st_bytes = bincode::serialize(&st).expect("serialize SystemTime");
-            let ts_bytes = bincode::serialize(&ts).expect("serialize Timestamp");
+            let st_bytes = crate::bincode_compat::serialize(&st).expect("serialize SystemTime");
+            let ts_bytes = crate::bincode_compat::serialize(&ts).expect("serialize Timestamp");
             assert_eq!(
                 st_bytes, ts_bytes,
                 "bincode-Ausgabe von Timestamp und SystemTime muss identisch sein (sample: {st:?})",
@@ -320,9 +326,27 @@ mod tests {
 
             // Der umgekehrte Pfad muss ebenfalls funktionieren: bincode-Bytes
             // einer SystemTime lassen sich als Timestamp deserialisieren.
-            let decoded: Timestamp = bincode::deserialize(&st_bytes).expect("deserialize as Timestamp");
+            let decoded: Timestamp =
+                crate::bincode_compat::deserialize(&st_bytes).expect("deserialize as Timestamp");
             assert_eq!(decoded, ts);
         }
+
+        // Hartcodierter Fixpunkt: SystemTime(secs=1_234_567_890, nanos=987_654_321)
+        // unter `bincode` 1.x default. Layout: 8 Bytes secs LE + 4 Bytes nanos LE.
+        // secs = 0x00000000_499602D2 → D2 02 96 49 00 00 00 00
+        // nanos = 0x3ADE_68B1 → B1 68 DE 3A
+        let fixed_st = UNIX_EPOCH + Duration::new(1_234_567_890, 987_654_321);
+        let fixed_ts: Timestamp = fixed_st.into();
+        let bincode1_known: &[u8] = &[
+            0xD2, 0x02, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00, // secs LE
+            0xB1, 0x68, 0xDE, 0x3A, // nanos LE
+        ];
+        let actual = crate::bincode_compat::serialize(&fixed_ts).expect("serialize fixed Timestamp");
+        assert_eq!(
+            actual.as_slice(),
+            bincode1_known,
+            "bincode 2 + legacy() muss byte-identisch zur hartcodierten bincode-1-Erwartung sein",
+        );
     }
 
     /// Ein deterministischer Test-RNG (xorshift64), nutzbar als Referenz-Impl.

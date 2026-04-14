@@ -385,7 +385,7 @@ fn serialize_segment<T: Serialize>(
     value: &T,
     path: &Path,
 ) -> CoreFsResult<SegmentPayload> {
-    let payload = bincode::serialize(value).map_err(|error| {
+    let payload = corefs_core::bincode_compat::serialize(value).map_err(|error| {
         CoreFsError::State(format!(
             "failed to serialize CoreFS volume image segment {} for {}: {error}",
             String::from_utf8_lossy(&kind),
@@ -469,7 +469,7 @@ fn deserialize_segment<T: for<'de> Deserialize<'de>>(
     path: &Path,
 ) -> CoreFsResult<T> {
     let payload = segment_bytes(bytes, entry, path)?;
-    bincode::deserialize(payload).map_err(|error| {
+    corefs_core::bincode_compat::deserialize(payload).map_err(|error| {
         CoreFsError::State(format!(
             "failed to deserialize CoreFS volume image segment {} from {}: {error}",
             String::from_utf8_lossy(&entry.kind),
