@@ -44,6 +44,10 @@
 //! so grouped or single-group volumes can opt in without a format
 //! break.
 
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::checksum::Crc32c;
 use super::inode::Extent;
 use super::layout::BLOCK_SIZE;

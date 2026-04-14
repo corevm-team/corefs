@@ -31,6 +31,13 @@
 //! `rec_len` is always a multiple of 8, so a scanner can walk the block
 //! by adding `rec_len` after each decoded entry.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::mem;
+use core::str;
+
 use super::checksum::Crc32c;
 use super::layout::BLOCK_SIZE;
 use crate::error::{CoreFsError, CoreFsResult};
@@ -124,7 +131,7 @@ impl DirEntry {
                 "dir entry: name_len overflows rec_len".into(),
             ));
         }
-        let name = std::str::from_utf8(&buf[16..16 + name_len])
+        let name = str::from_utf8(&buf[16..16 + name_len])
             .map_err(|e| CoreFsError::State(format!("dir entry: invalid utf-8 name: {e}")))?
             .to_string();
         Ok((Self { inode, kind, name }, rec_len))
@@ -250,7 +257,7 @@ impl DirBlock {
         for e in entries {
             let rec = e.encoded_len()?;
             if current_bytes + rec > USABLE_BYTES {
-                blocks.push(std::mem::replace(&mut current, DirBlock::empty()));
+                blocks.push(mem::replace(&mut current, DirBlock::empty()));
                 current_bytes = 0;
             }
             current.entries.push(e.clone());

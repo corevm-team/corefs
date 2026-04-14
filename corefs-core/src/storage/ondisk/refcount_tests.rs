@@ -1,6 +1,9 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::*;
 
 fn ext(start: u64, len: u32) -> Extent {

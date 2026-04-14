@@ -17,6 +17,10 @@
 //! 4092     4    crc32c          (over the full block with CRC zeroed)
 //! ```
 
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::checksum::Crc32c;
 use super::layout::BLOCK_SIZE;
 use crate::error::{CoreFsError, CoreFsResult};

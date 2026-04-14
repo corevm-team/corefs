@@ -41,6 +41,9 @@
 //! * [`super::inode::FLAG_HAS_XATTRS`]       — `xattr_block_addr` points at a valid xattr
 //!   block holding key/value pairs and ACL entries.
 
+use alloc::format;
+use alloc::vec::Vec;
+
 use super::checksum::Crc32c;
 use crate::error::{CoreFsError, CoreFsResult};
 

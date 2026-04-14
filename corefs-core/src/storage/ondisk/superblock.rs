@@ -9,12 +9,33 @@
 //! CRC32C checksum that covers the entire 4096-byte block with those four
 //! bytes set to zero.
 
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::checksum::Crc32c;
 use super::layout::{
     LayoutGeometry, ODF_MAGIC, ODF_VERSION_MAJOR, ODF_VERSION_MINOR, SUPPORTED_INCOMPAT,
     SUPPORTED_RO_COMPAT,
 };
 use crate::error::{CoreFsError, CoreFsResult};
+
+/// Minimal sequential writer over a byte slice — replaces `std::io::Cursor`
+/// for `no_std`-Kompatibilität.
+struct ByteWriter<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> ByteWriter<'a> {
+    fn new(buf: &'a mut [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+    fn write_all(&mut self, data: &[u8]) {
+        self.buf[self.pos..self.pos + data.len()].copy_from_slice(data);
+        self.pos += data.len();
+    }
+}
 
 /// Total on-disk length of the structured superblock prefix (bytes).
 ///
@@ -155,48 +176,42 @@ impl Superblock {
     /// CRC32C checksum over the block with the checksum field zeroed.
     pub fn encode_block(&self) -> Vec<u8> {
         let mut block = vec![0u8; super::layout::BLOCK_SIZE as usize];
-        let mut c = std::io::Cursor::new(&mut block[..SUPERBLOCK_STRUCT_BYTES]);
-        use std::io::Write;
-        let w = &mut c;
-        w.write_all(&self.magic.to_le_bytes()).unwrap();
-        w.write_all(&self.version_major.to_le_bytes()).unwrap();
-        w.write_all(&self.version_minor.to_le_bytes()).unwrap();
-        w.write_all(&self.block_size.to_le_bytes()).unwrap();
-        w.write_all(&self.total_blocks.to_le_bytes()).unwrap();
-        w.write_all(&self.free_blocks.to_le_bytes()).unwrap();
-        w.write_all(&self.total_inodes.to_le_bytes()).unwrap();
-        w.write_all(&self.free_inodes.to_le_bytes()).unwrap();
-        w.write_all(&self.block_bitmap_start.to_le_bytes()).unwrap();
-        w.write_all(&self.block_bitmap_blocks.to_le_bytes())
-            .unwrap();
-        w.write_all(&self.inode_bitmap_start.to_le_bytes()).unwrap();
-        w.write_all(&self.inode_bitmap_blocks.to_le_bytes())
-            .unwrap();
-        w.write_all(&self.inode_table_start.to_le_bytes()).unwrap();
-        w.write_all(&self.inode_table_blocks.to_le_bytes()).unwrap();
-        w.write_all(&self.journal_start.to_le_bytes()).unwrap();
-        w.write_all(&self.journal_blocks.to_le_bytes()).unwrap();
-        w.write_all(&self.data_start.to_le_bytes()).unwrap();
-        w.write_all(&self.secondary_superblock_block.to_le_bytes())
-            .unwrap();
-        w.write_all(&self.tertiary_superblock_block.to_le_bytes())
-            .unwrap();
-        w.write_all(&self.feature_compat.to_le_bytes()).unwrap();
-        w.write_all(&self.feature_incompat.to_le_bytes()).unwrap();
-        w.write_all(&self.feature_ro_compat.to_le_bytes()).unwrap();
-        w.write_all(&self.uuid).unwrap();
-        w.write_all(&self.label).unwrap();
-        w.write_all(&self.created_at.to_le_bytes()).unwrap();
-        w.write_all(&self.last_mount_at.to_le_bytes()).unwrap();
-        w.write_all(&self.last_write_at.to_le_bytes()).unwrap();
-        w.write_all(&self.mount_count.to_le_bytes()).unwrap();
-        w.write_all(&self.generation.to_le_bytes()).unwrap();
-        w.write_all(&self.state.to_le_bytes()).unwrap();
-        w.write_all(&self.payload_inode.to_le_bytes()).unwrap();
-        w.write_all(&self.block_bitmap_crc.to_le_bytes()).unwrap();
-        w.write_all(&self.inode_bitmap_crc.to_le_bytes()).unwrap();
-        w.write_all(&self.layout_mode.to_le_bytes()).unwrap();
-        w.write_all(&self.root_inode.to_le_bytes()).unwrap();
+        let mut w = ByteWriter::new(&mut block[..SUPERBLOCK_STRUCT_BYTES]);
+        w.write_all(&self.magic.to_le_bytes());
+        w.write_all(&self.version_major.to_le_bytes());
+        w.write_all(&self.version_minor.to_le_bytes());
+        w.write_all(&self.block_size.to_le_bytes());
+        w.write_all(&self.total_blocks.to_le_bytes());
+        w.write_all(&self.free_blocks.to_le_bytes());
+        w.write_all(&self.total_inodes.to_le_bytes());
+        w.write_all(&self.free_inodes.to_le_bytes());
+        w.write_all(&self.block_bitmap_start.to_le_bytes());
+        w.write_all(&self.block_bitmap_blocks.to_le_bytes());
+        w.write_all(&self.inode_bitmap_start.to_le_bytes());
+        w.write_all(&self.inode_bitmap_blocks.to_le_bytes());
+        w.write_all(&self.inode_table_start.to_le_bytes());
+        w.write_all(&self.inode_table_blocks.to_le_bytes());
+        w.write_all(&self.journal_start.to_le_bytes());
+        w.write_all(&self.journal_blocks.to_le_bytes());
+        w.write_all(&self.data_start.to_le_bytes());
+        w.write_all(&self.secondary_superblock_block.to_le_bytes());
+        w.write_all(&self.tertiary_superblock_block.to_le_bytes());
+        w.write_all(&self.feature_compat.to_le_bytes());
+        w.write_all(&self.feature_incompat.to_le_bytes());
+        w.write_all(&self.feature_ro_compat.to_le_bytes());
+        w.write_all(&self.uuid);
+        w.write_all(&self.label);
+        w.write_all(&self.created_at.to_le_bytes());
+        w.write_all(&self.last_mount_at.to_le_bytes());
+        w.write_all(&self.last_write_at.to_le_bytes());
+        w.write_all(&self.mount_count.to_le_bytes());
+        w.write_all(&self.generation.to_le_bytes());
+        w.write_all(&self.state.to_le_bytes());
+        w.write_all(&self.payload_inode.to_le_bytes());
+        w.write_all(&self.block_bitmap_crc.to_le_bytes());
+        w.write_all(&self.inode_bitmap_crc.to_le_bytes());
+        w.write_all(&self.layout_mode.to_le_bytes());
+        w.write_all(&self.root_inode.to_le_bytes());
         // Remaining bytes up to SUPERBLOCK_CHECKSUM_OFFSET are padding (zero).
         let checksum = Crc32c::hash(&block);
         block[SUPERBLOCK_CHECKSUM_OFFSET..SUPERBLOCK_CHECKSUM_OFFSET + 4]

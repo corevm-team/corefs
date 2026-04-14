@@ -1,6 +1,9 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::*;
 use crate::storage::ondisk::layout::{
     BLOCK_SIZE, LayoutGeometry, LayoutParams, ODF_MAGIC, ODF_VERSION_MAJOR,

@@ -94,35 +94,29 @@
 //! [mem]: crate::storage::block_device::MemoryDevice
 
 pub mod allocator;
-pub mod attr_block;
 pub mod benchmark;
-pub use corefs_core::storage::ondisk::bitmap;
-pub mod block_group;
-pub use corefs_core::storage::ondisk::checksum;
 pub mod concurrency;
-pub mod dir_entry;
-pub mod extent_tree;
 pub mod fault_injection;
 pub mod fsck;
 pub mod fsck_repair;
 pub mod grouped;
-pub mod inode;
 pub mod journal;
 pub mod journaled;
-pub use corefs_core::storage::ondisk::layout;
 pub mod multi_group_allocator;
 pub mod native;
 pub mod property;
 pub mod reader;
-pub mod refcount;
 pub mod resilience;
 pub mod scrub;
 pub mod session;
 pub mod stress;
-pub mod superblock;
 pub mod tiering;
 pub mod volume;
-pub mod xattr;
+
+pub use corefs_core::storage::ondisk::{
+    attr_block, bitmap, block_group, checksum, dir_entry, extent_tree, inode, layout, refcount,
+    superblock, xattr,
+};
 
 pub use volume::{
     FormatOptions, FormatReport, SaveReport, VolumeInfo, format_device, inspect, load_state,

@@ -1,6 +1,10 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::*;
 
 fn g(

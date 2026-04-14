@@ -23,6 +23,11 @@
 //! order the file exposes them.  `ExtentChain::read` and
 //! `ExtentChain::write` encapsulate the stitching.
 
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+use hashbrown::HashSet;
+
 use super::checksum::Crc32c;
 use super::inode::Extent;
 use super::layout::BLOCK_SIZE;
@@ -136,7 +141,7 @@ impl ExtentChain {
         }
         let mut out = Vec::new();
         let mut cursor = root_block;
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = HashSet::new();
         while cursor != 0 {
             if !visited.insert(cursor) {
                 return Err(CoreFsError::State(format!(

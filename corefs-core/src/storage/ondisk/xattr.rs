@@ -50,6 +50,12 @@
 //! ...   pad    zero fill up to rec_len
 //! ```
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::str;
+
 use super::checksum::Crc32c;
 use super::layout::BLOCK_SIZE;
 use crate::error::{CoreFsError, CoreFsResult};
@@ -220,7 +226,7 @@ impl XattrBlock {
                 return Err(CoreFsError::State("xattr: lengths exceed rec".into()));
             }
             let name =
-                std::str::from_utf8(&block[cursor + XATTR_HDR..cursor + XATTR_HDR + name_len])
+                str::from_utf8(&block[cursor + XATTR_HDR..cursor + XATTR_HDR + name_len])
                     .map_err(|e| CoreFsError::State(format!("xattr: name utf-8: {e}")))?
                     .to_string();
             let v_off = cursor + XATTR_HDR + name_len;
@@ -246,7 +252,7 @@ impl XattrBlock {
                 return Err(CoreFsError::State("acl: subject exceeds rec".into()));
             }
             let subject =
-                std::str::from_utf8(&block[cursor + ACL_HDR..cursor + ACL_HDR + subj_len])
+                str::from_utf8(&block[cursor + ACL_HDR..cursor + ACL_HDR + subj_len])
                     .map_err(|e| CoreFsError::State(format!("acl: subject utf-8: {e}")))?
                     .to_string();
             acls.push(AclRecord {

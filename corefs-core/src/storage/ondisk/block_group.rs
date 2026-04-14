@@ -21,6 +21,10 @@
 //! created by [`super::volume::format_device`] continue to operate in
 //! single-group mode.
 
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::checksum::Crc32c;
 use super::layout::BLOCK_SIZE;
 use crate::error::{CoreFsError, CoreFsResult};
