@@ -493,6 +493,11 @@ pub fn verify_bitmap_integrity(
     Ok(())
 }
 
+/// Public alias for use by the native layout implementation.
+pub fn read_sb_with_fallbacks(device: &dyn BlockDevice) -> CoreFsResult<Superblock> {
+    read_primary_superblock_with_fallbacks(device)
+}
+
 fn read_primary_superblock_with_fallbacks(device: &dyn BlockDevice) -> CoreFsResult<Superblock> {
     if let Ok(sb) = read_superblock_at(device, PRIMARY_SUPERBLOCK_BLOCK) {
         return Ok(sb);

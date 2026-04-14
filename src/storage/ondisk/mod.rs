@@ -57,12 +57,15 @@
 //! [mem]: crate::storage::block_device::MemoryDevice
 
 pub mod allocator;
+pub mod attr_block;
 pub mod bitmap;
 pub mod checksum;
+pub mod dir_entry;
 pub mod extent_tree;
 pub mod inode;
 pub mod journal;
 pub mod layout;
+pub mod native;
 pub mod superblock;
 pub mod volume;
 
