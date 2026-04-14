@@ -21,7 +21,7 @@ Die fachliche Zieldefinition liegt in [features_corefs.md](/daten1/development/b
 Der aktuelle Stand ist ein Architektur-, Kern-, Persistenz-, Volume-Layout- und Performance-Prototyp im Userspace-Modell.
 
 - Build-Status: stabil
-- Test-Status: `129/129` Tests erfolgreich
+- Test-Status: `325/325` Tests erfolgreich
 - Git-Status: initialisiert
 - Plattformausrichtung: plattformneutral, nicht Linux-zentriert
 
@@ -133,15 +133,12 @@ Der Prototyp deckt bereits folgende Bereiche ab:
 Diese Punkte sind vorgesehen, aber aktuell noch nicht als echte produktionsnahe Laufzeitimplementierung vorhanden:
 
 - vollständig produktionsnahes On-Disk-Format
-- echter Blockdevice-Zugriff
-- vollständiges Copy-on-Write auf Datenträgerebene
-- blocknahes Write-Ahead-Log direkt im Volume statt des aktuellen segmentbasierten Pending-WAL
+- vollständiges Copy-on-Write auf Datenträgerebene (aktuell: logisches CoW im In-Memory-Modell)
+- physisch device-blockadressiertes Write-Ahead-Log direkt im Volume (aktuell: extent- und device-blockadressierte WAL-Records über `inode + device_block + block_offset + inode_offset`)
 - Deduplizierung
 - Self-Healing mit Redundanzquellen
 - Clusterfähigkeit
-- Hot/Cold-Storage
-- echte Kompression und Verschlüsselung
-- Quotas mit Durchsetzung
+- Hot/Cold-Tiering-Strategien (aktuell: Heat-aware Extent-Reallocation ohne echtes Tiering zwischen Speicherklassen)
 - native Kernel-/VFS-Integration
 
 ## Voraussetzungen
