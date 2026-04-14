@@ -34,6 +34,10 @@
 //! data writes through [`JournaledSaveSession::stage_metadata_block`]
 //! instead, at the cost of doubling the journal footprint.
 
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::journal::{Journal, Op};
 use super::layout::BLOCK_SIZE;
 use super::superblock::Superblock;

@@ -34,6 +34,8 @@ pub mod xattr;
 #[cfg(feature = "std")]
 pub mod grouped;
 #[cfg(feature = "std")]
+pub mod journaled;
+#[cfg(feature = "std")]
 pub mod native;
 #[cfg(feature = "std")]
 pub mod volume;
