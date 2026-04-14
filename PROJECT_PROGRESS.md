@@ -446,10 +446,12 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 
 ### 5.5 AnyOS — Kernel-Treiber-Pfad (direkter CoreFS-Treiber)
 
-- [ ] Modul `anyos/kernel/src/fs/corefs/` anlegen
+- [x] Modul `anyos/kernel/src/fs/corefs/` anlegen ([anyos/kernel/src/fs/corefs/mod.rs](../anyos/kernel/src/fs/corefs/mod.rs))
 - [ ] `BlockDevice`-Impl (CoreFS-Trait) als Adapter auf `drivers/storage` (LBA↔Byte-Offset-Mapping)
-- [ ] `Clock`-Impl aus AnyOS-Zeitquelle
-- [ ] `Rng`-Impl aus AnyOS-Entropiequelle
+- [~] `Clock`-Impl aus AnyOS-Zeitquelle (`KernelClock`-Stub vorhanden, liefert `Timestamp::EPOCH`; echte RTC-Anbindung folgt)
+- [~] `Rng`-Impl aus AnyOS-Entropiequelle (`KernelRng` mit xorshift64 + explizitem Seed; echter Entropiepool-Anschluss folgt)
+- [x] `corefs-core` als Path-Dependency in `kernel/Cargo.toml` (default-features-off, ohne `crypto`-Feature wegen poly1305-SIMD)
+- [x] Kernel-Build mit `corefs-core` clean (`cargo +nightly build -p anyos_kernel --target x86_64-anyos.json -Z build-std=core,alloc -Z json-target-spec`)
 - [ ] `Filesystem`-Trait ([kernel/src/fs/vfs/types.rs](../anyos/kernel/src/fs/vfs/types.rs)) implementieren: Delegation an `corefs-core::CoreFs`
 - [ ] `FsType::CoreFs` im VFS-Enum ergänzen
 - [ ] Superblock-Magic-Erkennung in der Boot-/Partitions-Detection
