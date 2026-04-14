@@ -112,6 +112,7 @@ pub mod journaled;
 pub mod layout;
 pub mod multi_group_allocator;
 pub mod native;
+pub mod property;
 pub mod reader;
 pub mod refcount;
 pub mod resilience;
