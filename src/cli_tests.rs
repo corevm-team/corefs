@@ -265,3 +265,61 @@ fn benchmark_config_parser_accepts_overrides() {
     assert_eq!(config.snapshot_count, 3);
     assert_eq!(config.persist_runs, 2);
 }
+
+#[test]
+fn cli_odf_mkfs_inspect_and_fsck_roundtrip() {
+    let odf_path = temp_path("odf", "odf");
+    // Format a fresh 8 MiB ODF volume via the CLI.
+    run(vec![
+        "corefs".to_string(),
+        "mkfs-odf".to_string(),
+        odf_path.clone(),
+        "--size".to_string(),
+        (8 * 1024 * 1024).to_string(),
+    ])
+    .expect("mkfs-odf should succeed");
+    // inspect-odf should read it back without error.
+    run(vec![
+        "corefs".to_string(),
+        "inspect-odf".to_string(),
+        odf_path.clone(),
+    ])
+    .expect("inspect-odf should succeed");
+    // fsck-odf should report zero errors on a fresh volume.
+    run(vec![
+        "corefs".to_string(),
+        "fsck-odf".to_string(),
+        odf_path.clone(),
+    ])
+    .expect("fsck-odf should succeed on a clean volume");
+    let _ = std::fs::remove_file(&odf_path);
+}
+
+#[test]
+fn cli_migrate_to_odf_produces_fsck_clean_volume() {
+    let src_img = temp_path("src", "img");
+    let dst_odf = temp_path("dst", "odf");
+    // Build a legacy volume_image first.
+    let fs = bootstrap_demo_fs().expect("bootstrap");
+    fs.save_image_to_path(&src_img).expect("save legacy image");
+
+    run(vec![
+        "corefs".to_string(),
+        "migrate-to-odf".to_string(),
+        src_img.clone(),
+        dst_odf.clone(),
+        "--size".to_string(),
+        (16 * 1024 * 1024).to_string(),
+    ])
+    .expect("migrate-to-odf should succeed");
+
+    run(vec![
+        "corefs".to_string(),
+        "fsck-odf".to_string(),
+        dst_odf.clone(),
+    ])
+    .expect("fsck-odf should be clean after migration");
+
+    let _ = std::fs::remove_file(&src_img);
+    let _ = std::fs::remove_file(&dst_odf);
+}

@@ -580,6 +580,71 @@ where
             append_benchmark_markdown(path, &result)?;
             println!("benchmark written to {path}");
         }
+        "mkfs-odf" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing image path for mkfs-odf".to_string())
+            })?;
+            let capacity_bytes = parse_flag_u64(&args[3..], "--size")
+                .unwrap_or(64 * 1024 * 1024);
+            odf_mkfs_image(path, capacity_bytes)?;
+            println!("odf volume formatted at {path} ({capacity_bytes} bytes)");
+        }
+        "fsck-odf" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing image path for fsck-odf".to_string())
+            })?;
+            let report = odf_fsck_image(path)?;
+            println!(
+                "fsck-odf: {} inode(s), {} extent(s), {} issue(s)",
+                report.inodes_checked,
+                report.extents_checked,
+                report.issues.len()
+            );
+            for issue in &report.issues {
+                println!("  [{:?}] {}: {}", issue.severity, issue.code, issue.message);
+            }
+            if !report.is_clean() {
+                return Err(CoreFsError::State(
+                    "fsck-odf: volume has Error-level issues".to_string(),
+                ));
+            }
+        }
+        "inspect-odf" => {
+            let path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("missing image path for inspect-odf".to_string())
+            })?;
+            let info = odf_inspect_image(path)?;
+            println!("label: {}", info.label);
+            println!(
+                "uuid: {}",
+                info.uuid.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
+            println!("total_blocks: {}", info.total_blocks);
+            println!("free_blocks: {}", info.free_blocks);
+            println!("total_inodes: {}", info.total_inodes);
+            println!("free_inodes: {}", info.free_inodes);
+            println!("generation: {}", info.generation);
+            println!("state: {}", info.state);
+            println!(
+                "superblocks: primary={} tertiary={} secondary={}",
+                info.primary_ok, info.tertiary_ok, info.secondary_ok
+            );
+        }
+        "migrate-to-odf" => {
+            let src = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("migrate-to-odf <src.img> <dst.odf> [--size N]".into())
+            })?;
+            let dst = args.get(3).ok_or_else(|| {
+                CoreFsError::InvalidCommand("migrate-to-odf <src.img> <dst.odf> [--size N]".into())
+            })?;
+            let capacity_bytes = parse_flag_u64(&args[4..], "--size")
+                .unwrap_or(64 * 1024 * 1024);
+            let report = odf_migrate_from_volume_image(src, dst, capacity_bytes)?;
+            println!(
+                "migrated {} → {}: {} inode(s), generation {}",
+                src, dst, report.active_slots, report.generation
+            );
+        }
         command => {
             return Err(CoreFsError::InvalidCommand(format!(
                 "unknown command: {command}"
@@ -606,6 +671,81 @@ fn bootstrap_demo_fs() -> CoreFsResult<CoreFsService> {
     )?;
     fs.create_symlink("/etc/corefs-current", "/etc/corefs.conf")?;
     Ok(fs)
+}
+
+// ---------------------------------------------------------------------------
+// ODF (On-Disk Format v1) helpers
+// ---------------------------------------------------------------------------
+
+fn odf_mkfs_image(path: &str, capacity_bytes: u64) -> CoreFsResult<()> {
+    use crate::storage::block_device::{BlockDevice, FileImageDevice};
+    use crate::storage::ondisk::volume::{FormatOptions, format_device};
+    let mut dev = FileImageDevice::create(path, capacity_bytes, 4096)?;
+    let opts = FormatOptions {
+        label: "corefs".to_string(),
+        uuid: generate_uuid(),
+        inode_count: crate::storage::ondisk::layout::DEFAULT_INODE_COUNT,
+        journal_blocks: crate::storage::ondisk::layout::DEFAULT_JOURNAL_BLOCKS,
+    };
+    format_device(&mut dev, &opts)?;
+    let _ = dev.sync();
+    Ok(())
+}
+
+fn odf_fsck_image(path: &str) -> CoreFsResult<crate::storage::ondisk::fsck::FsckReport> {
+    use crate::storage::block_device::FileImageDevice;
+    use crate::storage::ondisk::fsck;
+    let dev = FileImageDevice::open(path, false)?;
+    fsck::check(&dev)
+}
+
+fn odf_inspect_image(
+    path: &str,
+) -> CoreFsResult<crate::storage::ondisk::volume::VolumeInfo> {
+    use crate::storage::block_device::FileImageDevice;
+    use crate::storage::ondisk::volume::inspect;
+    let dev = FileImageDevice::open(path, false)?;
+    inspect(&dev)
+}
+
+fn odf_migrate_from_volume_image(
+    src: &str,
+    dst: &str,
+    capacity_bytes: u64,
+) -> CoreFsResult<crate::storage::ondisk::native::NativeSaveReport> {
+    use crate::storage::block_device::{BlockDevice, FileImageDevice};
+    use crate::storage::ondisk::native::save_state_native;
+    use crate::storage::ondisk::volume::{FormatOptions, format_device};
+    use crate::storage::volume_image::load_volume_image;
+    // Load the legacy volume_image.
+    let state = load_volume_image(std::path::Path::new(src))?;
+    // Format a fresh ODF device and save in native layout.
+    let mut dst_dev = FileImageDevice::create(dst, capacity_bytes, 4096)?;
+    let opts = FormatOptions {
+        label: state.volume.name.clone(),
+        uuid: generate_uuid(),
+        inode_count: crate::storage::ondisk::layout::DEFAULT_INODE_COUNT,
+        journal_blocks: crate::storage::ondisk::layout::DEFAULT_JOURNAL_BLOCKS,
+    };
+    format_device(&mut dst_dev, &opts)?;
+    let report = save_state_native(&mut dst_dev, &state)?;
+    let _ = dst_dev.sync();
+    Ok(report)
+}
+
+fn generate_uuid() -> [u8; 16] {
+    // Simple time-based pseudo-UUID (not cryptographic — just unique-ish).
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let hi = (nanos >> 64) as u64;
+    let lo = nanos as u64;
+    let mut out = [0u8; 16];
+    out[0..8].copy_from_slice(&lo.to_le_bytes());
+    out[8..16].copy_from_slice(&hi.to_le_bytes());
+    out
 }
 
 fn print_usage() {
@@ -644,6 +784,10 @@ fn print_usage() {
     println!(
         "  profiles: balanced | small-files | metadata-heavy | snapshot-heavy | persist-heavy"
     );
+    println!("  mkfs-odf <path> [--size <bytes>]");
+    println!("  fsck-odf <path>");
+    println!("  inspect-odf <path>");
+    println!("  migrate-to-odf <src.img> <dst.odf> [--size <bytes>]");
 }
 
 fn parse_flag_u64(args: &[String], flag: &str) -> Option<u64> {

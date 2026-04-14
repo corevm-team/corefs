@@ -46,6 +46,43 @@
 //! * [`volume::inspect`]       — structural health report without reading
 //!   the payload.
 //!
+//! ## Module overview
+//!
+//! | module          | responsibility                                          |
+//! |-----------------|---------------------------------------------------------|
+//! | [`layout`]      | block-level geometry planner + constants                 |
+//! | [`checksum`]    | CRC32C Castagnoli primitive                              |
+//! | [`superblock`]  | structured 4 KiB superblock, version + feature flags     |
+//! | [`bitmap`]      | block / inode allocation bitmaps                         |
+//! | [`allocator`]   | first-fit / best-fit allocator over the bitmap pair      |
+//! | [`inode`]       | fixed 256 B on-disk inode record with extents            |
+//! | [`extent_tree`] | indirect-block chain for large-extent-count inodes       |
+//! | [`attr_block`]  | per-inode bincode attr block (holds serialized `Inode`)  |
+//! | [`xattr`]       | structured xattr + ACL block (format-neutral payload)    |
+//! | [`dir_entry`]   | 4 KiB directory-entry blocks with chaining               |
+//! | [`journal`]     | transactional write-ahead log (WAL)                      |
+//! | [`fsck`]        | read-only structural consistency checker                 |
+//! | [`native`]      | native per-inode layout (alternative to the blob mode)   |
+//! | [`volume`]      | blob-mode driver (`format_device`, `save_state`, …)      |
+//!
+//! ## Open architectural questions (not yet implemented in v1)
+//!
+//! * **Block groups** — a multi-group layout (like ext4) would split the
+//!   data region into independently-bitmapped zones, improving allocation
+//!   locality and paralleling `fsck`.  ODF v1 is single-group on purpose:
+//!   adding groups later is an incompat-feature bump that can reuse the
+//!   existing allocator and fsck walker per-group without changing the
+//!   inode / extent / journal formats.
+//! * **Incremental saves** — the current [`native::save_state_native`]
+//!   rewrites every allocated inode slot.  Dirty-inode tracking + a
+//!   `save_state_native_incremental` path is a natural follow-up because
+//!   the journal already provides the transactional primitives needed
+//!   (see [`journal::TxnBuilder`]).
+//! * **Repair** — [`fsck::check`] is read-only; a companion
+//!   `fsck::repair` would consume an `FsckReport` and emit targeted
+//!   journal transactions through [`journal::TxnBuilder`] to restore
+//!   consistency.
+//!
 //! ## Testing
 //!
 //! Every sub-module has a sibling `*_tests.rs` unit-test file.  Integration
@@ -58,6 +95,7 @@
 
 pub mod allocator;
 pub mod attr_block;
+pub mod benchmark;
 pub mod bitmap;
 pub mod checksum;
 pub mod dir_entry;

@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `373/373` Tests erfolgreich  
+**Test-Status:** `451/451` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -232,7 +232,21 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - `DeviceVolumeSession` für Block-Device-basierte Volume-Sitzungen
 - `DeviceVolume` für On-Demand-Segment-I/O mit Read-Cache und Write-Buffer
 - `DeviceJournal` für geräteresidentes Write-Ahead-Log mit Barrier-Semantik
-- `storage::ondisk` — vollständig blockorientiertes On-Disk-Format (ODF v1) mit fixen 4-KiB-Blöcken, strukturiertem Superblock (Magic, UUID, Label, Versions- und Feature-Flags, Generation-Counter, Clean/Dirty-State), dreifach-redundanten Superblock-Kopien bei Block 1, N/2 und N-1, dedizierter Block- und Inode-Bitmap, fixer 256-Byte-Inode-Tabelle mit Extent-Pointern, reservierter Journal-Region, CRC32C-Checksummen auf Block-, Inode- und Payload-Ebene und automatischem Fallback auf Backup-Superblocks bei Korruption; Top-Level-API `format_device`/`save_state`/`load_state`/`inspect` auf beliebigen `BlockDevice`-Implementierungen; getestet mit 48 Unit-Tests (Layout-Planer, CRC32C Castagnoli Testvektoren, Superblock-Roundtrip + Checksum/Magic/Feature-Validierung, Bitmap-Allokation, Inode-Record-Roundtrip, Format+Save+Load-Roundtrip, redundanter Superblock-Fallback, Payload-CRC-Erkennung, Generation-Fortschreibung, Bitmap-Alignment)
+- `storage::ondisk` — produktionsreifes blockorientiertes On-Disk-Format (ODF v1) als vollständige Enterprise-Architektur:
+  - **Basisschicht**: fixe 4-KiB-Blöcke, strukturierter Superblock (Magic, UUID, Label, Versions- und Feature-Flags, Generation-Counter, Clean/Dirty-State, Block-/Inode-Bitmap-CRCs, Layout-Mode, Root-Inode-Pointer), dreifach-redundante Superblock-Kopien bei Block 1, N/2 und N-1, dedizierter Block- und Inode-Bitmap mit CRC32C-Schutz im Superblock, CRC32C-Checksummen auf jedem Control-Block, automatischer Fallback auf Backup-Superblocks bei Korruption
+  - **Allocator** (`allocator.rs`): echter First-Fit- und Best-Fit-Extent-Allocator über der Bitmap, kontinuierliche und fragmentierte Extent-Allokation, Inode-Slot-Allokation mit reserviertem System-Slot-Floor, Roll-Back bei Fehlschlägen
+  - **Journal** (`journal.rs`): transaktionales Write-Ahead-Log mit eigenem Header-Block, Record-Format (magic, kind, txn_id, seq, CRC32C je Record), Op-Record-Typen (BlockWrite, InodeUpdate), commit/abort/replay-Semantik, partielle Transaktionen werden beim Replay verworfen, Checkpoint bereinigt Head/Tail, synchronisiertes Commit zwischen Op-Records und Commit-Record
+  - **Indirekte Extents** (`extent_tree.rs`): 4-KiB-Index-Blöcke mit bis zu 254 Extents plus next-Pointer, verkettete Chains für Dateien mit mehr als 8 Extents, Loop-Detection beim Walker
+  - **Dir-Entry-Blöcke** (`dir_entry.rs`): 4-KiB-Directory-Blöcke mit magic, entry_count, next_dir_block-Pointer, 8-Byte-ausgerichtete variable Einträge (inode+kind+UTF-8-Name), `DirBlock::pack` teilt Listings auf verkettete Blöcke auf
+  - **Attr-Blöcke** (`attr_block.rs`): CRC-geschützter 4-KiB-Block mit bincode-Payload (bis 4076 Bytes) je Inode
+  - **Strukturierte xattr+ACL** (`xattr.rs`): 4-KiB-Block mit typisierten Key/Value-xattr-Einträgen und ACL-Records (User/Group/Everyone mit RWX-Permissions), format-neutral ohne bincode
+  - **Native Per-Inode-Layout** (`native.rs`): jeder Domain-Inode bekommt einen eigenen ODF-Slot, Datei-Content in echten Extents, Per-Inode-Metadata im Sibling-AttrBlock, Ancillary-State (Snapshots, Versions, Sync, Hot-Paths, Journal-Entries, Allocator-Policy, Free-Extents) im dedizierten System-Slot #1, Soft-Delete über `FLAG_DELETED`, Propagierung von `FLAG_ENCRYPTED`/`FLAG_COMPRESSED`/`FLAG_HAS_XATTRS`, Per-Inode-`data_crc` als CRC32C über den Plain-Text-Inhalt
+  - **fsck-Walker** (`fsck.rs`): vollständiger Read-Only-Konsistenz-Check mit Issue-Codes (ODF.SB.*, ODF.BBM.CRC, ODF.IBM.CRC, ODF.INODE.*, ODF.BLOCK.DOUBLE_ALLOCATED, ODF.JOURNAL.*), prüft Superblock-Redundanz+Generation, Bitmap-CRCs, free_blocks/free_inodes-Konsistenz, Inode-Record-Decode, Extent-Grenzen, Double-Allocation-Detection, Attr-Block-Pointer, Journal-Header
+  - **Benchmark** (`benchmark.rs`): Micro-Benchmark `run_odf_bench()` misst format+save+load-Pipeline für Blob- und Native-Modus mit synthetischem State
+  - **TRIM-Propagation**: freigegebene Payload-Extents werden beim `save_state` per `BlockDevice::trim` an das Gerät gemeldet
+  - **CLI-Integration**: `mkfs-odf`, `fsck-odf`, `inspect-odf`, `migrate-to-odf` (liest legacy `volume_image` und schreibt Native-ODF)
+  - Top-Level-APIs `format_device`/`save_state`/`load_state`/`inspect` (Blob-Modus) + `save_state_native`/`load_state_native` (Native-Modus) auf beliebigen `BlockDevice`-Implementierungen
+  - Getestet mit **143 Unit-Tests** (Layout-Planer, CRC32C-Testvektoren, Superblock-Roundtrip+Korruptionsprüfung, Bitmap-Allokation, Inode-Record-Roundtrip, Extent-Chain-Roundtrip+Loop-Detection, Dir-Block-Roundtrip+Pack, Attr-Block-Roundtrip, Xattr-Block-Roundtrip+Principal-Reject, Allocator-First/Best-Fit+Inode-Slots, Journal-Commit/Replay/Abort/Partial-Discard/Multi-Txn-Ordering, Format+Save+Load-Roundtrip, redundanter Superblock-Fallback, Native-Roundtrip-Scenarios, Encryption-Flag-Propagation, fsck-Clean/Corrupt/Read-Only, Micro-Benchmark, CLI-End-to-End) plus 2 neue CLI-Integrations-Tests
 
 ### `src/services`
 
