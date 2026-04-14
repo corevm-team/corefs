@@ -124,8 +124,7 @@ impl HotnessTracker {
     /// Total reads + writes to `block` since the tracker was created
     /// or last reset.
     pub fn heat(&self, block: u64) -> u64 {
-        self.reads.get(&block).copied().unwrap_or(0)
-            + self.writes.get(&block).copied().unwrap_or(0)
+        self.reads.get(&block).copied().unwrap_or(0) + self.writes.get(&block).copied().unwrap_or(0)
     }
 
     /// Top-N hottest blocks by `heat`.
@@ -367,9 +366,7 @@ impl Migrator {
                 break;
             }
             report.considered += 1;
-            if *heat >= policy.promote_heat_threshold
-                && tiered.map.get(*block) == Tier::Cold
-            {
+            if *heat >= policy.promote_heat_threshold && tiered.map.get(*block) == Tier::Cold {
                 tiered.migrate_block(*block, Tier::Hot)?;
                 report.promoted += 1;
                 budget -= 1;
@@ -377,11 +374,7 @@ impl Migrator {
         }
 
         // Demote: visit currently-hot blocks with heat below demote threshold.
-        let hot_blocks: Vec<u64> = tiered
-            .map
-            .blocks_in_tier(Tier::Hot)
-            .into_iter()
-            .collect();
+        let hot_blocks: Vec<u64> = tiered.map.blocks_in_tier(Tier::Hot).into_iter().collect();
         for block in hot_blocks {
             if budget == 0 {
                 break;

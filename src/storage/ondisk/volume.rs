@@ -80,25 +80,18 @@ pub fn format_device(
     let mut block_bitmap = Bitmap::new(geom.total_blocks);
     // Mark control blocks as allocated.
     mark_reserved_blocks(&mut block_bitmap, &geom)?;
-    write_blocks(
-        device,
-        geom.block_bitmap_start,
-        block_bitmap.as_bytes(),
-    )?;
+    write_blocks(device, geom.block_bitmap_start, block_bitmap.as_bytes())?;
 
     let mut inode_bitmap = Bitmap::new(geom.inode_count);
     // Reserve inode 0 for the system payload.
     inode_bitmap.set(0)?;
-    write_blocks(
-        device,
-        geom.inode_bitmap_start,
-        inode_bitmap.as_bytes(),
-    )?;
+    write_blocks(device, geom.inode_bitmap_start, inode_bitmap.as_bytes())?;
 
     // --- Inode table — write unused slots ---------------------------------
     let unused = OnDiskInode::unused().encode()?;
     let mut table = vec![0u8; (geom.inode_table_blocks * BLOCK_SIZE) as usize];
-    let slot_count = (geom.inode_count).min(geom.inode_table_blocks * super::layout::INODES_PER_BLOCK);
+    let slot_count =
+        (geom.inode_count).min(geom.inode_table_blocks * super::layout::INODES_PER_BLOCK);
     for i in 0..slot_count {
         let start = (i * super::inode::INODE_RECORD_SIZE as u64) as usize;
         table[start..start + super::inode::INODE_RECORD_SIZE].copy_from_slice(&unused);
@@ -172,14 +165,12 @@ pub fn save_state(
     }
 
     // --- Serialise payload + CRC trailer ---------------------------------
-    let mut payload = bincode::serialize(state).map_err(|e| {
-        CoreFsError::State(format!("ODF: failed to serialize PersistedState: {e}"))
-    })?;
+    let mut payload = bincode::serialize(state)
+        .map_err(|e| CoreFsError::State(format!("ODF: failed to serialize PersistedState: {e}")))?;
     let crc = Crc32c::hash(&payload);
     payload.extend_from_slice(&crc.to_le_bytes());
 
-    let payload_blocks_needed =
-        (payload.len() as u64).div_ceil(BLOCK_SIZE);
+    let payload_blocks_needed = (payload.len() as u64).div_ceil(BLOCK_SIZE);
     if payload_blocks_needed > geom.data_blocks {
         return Err(CoreFsError::State(format!(
             "ODF: payload requires {} blocks, data region holds {}",
@@ -194,19 +185,11 @@ pub fn save_state(
     for i in 0..payload_blocks_needed {
         block_bitmap.set(payload_start + i)?;
     }
-    write_blocks(
-        device,
-        geom.block_bitmap_start,
-        block_bitmap.as_bytes(),
-    )?;
+    write_blocks(device, geom.block_bitmap_start, block_bitmap.as_bytes())?;
 
     let mut inode_bitmap = Bitmap::new(geom.inode_count);
     inode_bitmap.set(0)?;
-    write_blocks(
-        device,
-        geom.inode_bitmap_start,
-        inode_bitmap.as_bytes(),
-    )?;
+    write_blocks(device, geom.inode_bitmap_start, inode_bitmap.as_bytes())?;
 
     // --- Write payload blocks --------------------------------------------
     let mut buf = vec![0u8; (payload_blocks_needed * BLOCK_SIZE) as usize];
@@ -375,7 +358,11 @@ pub fn inspect(device: &dyn BlockDevice) -> CoreFsResult<VolumeInfo> {
     let tertiary_ok = read_superblock_at(device, geom.tertiary_superblock_block).is_ok();
     let secondary_ok = read_superblock_at(device, geom.secondary_superblock_block).is_ok();
     let label = String::from_utf8_lossy(
-        &sb.label[..sb.label.iter().position(|b| *b == 0).unwrap_or(sb.label.len())],
+        &sb.label[..sb
+            .label
+            .iter()
+            .position(|b| *b == 0)
+            .unwrap_or(sb.label.len())],
     )
     .to_string();
     Ok(VolumeInfo {
@@ -427,11 +414,7 @@ fn write_blocks(device: &mut dyn BlockDevice, start: u64, bytes: &[u8]) -> CoreF
     device.write_at(start * BLOCK_SIZE, bytes)
 }
 
-fn zero_fill_region(
-    device: &mut dyn BlockDevice,
-    start: u64,
-    blocks: u64,
-) -> CoreFsResult<()> {
+fn zero_fill_region(device: &mut dyn BlockDevice, start: u64, blocks: u64) -> CoreFsResult<()> {
     // Chunk zero-fill to avoid a huge single allocation for large regions.
     const CHUNK_BLOCKS: u64 = 64;
     let mut written = 0u64;
@@ -449,10 +432,7 @@ fn read_superblock_at(device: &dyn BlockDevice, block: u64) -> CoreFsResult<Supe
     Superblock::decode_block(&buf)
 }
 
-fn trim_extents(
-    device: &mut dyn BlockDevice,
-    extents: &[Extent],
-) -> CoreFsResult<()> {
+fn trim_extents(device: &mut dyn BlockDevice, extents: &[Extent]) -> CoreFsResult<()> {
     if !device.supports_trim() {
         return Ok(());
     }
@@ -472,10 +452,7 @@ fn trim_extents(
 /// Verify that the persisted bitmap bytes still match the CRC32C values
 /// recorded in the superblock.  Returns an error if either bitmap is
 /// corrupted or has been tampered with since the last save.
-pub fn verify_bitmap_integrity(
-    device: &dyn BlockDevice,
-    sb: &Superblock,
-) -> CoreFsResult<()> {
+pub fn verify_bitmap_integrity(device: &dyn BlockDevice, sb: &Superblock) -> CoreFsResult<()> {
     if sb.block_bitmap_crc != 0 {
         let bytes = device.read_at(
             sb.block_bitmap_start * BLOCK_SIZE,

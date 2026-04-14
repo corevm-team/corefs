@@ -77,11 +77,7 @@ impl<'d> JournaledSaveSession<'d> {
 
     /// Stage a full 4 KiB metadata block for journaled application.
     /// `data` **must** be exactly [`BLOCK_SIZE`] bytes.
-    pub fn stage_metadata_block(
-        &mut self,
-        block: u64,
-        data: Vec<u8>,
-    ) -> CoreFsResult<()> {
+    pub fn stage_metadata_block(&mut self, block: u64, data: Vec<u8>) -> CoreFsResult<()> {
         if data.len() as u64 != BLOCK_SIZE {
             return Err(CoreFsError::InvalidInput(format!(
                 "journaled save: metadata block payload must be {BLOCK_SIZE} bytes, got {}",
@@ -96,11 +92,7 @@ impl<'d> JournaledSaveSession<'d> {
     /// `record` must be exactly [`INODE_RECORD_SIZE`] bytes.
     ///
     /// [`INODE_RECORD_SIZE`]: super::inode::INODE_RECORD_SIZE
-    pub fn stage_inode_update(
-        &mut self,
-        slot: u64,
-        record: Vec<u8>,
-    ) -> CoreFsResult<()> {
+    pub fn stage_inode_update(&mut self, slot: u64, record: Vec<u8>) -> CoreFsResult<()> {
         if record.len() != super::inode::INODE_RECORD_SIZE {
             return Err(CoreFsError::InvalidInput(format!(
                 "journaled save: inode record must be {} bytes, got {}",
@@ -108,7 +100,10 @@ impl<'d> JournaledSaveSession<'d> {
                 record.len()
             )));
         }
-        self.ops.push(Op::InodeUpdate { index: slot, record });
+        self.ops.push(Op::InodeUpdate {
+            index: slot,
+            record,
+        });
         Ok(())
     }
 

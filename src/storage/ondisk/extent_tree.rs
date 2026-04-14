@@ -130,10 +130,7 @@ pub struct ExtentChain;
 impl ExtentChain {
     /// Read every extent reachable from `root_block` (inclusive).  Returns
     /// a flat list in on-disk order.
-    pub fn read_chain(
-        device: &dyn BlockDevice,
-        root_block: u64,
-    ) -> CoreFsResult<Vec<Extent>> {
+    pub fn read_chain(device: &dyn BlockDevice, root_block: u64) -> CoreFsResult<Vec<Extent>> {
         if root_block == 0 {
             return Ok(Vec::new());
         }
@@ -178,7 +175,11 @@ impl ExtentChain {
         for i in 0..needed {
             let start = i * EXTENTS_PER_INDEX_BLOCK;
             let end = (start + EXTENTS_PER_INDEX_BLOCK).min(extents.len());
-            let next = if i + 1 < needed { reserve_blocks[i + 1] } else { 0 };
+            let next = if i + 1 < needed {
+                reserve_blocks[i + 1]
+            } else {
+                0
+            };
             let blk = ExtentIndexBlock {
                 next_index_block: next,
                 extents: extents[start..end].to_vec(),

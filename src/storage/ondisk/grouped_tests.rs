@@ -78,7 +78,9 @@ fn format_sets_incompat_flag_and_writes_group_table() {
     let sb = crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();
     assert!(sb.feature_incompat & FEATURE_INCOMPAT_BLOCK_GROUPS != 0);
 
-    let table_bytes = dev.read_at(BLOCK_GROUP_TABLE_BLOCK * BLOCK_SIZE, BLOCK_SIZE).unwrap();
+    let table_bytes = dev
+        .read_at(BLOCK_GROUP_TABLE_BLOCK * BLOCK_SIZE, BLOCK_SIZE)
+        .unwrap();
     let table = BlockGroupTable::decode(&table_bytes).unwrap();
     assert_eq!(table.groups.len(), 4);
     // Groups should not overlap and their bitmap blocks are distinct.
@@ -122,7 +124,12 @@ fn populated_state_grouped_roundtrip() {
     let mut state = empty_state();
     for i in 1..=10 {
         let content = format!("grouped-{i}");
-        let inode = sample_inode(i as u64, &format!("/g{i}.bin"), InodeKind::File, content.len());
+        let inode = sample_inode(
+            i as u64,
+            &format!("/g{i}.bin"),
+            InodeKind::File,
+            content.len(),
+        );
         state.active_inodes.push(inode.clone());
         state.block_records.push(BlockRecord {
             inode: inode.id,
@@ -158,7 +165,12 @@ fn extents_land_in_home_group() {
     // Allocate inodes whose IDs should land them in different groups.
     for i in 0..8 {
         let content = vec![i as u8; 512];
-        let inode = sample_inode(100 + i as u64, &format!("/f{i}"), InodeKind::File, content.len());
+        let inode = sample_inode(
+            100 + i as u64,
+            &format!("/f{i}"),
+            InodeKind::File,
+            content.len(),
+        );
         state.active_inodes.push(inode.clone());
         state.block_records.push(BlockRecord {
             inode: inode.id,
@@ -171,12 +183,18 @@ fn extents_land_in_home_group() {
     save_state_native_grouped(&mut dev, &state).unwrap();
 
     // For each persisted inode, its first extent should be inside a group.
-    let table_bytes = dev.read_at(BLOCK_GROUP_TABLE_BLOCK * BLOCK_SIZE, BLOCK_SIZE).unwrap();
+    let table_bytes = dev
+        .read_at(BLOCK_GROUP_TABLE_BLOCK * BLOCK_SIZE, BLOCK_SIZE)
+        .unwrap();
     let table = BlockGroupTable::decode(&table_bytes).unwrap();
     let loaded = load_state_native_grouped(&dev).unwrap();
     for rec in &loaded.block_records {
         let group = table.group_for_block(rec.device_block);
-        assert!(group.is_some(), "block {} belongs to no group", rec.device_block);
+        assert!(
+            group.is_some(),
+            "block {} belongs to no group",
+            rec.device_block
+        );
     }
 }
 
@@ -220,7 +238,9 @@ fn per_group_bitmap_crc_is_persisted() {
     let mut dev = fresh_device(8192);
     format_device_grouped(&mut dev, &opts_with(3)).unwrap();
     let mut state = empty_state();
-    state.active_inodes.push(sample_inode(1, "/x", InodeKind::File, 256));
+    state
+        .active_inodes
+        .push(sample_inode(1, "/x", InodeKind::File, 256));
     state.block_records.push(BlockRecord {
         inode: InodeId(1),
         bytes: vec![0xABu8; 256],
@@ -230,7 +250,9 @@ fn per_group_bitmap_crc_is_persisted() {
     });
     save_state_native_grouped(&mut dev, &state).unwrap();
 
-    let table_bytes = dev.read_at(BLOCK_GROUP_TABLE_BLOCK * BLOCK_SIZE, BLOCK_SIZE).unwrap();
+    let table_bytes = dev
+        .read_at(BLOCK_GROUP_TABLE_BLOCK * BLOCK_SIZE, BLOCK_SIZE)
+        .unwrap();
     let table = BlockGroupTable::decode(&table_bytes).unwrap();
     // Every group's descriptor carries a non-zero bitmap CRC (the CRC of
     // an all-zero bitmap is itself a known non-zero value).
@@ -246,7 +268,9 @@ fn corrupt_group_bitmap_is_reported_on_load() {
     let state = empty_state();
     save_state_native_grouped(&mut dev, &state).unwrap();
 
-    let table_bytes = dev.read_at(BLOCK_GROUP_TABLE_BLOCK * BLOCK_SIZE, BLOCK_SIZE).unwrap();
+    let table_bytes = dev
+        .read_at(BLOCK_GROUP_TABLE_BLOCK * BLOCK_SIZE, BLOCK_SIZE)
+        .unwrap();
     let table = BlockGroupTable::decode(&table_bytes).unwrap();
     let target = table.groups[0].bitmap_block;
     let mut corrupted = dev.read_at(target * BLOCK_SIZE, BLOCK_SIZE).unwrap();

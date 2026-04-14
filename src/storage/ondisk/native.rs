@@ -47,9 +47,7 @@ use super::allocator::{AllocationStrategy, OndiskAllocator};
 use super::attr_block::AttrBlock;
 use super::bitmap::Bitmap;
 use super::checksum::Crc32c;
-use super::inode::{
-    Extent, FLAG_HAS_EXTENT_INDEX, INODE_RECORD_SIZE, OnDiskInode, OnDiskKind,
-};
+use super::inode::{Extent, FLAG_HAS_EXTENT_INDEX, INODE_RECORD_SIZE, OnDiskInode, OnDiskKind};
 use super::layout::{BLOCK_SIZE, LayoutGeometry, PRIMARY_SUPERBLOCK_BLOCK};
 use super::superblock::{LAYOUT_MODE_NATIVE, STATE_CLEAN, Superblock};
 
@@ -136,9 +134,8 @@ pub fn save_state_native(
 
     // --- Ancillary blob at slot #1 ---------------------------------------
     let ancillary = AncillaryState::from(state);
-    let anc_bytes = bincode::serialize(&ancillary).map_err(|e| {
-        CoreFsError::State(format!("native: ancillary serialize failed: {e}"))
-    })?;
+    let anc_bytes = bincode::serialize(&ancillary)
+        .map_err(|e| CoreFsError::State(format!("native: ancillary serialize failed: {e}")))?;
     let anc_crc = Crc32c::hash(&anc_bytes);
     let mut anc_payload = anc_bytes.clone();
     anc_payload.extend_from_slice(&anc_crc.to_le_bytes());
@@ -253,12 +250,16 @@ pub fn load_state_native(device: &dyn BlockDevice) -> CoreFsResult<PersistedStat
     }
     let anc_bytes = read_all_extent_bytes(device, &anc_inode)?;
     if anc_bytes.len() < 4 {
-        return Err(CoreFsError::State("native load: ancillary too short".into()));
+        return Err(CoreFsError::State(
+            "native load: ancillary too short".into(),
+        ));
     }
     let (payload, crc_bytes) = anc_bytes.split_at(anc_bytes.len() - 4);
     let stored_crc = u32::from_le_bytes(crc_bytes.try_into().unwrap());
     if stored_crc != Crc32c::hash(payload) {
-        return Err(CoreFsError::State("native load: ancillary CRC mismatch".into()));
+        return Err(CoreFsError::State(
+            "native load: ancillary CRC mismatch".into(),
+        ));
     }
     let ancillary: AncillaryState = bincode::deserialize(payload).map_err(|e| {
         CoreFsError::State(format!("native load: ancillary deserialize failed: {e}"))
@@ -446,10 +447,7 @@ pub fn save_state_native_incremental(
         deleted: bool,
         bytes_by_inode: &std::collections::HashMap<InodeId, &'a [u8]>,
     ) -> DesiredSlot<'a> {
-        let bytes = bytes_by_inode
-            .get(&inode.id)
-            .copied()
-            .unwrap_or(&[]);
+        let bytes = bytes_by_inode.get(&inode.id).copied().unwrap_or(&[]);
         let crc = if !bytes.is_empty() {
             u64::from(Crc32c::hash(bytes))
         } else {
@@ -510,7 +508,14 @@ pub fn save_state_native_incremental(
             report.updated += 1;
         } else {
             // CREATE: take a fresh slot.
-            write_inode(device, &mut alloc, &geom, want.inode, want.bytes, want.deleted)?;
+            write_inode(
+                device,
+                &mut alloc,
+                &geom,
+                want.inode,
+                want.bytes,
+                want.deleted,
+            )?;
             report.created += 1;
         }
     }
@@ -550,10 +555,7 @@ pub fn save_state_native_incremental(
     Ok(report)
 }
 
-fn free_inode_payload(
-    alloc: &mut OndiskAllocator,
-    on_disk: &OnDiskInode,
-) -> CoreFsResult<()> {
+fn free_inode_payload(alloc: &mut OndiskAllocator, on_disk: &OnDiskInode) -> CoreFsResult<()> {
     for ext in &on_disk.extents {
         if ext.length_blocks > 0 {
             alloc.free_extent(*ext)?;
@@ -602,9 +604,8 @@ fn rewrite_ancillary(
         }
     }
     let ancillary = AncillaryState::from(state);
-    let anc_bytes = bincode::serialize(&ancillary).map_err(|e| {
-        CoreFsError::State(format!("native: ancillary serialize failed: {e}"))
-    })?;
+    let anc_bytes = bincode::serialize(&ancillary)
+        .map_err(|e| CoreFsError::State(format!("native: ancillary serialize failed: {e}")))?;
     let anc_crc = Crc32c::hash(&anc_bytes);
     let mut payload = anc_bytes;
     payload.extend_from_slice(&anc_crc.to_le_bytes());
@@ -651,9 +652,8 @@ fn write_inode_record_at(
 ) -> CoreFsResult<()> {
     let (extents, index_block_addr, flags_has_index) =
         allocate_and_write_content(device, alloc, content)?;
-    let attr_bytes = bincode::serialize(inode).map_err(|e| {
-        CoreFsError::State(format!("native: inode serialize failed: {e}"))
-    })?;
+    let attr_bytes = bincode::serialize(inode)
+        .map_err(|e| CoreFsError::State(format!("native: inode serialize failed: {e}")))?;
     if attr_bytes.len() > super::attr_block::ATTR_BLOCK_CAPACITY {
         return Err(CoreFsError::State(format!(
             "native: serialized inode {} exceeds attr block capacity {}",
@@ -754,9 +754,8 @@ fn write_inode(
     let (extents, index_block_addr, flags_has_index) =
         allocate_and_write_content(device, alloc, content)?;
     // --- Allocate + write attr block containing the serialized Inode ---
-    let attr_bytes = bincode::serialize(inode).map_err(|e| {
-        CoreFsError::State(format!("native: inode serialize failed: {e}"))
-    })?;
+    let attr_bytes = bincode::serialize(inode)
+        .map_err(|e| CoreFsError::State(format!("native: inode serialize failed: {e}")))?;
     if attr_bytes.len() > super::attr_block::ATTR_BLOCK_CAPACITY {
         return Err(CoreFsError::State(format!(
             "native: serialized inode {} exceeds attr block capacity {}",
@@ -882,9 +881,8 @@ pub fn read_all_extent_bytes_public(
 /// implementation.
 pub fn build_ancillary_bytes(state: &PersistedState) -> CoreFsResult<Vec<u8>> {
     let ancillary = AncillaryState::from(state);
-    let anc_bytes = bincode::serialize(&ancillary).map_err(|e| {
-        CoreFsError::State(format!("native: ancillary serialize failed: {e}"))
-    })?;
+    let anc_bytes = bincode::serialize(&ancillary)
+        .map_err(|e| CoreFsError::State(format!("native: ancillary serialize failed: {e}")))?;
     let anc_crc = Crc32c::hash(&anc_bytes);
     let mut out = anc_bytes;
     out.extend_from_slice(&anc_crc.to_le_bytes());
@@ -928,16 +926,10 @@ pub fn ancillary_into_state(anc: AncillaryStateRef) -> PersistedState {
 /// grouped-layout callers without leaking its fields.
 pub struct AncillaryStateRef(AncillaryState);
 
-fn read_all_extent_bytes(
-    device: &dyn BlockDevice,
-    inode: &OnDiskInode,
-) -> CoreFsResult<Vec<u8>> {
+fn read_all_extent_bytes(device: &dyn BlockDevice, inode: &OnDiskInode) -> CoreFsResult<Vec<u8>> {
     let mut extents = inode.extents.clone();
     if inode.flags & FLAG_HAS_EXTENT_INDEX != 0 {
-        extents = super::extent_tree::ExtentChain::read_chain(
-            device,
-            inode.index_block_addr,
-        )?;
+        extents = super::extent_tree::ExtentChain::read_chain(device, inode.index_block_addr)?;
     }
     if extents.is_empty() {
         return Ok(Vec::new());

@@ -212,16 +212,17 @@ impl XattrBlock {
             if rec < XATTR_HDR || rec % 8 != 0 || cursor + rec > CRC_OFFSET {
                 return Err(CoreFsError::State("xattr: bad rec_len".into()));
             }
-            let name_len = u16::from_le_bytes(block[cursor + 2..cursor + 4].try_into().unwrap()) as usize;
-            let value_len = u32::from_le_bytes(block[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
+            let name_len =
+                u16::from_le_bytes(block[cursor + 2..cursor + 4].try_into().unwrap()) as usize;
+            let value_len =
+                u32::from_le_bytes(block[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
             if XATTR_HDR + name_len + value_len > rec {
                 return Err(CoreFsError::State("xattr: lengths exceed rec".into()));
             }
-            let name = std::str::from_utf8(
-                &block[cursor + XATTR_HDR..cursor + XATTR_HDR + name_len],
-            )
-            .map_err(|e| CoreFsError::State(format!("xattr: name utf-8: {e}")))?
-            .to_string();
+            let name =
+                std::str::from_utf8(&block[cursor + XATTR_HDR..cursor + XATTR_HDR + name_len])
+                    .map_err(|e| CoreFsError::State(format!("xattr: name utf-8: {e}")))?
+                    .to_string();
             let v_off = cursor + XATTR_HDR + name_len;
             let value = block[v_off..v_off + value_len].to_vec();
             xattrs.push(XattrPair { name, value });
@@ -239,15 +240,15 @@ impl XattrBlock {
             }
             let principal = AclPrincipal::from_u8(block[cursor + 2])?;
             let permission = block[cursor + 3];
-            let subj_len = u32::from_le_bytes(block[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
+            let subj_len =
+                u32::from_le_bytes(block[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
             if ACL_HDR + subj_len > rec {
                 return Err(CoreFsError::State("acl: subject exceeds rec".into()));
             }
-            let subject = std::str::from_utf8(
-                &block[cursor + ACL_HDR..cursor + ACL_HDR + subj_len],
-            )
-            .map_err(|e| CoreFsError::State(format!("acl: subject utf-8: {e}")))?
-            .to_string();
+            let subject =
+                std::str::from_utf8(&block[cursor + ACL_HDR..cursor + ACL_HDR + subj_len])
+                    .map_err(|e| CoreFsError::State(format!("acl: subject utf-8: {e}")))?
+                    .to_string();
             acls.push(AclRecord {
                 principal,
                 subject,

@@ -186,7 +186,8 @@ fn i4_silent_bitmap_corruption_is_caught_on_load() {
         .read_at(sb.block_bitmap_start * BLOCK_SIZE, BLOCK_SIZE)
         .unwrap();
     bmp[9] ^= 0x80;
-    dev.write_at(sb.block_bitmap_start * BLOCK_SIZE, &bmp).unwrap();
+    dev.write_at(sb.block_bitmap_start * BLOCK_SIZE, &bmp)
+        .unwrap();
 
     let err = load_state_native(&dev).unwrap_err();
     assert!(format!("{err}").contains("bitmap CRC"));
@@ -200,7 +201,8 @@ fn i5_primary_superblock_corruption_falls_back_to_redundant_copies() {
     save_state_native(&mut dev, &empty_state()).unwrap();
 
     // Wipe the primary superblock.
-    dev.write_at(BLOCK_SIZE, &[0u8; BLOCK_SIZE as usize]).unwrap();
+    dev.write_at(BLOCK_SIZE, &[0u8; BLOCK_SIZE as usize])
+        .unwrap();
 
     // Load still succeeds via one of the redundant copies.
     let state = load_state_native(&dev).unwrap();

@@ -105,7 +105,10 @@ impl ScrubReport {
     /// failure was observed.
     pub fn is_clean(&self) -> bool {
         self.data_corruptions.is_empty()
-            && !self.residual_issues.iter().any(|i| i.severity == fsck::Severity::Error)
+            && !self
+                .residual_issues
+                .iter()
+                .any(|i| i.severity == fsck::Severity::Error)
     }
 }
 
@@ -180,7 +183,9 @@ pub fn run(device: &mut dyn BlockDevice, plan: &ScrubPlan) -> CoreFsResult<Scrub
             }
             let actual = u64::from(Crc32c::hash(&bytes));
             if actual != on_disk.data_crc {
-                report.data_corruptions.push((summary.slot, summary.domain_id));
+                report
+                    .data_corruptions
+                    .push((summary.slot, summary.domain_id));
             }
         }
     }

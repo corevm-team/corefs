@@ -689,7 +689,10 @@ impl CoreFsFuseMountRw {
     ) -> CoreFsResult<Self> {
         Ok(Self::from_service(
             service,
-            FuseBacking::Device { device, cache: None },
+            FuseBacking::Device {
+                device,
+                cache: None,
+            },
         ))
     }
 
@@ -713,9 +716,7 @@ impl CoreFsFuseMountRw {
     fn open_odf_session(image_path: PathBuf) -> CoreFsResult<Self> {
         use crate::storage::block_device::FileImageDevice;
         use crate::storage::ondisk::journaled::recover_pending_transactions;
-        use crate::storage::ondisk::native::{
-            load_state_native, save_state_native_incremental,
-        };
+        use crate::storage::ondisk::native::{load_state_native, save_state_native_incremental};
         if !image_path.exists() {
             return Err(CoreFsError::NotFound(format!(
                 "ODF RW mount: image not found: {}",
@@ -736,10 +737,7 @@ impl CoreFsFuseMountRw {
 
         Ok(Self::from_service(
             service,
-            FuseBacking::Odf {
-                device,
-                image_path,
-            },
+            FuseBacking::Odf { device, image_path },
         ))
     }
 
@@ -771,9 +769,7 @@ impl CoreFsFuseMountRw {
             FuseBacking::Odf { device, .. } => {
                 let state = self.service.persisted_state();
                 let _report =
-                    crate::storage::ondisk::native::save_state_native_incremental(
-                        device, &state,
-                    )?;
+                    crate::storage::ondisk::native::save_state_native_incremental(device, &state)?;
                 Ok(())
             }
         }
@@ -970,10 +966,11 @@ impl CoreFsFuseMountRw {
 
         // Is the child a directory (any snapshot path starts with child_fs_path/)?
         let is_dir = snap_paths.iter().any(|p| {
-            p.starts_with(&format!("{child_fs_path}/")) || *p == child_fs_path
-                && snap_paths
-                    .iter()
-                    .any(|p2| p2.starts_with(&format!("{child_fs_path}/")))
+            p.starts_with(&format!("{child_fs_path}/"))
+                || *p == child_fs_path
+                    && snap_paths
+                        .iter()
+                        .any(|p2| p2.starts_with(&format!("{child_fs_path}/")))
         });
         let is_file = snap_paths.contains(&child_fs_path);
 
@@ -1002,8 +999,13 @@ impl CoreFsFuseMountRw {
                 snapshot_id: snap_id,
                 fs_path: child_fs_path,
             };
-            let ino =
-                self.get_or_create_virt_file(key, VirtFile { bytes, modified_at: snap_ts });
+            let ino = self.get_or_create_virt_file(
+                key,
+                VirtFile {
+                    bytes,
+                    modified_at: snap_ts,
+                },
+            );
             reply.entry(&TTL, &Self::virt_file_attr(ino, size, snap_ts), 0);
             return;
         }
@@ -1490,7 +1492,11 @@ impl CoreFsFuseMountRw {
         match &self.backing {
             FuseBacking::File(path) => fuse_capacity_blocks(path, &self.nodes_by_ino),
             FuseBacking::Device { device, .. } => {
-                let used_bytes: u64 = self.nodes_by_ino.values().map(|n| n.data.len() as u64).sum();
+                let used_bytes: u64 = self
+                    .nodes_by_ino
+                    .values()
+                    .map(|n| n.data.len() as u64)
+                    .sum();
                 let used_blocks = used_bytes.div_ceil(FUSE_BLOCK_SIZE as u64);
                 let total_blocks = device.capacity() / FUSE_BLOCK_SIZE as u64;
                 let free_blocks = total_blocks.saturating_sub(used_blocks);
@@ -1500,11 +1506,13 @@ impl CoreFsFuseMountRw {
                 // Use the device capacity as the statfs backbone so df(1)
                 // shows a meaningful total — not the FUSE in-memory sum.
                 use crate::storage::block_device::BlockDevice as _;
-                let used_bytes: u64 =
-                    self.nodes_by_ino.values().map(|n| n.data.len() as u64).sum();
+                let used_bytes: u64 = self
+                    .nodes_by_ino
+                    .values()
+                    .map(|n| n.data.len() as u64)
+                    .sum();
                 let used_blocks = used_bytes.div_ceil(FUSE_BLOCK_SIZE as u64);
-                let total_blocks =
-                    device.capacity() / FUSE_BLOCK_SIZE as u64;
+                let total_blocks = device.capacity() / FUSE_BLOCK_SIZE as u64;
                 let free_blocks = total_blocks.saturating_sub(used_blocks);
                 (total_blocks, free_blocks)
             }
@@ -1571,10 +1579,7 @@ impl Filesystem for CoreFsFuseMountRw {
             let base = &name_str[..at_pos];
             let spec_str = &name_str[at_pos + 1..];
             if let Some(spec) = CoreFsFuseMountRw::parse_time_travel(spec_str) {
-                let parent_path = self
-                    .nodes_by_ino
-                    .get(&parent)
-                    .map(|n| n.path.clone());
+                let parent_path = self.nodes_by_ino.get(&parent).map(|n| n.path.clone());
                 if let Some(parent_path) = parent_path {
                     let file_path = if parent_path == "/" {
                         format!("/{base}")
@@ -1598,9 +1603,14 @@ impl Filesystem for CoreFsFuseMountRw {
                             fs_path: file_path,
                             version_id,
                         };
-                        let mtime = Timestamp::now();
-                        let ino =
-                            self.get_or_create_virt_file(key, VirtFile { bytes, modified_at: mtime });
+                        let mtime = SystemTime::now();
+                        let ino = self.get_or_create_virt_file(
+                            key,
+                            VirtFile {
+                                bytes,
+                                modified_at: mtime,
+                            },
+                        );
                         let attr = Self::virt_file_attr(ino, size, mtime);
                         reply.entry(&TTL, &attr, 0);
                         return;
@@ -1904,7 +1914,11 @@ impl Filesystem for CoreFsFuseMountRw {
         }
         let req_uid = _req.uid();
         let req_gid = _req.gid();
-        let req_mode = if _mode == 0 { 0o644 } else { _mode & !_umask & 0o7777 };
+        let req_mode = if _mode == 0 {
+            0o644
+        } else {
+            _mode & !_umask & 0o7777
+        };
         if self.ensure_mutation_session("create").is_err() {
             reply.error(EIO);
             return;
@@ -1976,7 +1990,11 @@ impl Filesystem for CoreFsFuseMountRw {
         }
         let req_uid = _req.uid();
         let req_gid = _req.gid();
-        let req_mode = if _mode == 0 { 0o755 } else { _mode & !_umask & 0o7777 };
+        let req_mode = if _mode == 0 {
+            0o755
+        } else {
+            _mode & !_umask & 0o7777
+        };
         if self.ensure_mutation_session("mkdir").is_err() {
             reply.error(EIO);
             return;
@@ -2299,9 +2317,7 @@ impl Filesystem for CoreFsFuseMountRw {
         reply: ReplyWrite,
     ) {
         // Virtual (read-only) nodes cannot be copy destinations.
-        if self.virt_files.contains_key(&ino_out)
-            || self.virt_dirs.contains_key(&ino_out)
-        {
+        if self.virt_files.contains_key(&ino_out) || self.virt_dirs.contains_key(&ino_out) {
             reply.error(libc::EROFS);
             return;
         }
@@ -2376,7 +2392,8 @@ impl Filesystem for CoreFsFuseMountRw {
                 let dir_name = format!("{}-{}", snap.id, snap.name);
                 entries.push((SNAP_SUBDIR_BASE + snap.id, FileType::Directory, dir_name));
             }
-            for (index, (e_ino, ft, name)) in entries.into_iter().enumerate().skip(offset as usize) {
+            for (index, (e_ino, ft, name)) in entries.into_iter().enumerate().skip(offset as usize)
+            {
                 if reply.add(e_ino, (index + 1) as i64, ft, name) {
                     break;
                 }
@@ -2386,13 +2403,14 @@ impl Filesystem for CoreFsFuseMountRw {
         }
 
         // ── Snapshot root dir (.snapshots/snap-N-name/) or deeper snapshot virt_dir ──
-        let snapshot_info: Option<(u64, Timestamp)> = if let Some(info) = self.snapshot_for_subdir_ino(ino) {
-            Some(info)
-        } else if let Some(d) = self.virt_dirs.get(&ino) {
-            Some((d.snapshot_id, d.modified_at))
-        } else {
-            None
-        };
+        let snapshot_info: Option<(u64, SystemTime)> =
+            if let Some(info) = self.snapshot_for_subdir_ino(ino) {
+                Some(info)
+            } else if let Some(d) = self.virt_dirs.get(&ino) {
+                Some((d.snapshot_id, d.modified_at))
+            } else {
+                None
+            };
 
         if let Some((snap_id, snap_ts)) = snapshot_info {
             // Determine parent INO for ".." entry.
@@ -2445,13 +2463,24 @@ impl Filesystem for CoreFsFuseMountRw {
                         snapshot_id: snap_id,
                         fs_path: child_fs_path,
                     };
-                    self.get_or_create_virt_file(key, VirtFile { bytes, modified_at: snap_ts })
+                    self.get_or_create_virt_file(
+                        key,
+                        VirtFile {
+                            bytes,
+                            modified_at: snap_ts,
+                        },
+                    )
                 };
-                let ft = if is_dir { FileType::Directory } else { FileType::RegularFile };
+                let ft = if is_dir {
+                    FileType::Directory
+                } else {
+                    FileType::RegularFile
+                };
                 entries.push((child_ino, ft, name));
             }
 
-            for (index, (e_ino, ft, name)) in entries.into_iter().enumerate().skip(offset as usize) {
+            for (index, (e_ino, ft, name)) in entries.into_iter().enumerate().skip(offset as usize)
+            {
                 if reply.add(e_ino, (index + 1) as i64, ft, name) {
                     break;
                 }
@@ -2468,7 +2497,11 @@ impl Filesystem for CoreFsFuseMountRw {
         }
         // Inject the virtual `.snapshots/` entry when listing the root directory.
         if ino == ROOT_INO {
-            entries.push((SNAPSHOTS_DIR_INO, FileType::Directory, ".snapshots".to_string()));
+            entries.push((
+                SNAPSHOTS_DIR_INO,
+                FileType::Directory,
+                ".snapshots".to_string(),
+            ));
         }
         for (index, (entry_ino, kind, name)) in
             entries.into_iter().enumerate().skip(offset as usize)

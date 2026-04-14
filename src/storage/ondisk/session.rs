@@ -95,10 +95,7 @@ pub struct OdfFileSession {
 impl OdfFileSession {
     /// Create a fresh image file, format it in native mode, and seed
     /// the service from the provided [`CoreFsConfig`].
-    pub fn format_new(
-        path: impl AsRef<Path>,
-        options: &OdfSessionOptions,
-    ) -> CoreFsResult<Self> {
+    pub fn format_new(path: impl AsRef<Path>, options: &OdfSessionOptions) -> CoreFsResult<Self> {
         let capacity = options.capacity_bytes;
         if capacity < MIN_ODF_CAPACITY_BYTES {
             return Err(CoreFsError::InvalidInput(format!(
@@ -259,8 +256,7 @@ impl OdfDeviceSession {
     /// Incrementally flush.
     pub fn flush(&mut self) -> CoreFsResult<FlushReport> {
         let state = self.service.persisted_state();
-        let incremental =
-            save_state_native_incremental(self.device.as_mut(), &state)?;
+        let incremental = save_state_native_incremental(self.device.as_mut(), &state)?;
         Ok(FlushReport { incremental })
     }
 

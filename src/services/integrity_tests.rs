@@ -137,8 +137,7 @@ fn repair_image_can_recover_without_any_valid_superblock() {
     volume_image::save_volume_image(&path, &state).expect("volume image should be written");
     let mut bytes = fs::read(&path).expect("image should exist");
     let primary_offset = u64::from_le_bytes(bytes[24..32].try_into().expect("fixed")) as usize;
-    let secondary_offset =
-        u64::from_le_bytes(bytes[48..56].try_into().expect("fixed")) as usize;
+    let secondary_offset = u64::from_le_bytes(bytes[48..56].try_into().expect("fixed")) as usize;
     bytes[primary_offset] ^= 0xFF;
     bytes[secondary_offset] ^= 0xFF;
     fs::write(&path, bytes).expect("corrupted image should be written");

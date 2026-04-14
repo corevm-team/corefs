@@ -202,6 +202,12 @@ fn cli_returns_errors_for_invalid_commands_and_missing_arguments() {
     let mount_image = run(vec!["corefs".to_string(), "mount-image".to_string()]);
     assert!(matches!(mount_image, Err(CoreFsError::InvalidCommand(_))));
 
+    let unmount_image_win = run(vec!["corefs".to_string(), "unmount-image-win".to_string()]);
+    assert!(matches!(
+        unmount_image_win,
+        Err(CoreFsError::InvalidCommand(_))
+    ));
+
     let diagnose_mount = run(vec!["corefs".to_string(), "diagnose-mount".to_string()]);
     assert!(matches!(
         diagnose_mount,

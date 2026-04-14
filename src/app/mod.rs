@@ -11,12 +11,12 @@ use crate::domain::volume::VolumeDescriptor;
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::platform::runtime::RuntimeIntegrationBlueprint;
 use crate::platform::tools::ToolRegistry;
+use crate::services::compression::CompressionService;
+use crate::services::encryption::EncryptionService;
 use crate::services::hot_paths::{HotPathRecord, HotPathService};
 use crate::services::indexing::IndexingService;
 use crate::services::integrity::{IntegrityReport, IntegrityService};
 use crate::services::journal::{JournalRecoverySummary, JournalRuntimeState, JournalService};
-use crate::services::compression::CompressionService;
-use crate::services::encryption::EncryptionService;
 use crate::services::quota::QuotaService;
 use crate::services::recovery::RecoveryService;
 use crate::services::security::SecurityService;
@@ -229,8 +229,8 @@ impl CoreFsService {
         metadata.acl = vec![AclEntry::full_access(Principal::Role("system".to_string()))];
 
         // Determine whether to compress and prepare the bytes to store.
-        let compress = self.config.performance.compression_enabled
-            && self.compression.should_compress(bytes);
+        let compress =
+            self.config.performance.compression_enabled && self.compression.should_compress(bytes);
         metadata.compressed = compress;
 
         let mut inode = Inode::new(inode_id, InodeKind::File, path.to_string(), metadata);
@@ -339,13 +339,8 @@ impl CoreFsService {
         let byte_delta = bytes.len() as isize - inode.size as isize;
         if byte_delta > 0 {
             let (cur_files, cur_bytes) = self.catalog.quota_stats();
-            self.quota.check_stats(
-                &self.config.quotas,
-                cur_files,
-                cur_bytes,
-                0,
-                byte_delta,
-            )?;
+            self.quota
+                .check_stats(&self.config.quotas, cur_files, cur_bytes, 0, byte_delta)?;
         }
 
         // Store version before compression (versions hold original content).
@@ -359,8 +354,8 @@ impl CoreFsService {
         }
 
         // Pipeline: compress → encrypt → store.
-        let compress = self.config.performance.compression_enabled
-            && self.compression.should_compress(bytes);
+        let compress =
+            self.config.performance.compression_enabled && self.compression.should_compress(bytes);
         let mut stored_bytes = if compress {
             self.compression.compress(bytes)?
         } else {
@@ -397,7 +392,12 @@ impl CoreFsService {
                 .catalog
                 .get(path)
                 .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
-            (inode.id, inode.kind, inode.metadata.compressed, inode.metadata.encrypted)
+            (
+                inode.id,
+                inode.kind,
+                inode.metadata.compressed,
+                inode.metadata.encrypted,
+            )
         };
 
         if inode_kind != InodeKind::File {
@@ -608,9 +608,7 @@ impl CoreFsService {
             .snapshots
             .iter()
             .position(|s| s.id == snapshot_id)
-            .ok_or_else(|| {
-                CoreFsError::NotFound(format!("snapshot {snapshot_id} not found"))
-            })?;
+            .ok_or_else(|| CoreFsError::NotFound(format!("snapshot {snapshot_id} not found")))?;
         let snapshot = self.snapshots.remove(pos);
         self.journal.record(
             "delete_snapshot",
@@ -626,11 +624,7 @@ impl CoreFsService {
     /// Lets callers inspect how an entry looked in the past — mode, uid, gid,
     /// timestamps, ACLs, tags, xattrs, symlink target — without performing a
     /// full restore.
-    pub fn snapshot_inode(
-        &self,
-        snapshot_id: u64,
-        path: &str,
-    ) -> CoreFsResult<&SnapshotInode> {
+    pub fn snapshot_inode(&self, snapshot_id: u64, path: &str) -> CoreFsResult<&SnapshotInode> {
         let snapshot = self
             .snapshots
             .iter()
@@ -687,11 +681,7 @@ impl CoreFsService {
                     }
                 }
                 InodeKind::File => {
-                    let bytes = snapshot
-                        .file_data
-                        .get(path)
-                        .cloned()
-                        .unwrap_or_default();
+                    let bytes = snapshot.file_data.get(path).cloned().unwrap_or_default();
                     match current_kind {
                         Some(InodeKind::File) => self.write_file(path, &bytes),
                         Some(_) => Err(CoreFsError::InvalidInput(format!(
@@ -793,8 +783,7 @@ impl CoreFsService {
                 )));
             }
 
-            let mut target =
-                Inode::new(target_id, InodeKind::File, to.to_string(), source_meta);
+            let mut target = Inode::new(target_id, InodeKind::File, to.to_string(), source_meta);
             target.size = source_size;
             self.catalog.insert(target);
             self.hot_paths.record_write(to, source_size);
@@ -960,7 +949,8 @@ impl CoreFsService {
         // Release blocks: decrements blob ref_count; frees blob only if last reference.
         let _ = self.blocks.remove(inode.id);
         self.allocator.release(inode.id);
-        self.journal.record("expunge", path, "permanent_delete=true");
+        self.journal
+            .record("expunge", path, "permanent_delete=true");
         Ok(())
     }
 
@@ -977,9 +967,7 @@ impl CoreFsService {
     ///
     /// Returns `Err(PolicyViolation)` when `config.performance.deduplication_enabled`
     /// is `false` — callers must opt in via configuration.
-    pub fn run_dedup(
-        &mut self,
-    ) -> CoreFsResult<crate::storage::block_store::DedupePassReport> {
+    pub fn run_dedup(&mut self) -> CoreFsResult<crate::storage::block_store::DedupePassReport> {
         if !self.config.performance.deduplication_enabled {
             return Err(CoreFsError::PolicyViolation(
                 "deduplication is disabled in configuration".to_string(),
@@ -1339,9 +1327,10 @@ impl CoreFsService {
         uid: Option<u32>,
         gid: Option<u32>,
     ) -> CoreFsResult<()> {
-        let inode = self.catalog.get_mut(path).ok_or_else(|| {
-            CoreFsError::NotFound(format!("path not found: {path}"))
-        })?;
+        let inode = self
+            .catalog
+            .get_mut(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
         if let Some(u) = uid {
             inode.metadata.uid = u;
         }
@@ -1358,9 +1347,10 @@ impl CoreFsService {
     /// Bumps `changed_at` (ctime) but not `modified_at` (mtime).  Does not
     /// create a new file version.
     pub fn set_mode(&mut self, path: &str, mode: u32) -> CoreFsResult<()> {
-        let inode = self.catalog.get_mut(path).ok_or_else(|| {
-            CoreFsError::NotFound(format!("path not found: {path}"))
-        })?;
+        let inode = self
+            .catalog
+            .get_mut(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
         inode.metadata.mode = mode & 0o7777;
         inode.touch_changed();
         Ok(())

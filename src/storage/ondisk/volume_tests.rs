@@ -61,11 +61,17 @@ fn format_initialises_all_control_regions() {
 
     // Redundant superblocks carry the same bytes.
     let t = dev
-        .read_at(report.geometry.tertiary_superblock_block * BLOCK_SIZE, BLOCK_SIZE)
+        .read_at(
+            report.geometry.tertiary_superblock_block * BLOCK_SIZE,
+            BLOCK_SIZE,
+        )
         .unwrap();
     assert_eq!(t, sb_bytes);
     let s = dev
-        .read_at(report.geometry.secondary_superblock_block * BLOCK_SIZE, BLOCK_SIZE)
+        .read_at(
+            report.geometry.secondary_superblock_block * BLOCK_SIZE,
+            BLOCK_SIZE,
+        )
         .unwrap();
     assert_eq!(s, sb_bytes);
 
@@ -149,11 +155,8 @@ fn save_updates_bitmap_to_reflect_payload_allocation() {
             sb.block_bitmap_blocks * BLOCK_SIZE,
         )
         .unwrap();
-    let bitmap = crate::storage::ondisk::bitmap::Bitmap::from_bytes(
-        bitmap_bytes,
-        sb.total_blocks,
-    )
-    .unwrap();
+    let bitmap =
+        crate::storage::ondisk::bitmap::Bitmap::from_bytes(bitmap_bytes, sb.total_blocks).unwrap();
     // The payload_blocks at data_start must be marked allocated.
     for i in 0..report.payload_blocks {
         assert!(bitmap.is_set(sb.data_start + i).unwrap());
@@ -224,7 +227,8 @@ fn bitmap_crc_detects_tampered_block_bitmap() {
         .read_at(sb.block_bitmap_start * BLOCK_SIZE, BLOCK_SIZE)
         .unwrap();
     bmp[50] ^= 0x10;
-    dev.write_at(sb.block_bitmap_start * BLOCK_SIZE, &bmp).unwrap();
+    dev.write_at(sb.block_bitmap_start * BLOCK_SIZE, &bmp)
+        .unwrap();
 
     let err = load_state(&dev).unwrap_err();
     assert!(format!("{err}").contains("block bitmap CRC"));
@@ -239,7 +243,10 @@ fn bitmap_crc_is_recorded_in_superblock() {
     let sb = crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();
     assert_ne!(sb.block_bitmap_crc, 0);
     assert_ne!(sb.inode_bitmap_crc, 0);
-    assert_eq!(sb.layout_mode, crate::storage::ondisk::superblock::LAYOUT_MODE_BLOB);
+    assert_eq!(
+        sb.layout_mode,
+        crate::storage::ondisk::superblock::LAYOUT_MODE_BLOB
+    );
 }
 
 #[test]

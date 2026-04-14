@@ -80,8 +80,7 @@ fn formatted_device_with_files() -> Box<dyn BlockDevice> {
     opts.config = CoreFsConfig::default();
     opts.config.performance.compression_enabled = false;
     opts.config.security.encryption_at_rest = false;
-    let dev: Box<dyn BlockDevice> =
-        Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
+    let dev: Box<dyn BlockDevice> = Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
     let mut sess = OdfDeviceSession::format_new(dev, &opts).unwrap();
     sess.mutate(|fs| {
         for i in 0..20 {
@@ -114,10 +113,8 @@ fn c3_multiple_readers_under_mutex_serve_consistent_results() {
     // All threads saw the same allocation.
     let first = &results[0];
     for r in &results[1..] {
-        let a: std::collections::HashSet<_> =
-            first.iter().map(|s| (s.slot, s.domain_id)).collect();
-        let b: std::collections::HashSet<_> =
-            r.iter().map(|s| (s.slot, s.domain_id)).collect();
+        let a: std::collections::HashSet<_> = first.iter().map(|s| (s.slot, s.domain_id)).collect();
+        let b: std::collections::HashSet<_> = r.iter().map(|s| (s.slot, s.domain_id)).collect();
         assert_eq!(a, b);
     }
 }
@@ -169,8 +166,7 @@ fn c5_session_can_be_moved_between_threads_but_not_shared() {
         o.config.security.encryption_at_rest = false;
         o
     };
-    let dev: Box<dyn BlockDevice> =
-        Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
+    let dev: Box<dyn BlockDevice> = Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
     let sess = OdfDeviceSession::format_new(dev, &opts).unwrap();
 
     let handle = thread::spawn(move || {
@@ -203,16 +199,17 @@ fn c6_concurrent_readers_on_snapshots_do_not_mutate_source() {
     opts.config.performance.compression_enabled = false;
     opts.config.security.encryption_at_rest = false;
 
-    let dev: Box<dyn BlockDevice> =
-        Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
+    let dev: Box<dyn BlockDevice> = Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
     let mut sess = OdfDeviceSession::format_new(dev, &opts).unwrap();
-    sess.mutate(|fs| fs.create_file("/v1", b"first", &[])).unwrap();
+    sess.mutate(|fs| fs.create_file("/v1", b"first", &[]))
+        .unwrap();
 
     let capacity = sess.device().capacity();
     let snapshot = sess.device().read_at(0, capacity).unwrap();
 
     // Continue mutating on the owner AFTER snapshot.
-    sess.mutate(|fs| fs.create_file("/v2", b"second", &[])).unwrap();
+    sess.mutate(|fs| fs.create_file("/v2", b"second", &[]))
+        .unwrap();
 
     let shared = Arc::new(snapshot);
     let mut handles = Vec::new();
@@ -220,8 +217,7 @@ fn c6_concurrent_readers_on_snapshots_do_not_mutate_source() {
         let s = Arc::clone(&shared);
         handles.push(thread::spawn(move || {
             let snap_dev = MemoryDevice::from_bytes((*s).clone(), 4096).unwrap();
-            let mut reader =
-                crate::storage::ondisk::reader::OdfReader::open(&snap_dev).unwrap();
+            let mut reader = crate::storage::ondisk::reader::OdfReader::open(&snap_dev).unwrap();
             // /v1 was in the snapshot; /v2 was not.
             assert!(reader.slot_for_path("/v1").unwrap().is_some());
             assert!(reader.slot_for_path("/v2").unwrap().is_none());

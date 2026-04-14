@@ -58,7 +58,11 @@ impl Rng {
     pub fn new(seed: u64) -> Self {
         // Avoid the degenerate all-zero state that xorshift64 gets
         // stuck on.
-        Rng(if seed == 0 { 0xDEAD_BEEF_1234_5678 } else { seed })
+        Rng(if seed == 0 {
+            0xDEAD_BEEF_1234_5678
+        } else {
+            seed
+        })
     }
 
     pub fn next_u64(&mut self) -> u64 {
@@ -98,7 +102,9 @@ pub fn generate_sequence(seed: u64, len: usize) -> Vec<Op> {
     };
     let fresh_content = |rng: &mut Rng| -> Vec<u8> {
         let n = (rng.next_range(32) + 1) as usize;
-        (0..n).map(|i| (rng.next_u64() as u8).wrapping_add(i as u8)).collect()
+        (0..n)
+            .map(|i| (rng.next_u64() as u8).wrapping_add(i as u8))
+            .collect()
     };
 
     for _ in 0..len {
@@ -152,38 +158,39 @@ pub fn run_and_check(seed: u64, ops: &[Op]) -> CoreFsResult<()> {
     opts.config.performance.compression_enabled = false;
     opts.config.security.encryption_at_rest = false;
     opts.config.versioning.keep_latest = 0;
-    let dev: Box<dyn BlockDevice> =
-        Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
+    let dev: Box<dyn BlockDevice> = Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
     let mut sess = OdfDeviceSession::format_new(dev, &opts)?;
 
     for (step, op) in ops.iter().enumerate() {
-        let result: CoreFsResult<()> = sess.mutate(|fs| {
-            match op {
-                Op::CreateFile { path, content } => {
-                    if fs.list_paths().contains(path) {
-                        // Collision with a previously-created path —
-                        // ignore rather than error.  The generator is
-                        // random; overlaps happen.
-                        return Ok(());
+        let result: CoreFsResult<()> = sess
+            .mutate(|fs| {
+                match op {
+                    Op::CreateFile { path, content } => {
+                        if fs.list_paths().contains(path) {
+                            // Collision with a previously-created path —
+                            // ignore rather than error.  The generator is
+                            // random; overlaps happen.
+                            return Ok(());
+                        }
+                        let _ = fs.create_file(path, content, &[]);
                     }
-                    let _ = fs.create_file(path, content, &[]);
+                    Op::DeleteFile { path } => {
+                        let _ = fs.delete_file(path, false);
+                    }
+                    Op::OverwriteFile { path, content } => {
+                        let _ = fs.delete_file(path, false);
+                        let _ = fs.create_file(path, content, &[]);
+                    }
+                    Op::CreateDirectory { path } => {
+                        let _ = fs.create_directory(path);
+                    }
+                    Op::CreateSnapshot { name } => {
+                        let _ = fs.create_snapshot(name);
+                    }
                 }
-                Op::DeleteFile { path } => {
-                    let _ = fs.delete_file(path, false);
-                }
-                Op::OverwriteFile { path, content } => {
-                    let _ = fs.delete_file(path, false);
-                    let _ = fs.create_file(path, content, &[]);
-                }
-                Op::CreateDirectory { path } => {
-                    let _ = fs.create_directory(path);
-                }
-                Op::CreateSnapshot { name } => {
-                    let _ = fs.create_snapshot(name);
-                }
-            }
-            Ok(())
-        }).map(|(_, _)| ());
+                Ok(())
+            })
+            .map(|(_, _)| ());
         result?;
 
         // Invariant #1: fsck stays Error-free.

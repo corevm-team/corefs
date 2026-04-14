@@ -638,8 +638,7 @@ fn file_image_512_byte_sectors() {
 
 #[test]
 fn trait_object_dispatch_works() {
-    let mut dev: Box<dyn BlockDevice> =
-        Box::new(MemoryDevice::new(FOUR_SECTORS, SECTOR).unwrap());
+    let mut dev: Box<dyn BlockDevice> = Box::new(MemoryDevice::new(FOUR_SECTORS, SECTOR).unwrap());
 
     let mut payload = vec![0u8; SECTOR as usize];
     payload[0] = 0xFF;

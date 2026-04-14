@@ -13,7 +13,12 @@ fn make_allocator(strategy: AllocationStrategy) -> OndiskAllocator {
     let geom = mk_geom();
     let mut bbm = Bitmap::new(geom.total_blocks);
     // Reserve control blocks as the volume driver would.
-    for b in [0u64, 1, geom.tertiary_superblock_block, geom.secondary_superblock_block] {
+    for b in [
+        0u64,
+        1,
+        geom.tertiary_superblock_block,
+        geom.secondary_superblock_block,
+    ] {
         bbm.set(b).unwrap();
     }
     for i in 0..geom.block_bitmap_blocks {

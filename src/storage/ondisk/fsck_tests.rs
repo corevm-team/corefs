@@ -91,9 +91,12 @@ fn corrupt_block_bitmap_is_reported() {
     save_state(&mut dev, &empty_state()).unwrap();
     let sb_bytes = dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap();
     let sb = crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();
-    let mut bmp = dev.read_at(sb.block_bitmap_start * BLOCK_SIZE, BLOCK_SIZE).unwrap();
+    let mut bmp = dev
+        .read_at(sb.block_bitmap_start * BLOCK_SIZE, BLOCK_SIZE)
+        .unwrap();
     bmp[77] ^= 0x04;
-    dev.write_at(sb.block_bitmap_start * BLOCK_SIZE, &bmp).unwrap();
+    dev.write_at(sb.block_bitmap_start * BLOCK_SIZE, &bmp)
+        .unwrap();
 
     let report = check(&dev).unwrap();
     assert!(
@@ -118,8 +121,12 @@ fn stale_tertiary_superblock_warns() {
 
     let report = check(&dev).unwrap();
     assert!(
-        report.issues.iter().any(|i| i.code == "ODF.SB.TERTIARY_UNREADABLE"),
-        "issues: {:?}", report.issues
+        report
+            .issues
+            .iter()
+            .any(|i| i.code == "ODF.SB.TERTIARY_UNREADABLE"),
+        "issues: {:?}",
+        report.issues
     );
 }
 
@@ -150,19 +157,21 @@ fn extent_pointing_outside_data_region_is_error() {
     let sb_bytes = dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap();
     let sb = crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();
     let geom = sb.geometry();
-    let (block, offset) = geom.inode_record_location(
-        crate::storage::ondisk::native::FIRST_USER_INODE_SLOT,
-    ).unwrap();
+    let (block, offset) = geom
+        .inode_record_location(crate::storage::ondisk::native::FIRST_USER_INODE_SLOT)
+        .unwrap();
     let mut buf = dev.read_at(block * BLOCK_SIZE, BLOCK_SIZE).unwrap();
-    let slot_bytes = &mut buf[offset as usize..offset as usize + crate::storage::ondisk::inode::INODE_RECORD_SIZE];
+    let slot_bytes = &mut buf
+        [offset as usize..offset as usize + crate::storage::ondisk::inode::INODE_RECORD_SIZE];
     // First extent begins at offset 88 (physical u64 at 88..96).
     slot_bytes[88..96].copy_from_slice(&0u64.to_le_bytes());
     // Recompute CRC of the inode record.
-    slot_bytes[crate::storage::ondisk::inode::INODE_RECORD_SIZE - 4..
-               crate::storage::ondisk::inode::INODE_RECORD_SIZE].fill(0);
+    slot_bytes[crate::storage::ondisk::inode::INODE_RECORD_SIZE - 4
+        ..crate::storage::ondisk::inode::INODE_RECORD_SIZE]
+        .fill(0);
     let csum = crate::storage::ondisk::checksum::Crc32c::hash(slot_bytes);
-    slot_bytes[crate::storage::ondisk::inode::INODE_RECORD_SIZE - 4..
-               crate::storage::ondisk::inode::INODE_RECORD_SIZE]
+    slot_bytes[crate::storage::ondisk::inode::INODE_RECORD_SIZE - 4
+        ..crate::storage::ondisk::inode::INODE_RECORD_SIZE]
         .copy_from_slice(&csum.to_le_bytes());
     // Also update bitmap CRC by recomputing to keep bitmap check from
     // firing first — we want the extent check to be the one that fires.
@@ -170,8 +179,12 @@ fn extent_pointing_outside_data_region_is_error() {
 
     let report = check(&dev).unwrap();
     assert!(
-        report.issues.iter().any(|i| i.code == "ODF.INODE.EXTENT_OUT_OF_RANGE"),
-        "issues: {:?}", report.issues
+        report
+            .issues
+            .iter()
+            .any(|i| i.code == "ODF.INODE.EXTENT_OUT_OF_RANGE"),
+        "issues: {:?}",
+        report.issues
     );
 }
 

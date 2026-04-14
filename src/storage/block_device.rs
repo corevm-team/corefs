@@ -111,9 +111,7 @@ fn check_alignment(offset: u64, length: u64, sector_size: u32) -> CoreFsResult<(
 
 fn check_bounds(offset: u64, length: u64, capacity: u64) -> CoreFsResult<()> {
     let end = offset.checked_add(length).ok_or_else(|| {
-        CoreFsError::InvalidInput(format!(
-            "offset {offset} + length {length} overflows u64"
-        ))
+        CoreFsError::InvalidInput(format!("offset {offset} + length {length} overflows u64"))
     })?;
     if end > capacity {
         return Err(CoreFsError::InvalidInput(format!(
@@ -374,17 +372,11 @@ impl FileImageDevice {
             .write(!read_only)
             .open(path)
             .map_err(|e| {
-                CoreFsError::State(format!(
-                    "failed to open image file {}: {e}",
-                    path.display()
-                ))
+                CoreFsError::State(format!("failed to open image file {}: {e}", path.display()))
             })?;
 
         let metadata = file.metadata().map_err(|e| {
-            CoreFsError::State(format!(
-                "failed to stat image file {}: {e}",
-                path.display()
-            ))
+            CoreFsError::State(format!("failed to stat image file {}: {e}", path.display()))
         })?;
 
         let capacity_bytes = metadata.len();
@@ -475,9 +467,9 @@ impl FileImageDevice {
                 self.geometry.sector_size
             )));
         }
-        self.file.set_len(new_capacity).map_err(|e| {
-            CoreFsError::State(format!("failed to resize image file: {e}"))
-        })?;
+        self.file
+            .set_len(new_capacity)
+            .map_err(|e| CoreFsError::State(format!("failed to resize image file: {e}")))?;
         self.geometry.capacity_bytes = new_capacity;
         self.geometry.sector_count = new_capacity / ss;
         Ok(())
@@ -498,9 +490,8 @@ impl BlockDevice for FileImageDevice {
 
         use std::io::{Read, Seek, SeekFrom};
         let mut file = &self.file;
-        file.seek(SeekFrom::Start(offset)).map_err(|e| {
-            CoreFsError::State(format!("seek failed at offset {offset}: {e}"))
-        })?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| CoreFsError::State(format!("seek failed at offset {offset}: {e}")))?;
         let mut buf = vec![0u8; length as usize];
         file.read_exact(&mut buf).map_err(|e| {
             CoreFsError::State(format!(
@@ -521,9 +512,8 @@ impl BlockDevice for FileImageDevice {
 
         use std::io::{Seek, SeekFrom, Write};
         let mut file = &self.file;
-        file.seek(SeekFrom::Start(offset)).map_err(|e| {
-            CoreFsError::State(format!("seek failed at offset {offset}: {e}"))
-        })?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| CoreFsError::State(format!("seek failed at offset {offset}: {e}")))?;
         file.write_all(data).map_err(|e| {
             CoreFsError::State(format!(
                 "write failed at offset {offset}, length {}: {e}",
@@ -534,9 +524,9 @@ impl BlockDevice for FileImageDevice {
     }
 
     fn sync(&mut self) -> CoreFsResult<()> {
-        self.file.sync_all().map_err(|e| {
-            CoreFsError::State(format!("sync failed on {}: {e}", self.path.display()))
-        })
+        self.file
+            .sync_all()
+            .map_err(|e| CoreFsError::State(format!("sync failed on {}: {e}", self.path.display())))
     }
 
     fn trim(&mut self, _offset: u64, _length: u64) -> CoreFsResult<()> {
@@ -670,10 +660,7 @@ pub mod raw {
         }
 
         let metadata = std::fs::metadata(path).map_err(|e| {
-            CoreFsError::State(format!(
-                "failed to stat device {}: {e}",
-                path.display()
-            ))
+            CoreFsError::State(format!("failed to stat device {}: {e}", path.display()))
         })?;
 
         if !metadata.file_type().is_block_device() {
@@ -723,9 +710,7 @@ pub mod raw {
         let fd = file.as_raw_fd();
         let mut size: u64 = 0;
         // SAFETY: BLKGETSIZE64 writes a u64; fd is a valid block device fd.
-        let ret = unsafe {
-            libc::ioctl(fd, BLKGETSIZE64, &mut size as *mut u64)
-        };
+        let ret = unsafe { libc::ioctl(fd, BLKGETSIZE64, &mut size as *mut u64) };
         if ret < 0 {
             return Err(CoreFsError::State(format!(
                 "BLKGETSIZE64 ioctl failed on {}: {}",
@@ -773,9 +758,8 @@ pub mod raw {
         // or is an NVMe namespace without a 'p' partition suffix.
         if name.starts_with("nvme") {
             // nvme0n1 = whole disk, nvme0n1p1 = partition
-            !name.contains('p') || name.ends_with(
-                &name[name.rfind('n').map(|i| i + 1).unwrap_or(0)..]
-            )
+            !name.contains('p')
+                || name.ends_with(&name[name.rfind('n').map(|i| i + 1).unwrap_or(0)..])
         } else {
             // sd*, vd*, hd*, xvd*: whole disk has no trailing digits
             !name.ends_with(|c: char| c.is_ascii_digit())
@@ -786,9 +770,9 @@ pub mod raw {
         let canonical = std::fs::canonicalize(path)
             .ok()
             .and_then(|p| p.to_str().map(|s| s.to_string()));
-        let device_str = canonical.as_deref().unwrap_or_else(|| {
-            path.to_str().unwrap_or("")
-        });
+        let device_str = canonical
+            .as_deref()
+            .unwrap_or_else(|| path.to_str().unwrap_or(""));
         if device_str.is_empty() {
             return false;
         }
@@ -885,9 +869,8 @@ pub mod raw {
 
             use std::io::{Read, Seek, SeekFrom};
             let mut file = &self.file;
-            file.seek(SeekFrom::Start(offset)).map_err(|e| {
-                CoreFsError::State(format!("seek failed at offset {offset}: {e}"))
-            })?;
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|e| CoreFsError::State(format!("seek failed at offset {offset}: {e}")))?;
             let mut buf = vec![0u8; length as usize];
             file.read_exact(&mut buf).map_err(|e| {
                 CoreFsError::State(format!(
@@ -909,9 +892,8 @@ pub mod raw {
 
             use std::io::{Seek, SeekFrom, Write};
             let mut file = &self.file;
-            file.seek(SeekFrom::Start(offset)).map_err(|e| {
-                CoreFsError::State(format!("seek failed at offset {offset}: {e}"))
-            })?;
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|e| CoreFsError::State(format!("seek failed at offset {offset}: {e}")))?;
             file.write_all(data).map_err(|e| {
                 CoreFsError::State(format!(
                     "write failed on {} at offset {offset}, length {}: {e}",
@@ -925,10 +907,7 @@ pub mod raw {
         fn sync(&mut self) -> CoreFsResult<()> {
             // fdatasync is sufficient for block devices (no metadata to flush).
             self.file.sync_data().map_err(|e| {
-                CoreFsError::State(format!(
-                    "fdatasync failed on {}: {e}",
-                    self.path.display()
-                ))
+                CoreFsError::State(format!("fdatasync failed on {}: {e}", self.path.display()))
             })
         }
 
@@ -946,9 +925,7 @@ pub mod raw {
             let fd = self.file.as_raw_fd();
             let range: [u64; 2] = [offset, length];
             // SAFETY: BLKDISCARD takes a pointer to two u64 values [offset, length].
-            let ret = unsafe {
-                libc::ioctl(fd, BLKDISCARD, range.as_ptr())
-            };
+            let ret = unsafe { libc::ioctl(fd, BLKDISCARD, range.as_ptr()) };
             if ret < 0 {
                 let err = std::io::Error::last_os_error();
                 // EOPNOTSUPP / ENOTTY → device doesn't actually support discard

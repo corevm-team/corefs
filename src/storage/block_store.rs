@@ -186,10 +186,13 @@ impl BlockStore {
         let checksum = checksum(&bytes);
         let size = bytes.len();
         let required_blocks = required_blocks(size, self.block_size);
-        let existing = self
-            .blocks
-            .get(&inode)
-            .map(|entry| (entry.device_block, entry.allocated_blocks, entry.blob_checksum));
+        let existing = self.blocks.get(&inode).map(|entry| {
+            (
+                entry.device_block,
+                entry.allocated_blocks,
+                entry.blob_checksum,
+            )
+        });
 
         let (device_block, allocated_blocks) = match existing {
             Some((device_block, existing_blocks, old_checksum))
@@ -283,11 +286,9 @@ impl BlockStore {
             // Exclusively owned: extend in-place.
             // The hash is a polynomial fold so it is incrementally composable:
             // checksum(A ++ B) == checksum(B, seed=checksum(A)).
-            let incremental_new = extra
-                .iter()
-                .fold(blob.checksum, |acc, byte| {
-                    acc.wrapping_mul(16777619).wrapping_add(u64::from(*byte))
-                });
+            let incremental_new = extra.iter().fold(blob.checksum, |acc, byte| {
+                acc.wrapping_mul(16777619).wrapping_add(u64::from(*byte))
+            });
             blob.bytes.extend_from_slice(extra);
             blob.checksum = incremental_new;
             let new_size = blob.bytes.len();
@@ -497,8 +498,8 @@ impl BlockStore {
             max_ref_count = max_ref_count.max(blob.ref_count);
             if blob.ref_count > 1 {
                 shared_blobs += 1;
-                shared_logical_bytes =
-                    shared_logical_bytes.saturating_add(blob.bytes.len().saturating_mul(blob.ref_count));
+                shared_logical_bytes = shared_logical_bytes
+                    .saturating_add(blob.bytes.len().saturating_mul(blob.ref_count));
                 bytes_saved_by_sharing = bytes_saved_by_sharing
                     .saturating_add(blob.bytes.len().saturating_mul(blob.ref_count - 1));
             } else {
@@ -577,16 +578,8 @@ impl BlockStore {
 
         // Re-point entries and move ref_counts.
         for (old_cs, canonical_cs) in &remap {
-            let old_refs = self
-                .blobs
-                .get(old_cs)
-                .map(|b| b.ref_count)
-                .unwrap_or(0);
-            let old_size = self
-                .blobs
-                .get(old_cs)
-                .map(|b| b.bytes.len())
-                .unwrap_or(0);
+            let old_refs = self.blobs.get(old_cs).map(|b| b.ref_count).unwrap_or(0);
+            let old_size = self.blobs.get(old_cs).map(|b| b.bytes.len()).unwrap_or(0);
             bytes_reclaimed += old_size;
             if let Some(canonical) = self.blobs.get_mut(canonical_cs) {
                 canonical.ref_count += old_refs;

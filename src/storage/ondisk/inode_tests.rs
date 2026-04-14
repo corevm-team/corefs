@@ -85,8 +85,7 @@ fn unknown_kind_rejected() {
     enc[2] = 99;
     enc[INODE_CHECKSUM_OFFSET..INODE_CHECKSUM_OFFSET + 4].fill(0);
     let csum = super::super::checksum::Crc32c::hash(&enc);
-    enc[INODE_CHECKSUM_OFFSET..INODE_CHECKSUM_OFFSET + 4]
-        .copy_from_slice(&csum.to_le_bytes());
+    enc[INODE_CHECKSUM_OFFSET..INODE_CHECKSUM_OFFSET + 4].copy_from_slice(&csum.to_le_bytes());
     let err = OnDiskInode::decode(&enc).unwrap_err();
     assert!(format!("{err}").contains("kind"));
 }
@@ -102,7 +101,6 @@ fn rejects_extent_count_field_overflow() {
     enc[80..84].copy_from_slice(&(9u32).to_le_bytes());
     enc[INODE_CHECKSUM_OFFSET..INODE_CHECKSUM_OFFSET + 4].fill(0);
     let csum = super::super::checksum::Crc32c::hash(&enc);
-    enc[INODE_CHECKSUM_OFFSET..INODE_CHECKSUM_OFFSET + 4]
-        .copy_from_slice(&csum.to_le_bytes());
+    enc[INODE_CHECKSUM_OFFSET..INODE_CHECKSUM_OFFSET + 4].copy_from_slice(&csum.to_le_bytes());
     assert!(OnDiskInode::decode(&enc).is_err());
 }

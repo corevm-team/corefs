@@ -4,10 +4,10 @@
 use super::*;
 use crate::app::CoreFsService;
 use crate::config::CoreFsConfig;
+use crate::domain::inode::InodeId;
 use crate::storage::block_device::MemoryDevice;
 use crate::storage::volume_image;
 use crate::storage::volume_wal::{VolumeWal, WalOperation};
-use crate::domain::inode::InodeId;
 use std::time::SystemTime;
 
 fn format_device(capacity: u64) -> Box<MemoryDevice> {
@@ -22,8 +22,12 @@ fn format_device_with_files(capacity: u64) -> Box<MemoryDevice> {
     let mut dev = Box::new(MemoryDevice::new(capacity, 4096).unwrap());
     let mut service = CoreFsService::format(CoreFsConfig::default());
     service.create_directory("/data").unwrap();
-    service.create_file("/data/hello.txt", b"Hello, World!", &[]).unwrap();
-    service.create_file("/data/readme.md", b"# CoreFS", &[]).unwrap();
+    service
+        .create_file("/data/hello.txt", b"Hello, World!", &[])
+        .unwrap();
+    service
+        .create_file("/data/readme.md", b"# CoreFS", &[])
+        .unwrap();
     let state = service.persisted_state();
     volume_image::save_to_device(dev.as_mut(), &state).unwrap();
     dev

@@ -106,9 +106,9 @@ fn single_file_roundtrip() {
     assert_eq!(loaded.block_records.len(), 1);
     assert_eq!(loaded.block_records[0].bytes, b"hello, world!");
     // data_crc should be set to the CRC32C of the content.
-    let expected_crc = u64::from(
-        crate::storage::ondisk::checksum::Crc32c::hash(b"hello, world!"),
-    );
+    let expected_crc = u64::from(crate::storage::ondisk::checksum::Crc32c::hash(
+        b"hello, world!",
+    ));
     assert_eq!(loaded.block_records[0].checksum, expected_crc);
 }
 
@@ -120,7 +120,12 @@ fn many_inodes_roundtrip() {
     let mut state = empty_state();
     for i in 1..20 {
         let content = format!("payload-{i}");
-        let inode = sample_inode(i as u64, &format!("/f{i}.txt"), InodeKind::File, content.len());
+        let inode = sample_inode(
+            i as u64,
+            &format!("/f{i}.txt"),
+            InodeKind::File,
+            content.len(),
+        );
         state.active_inodes.push(inode.clone());
         state.block_records.push(BlockRecord {
             inode: inode.id,
@@ -131,8 +136,12 @@ fn many_inodes_roundtrip() {
         });
     }
     // A directory and a symlink for variety.
-    state.active_inodes.push(sample_inode(200, "/", InodeKind::Directory, 0));
-    state.active_inodes.push(sample_inode(201, "/link", InodeKind::Symlink, 0));
+    state
+        .active_inodes
+        .push(sample_inode(200, "/", InodeKind::Directory, 0));
+    state
+        .active_inodes
+        .push(sample_inode(201, "/link", InodeKind::Symlink, 0));
 
     let report = save_state_native(&mut dev, &state).unwrap();
     assert_eq!(report.active_slots, 21);
@@ -142,8 +151,11 @@ fn many_inodes_roundtrip() {
     assert_eq!(loaded.block_records.len(), 19);
 
     // Paths and ids preserved.
-    let paths: std::collections::HashSet<_> =
-        loaded.active_inodes.iter().map(|i| i.path.clone()).collect();
+    let paths: std::collections::HashSet<_> = loaded
+        .active_inodes
+        .iter()
+        .map(|i| i.path.clone())
+        .collect();
     assert!(paths.contains("/f5.txt"));
     assert!(paths.contains("/"));
     assert!(paths.contains("/link"));
@@ -175,7 +187,10 @@ fn superblock_layout_mode_is_native_after_save() {
     save_state_native(&mut dev, &empty_state()).unwrap();
     let sb_bytes = dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap();
     let sb = crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();
-    assert_eq!(sb.layout_mode, crate::storage::ondisk::superblock::LAYOUT_MODE_NATIVE);
+    assert_eq!(
+        sb.layout_mode,
+        crate::storage::ondisk::superblock::LAYOUT_MODE_NATIVE
+    );
     assert_eq!(sb.payload_inode, ANCILLARY_INODE_SLOT);
 }
 
@@ -193,7 +208,9 @@ fn corrupted_attr_block_is_reported() {
     let mut dev = fresh_device(4096);
     format_device(&mut dev, &default_options()).unwrap();
     let mut state = empty_state();
-    state.active_inodes.push(sample_inode(9, "/x", InodeKind::File, 0));
+    state
+        .active_inodes
+        .push(sample_inode(9, "/x", InodeKind::File, 0));
     save_state_native(&mut dev, &state).unwrap();
 
     // Find the attr block of slot 10 and corrupt it.
@@ -203,8 +220,10 @@ fn corrupted_attr_block_is_reported() {
     let (block, offset) = geom.inode_record_location(FIRST_USER_INODE_SLOT).unwrap();
     let slot_buf = dev.read_at(block * BLOCK_SIZE, BLOCK_SIZE).unwrap();
     let on_disk = crate::storage::ondisk::inode::OnDiskInode::decode(
-        &slot_buf[offset as usize..offset as usize + crate::storage::ondisk::inode::INODE_RECORD_SIZE],
-    ).unwrap();
+        &slot_buf
+            [offset as usize..offset as usize + crate::storage::ondisk::inode::INODE_RECORD_SIZE],
+    )
+    .unwrap();
     let attr_block = on_disk.xattr_block_addr;
     let mut attr_buf = dev.read_at(attr_block * BLOCK_SIZE, BLOCK_SIZE).unwrap();
     attr_buf[20] ^= 0xFF;
@@ -316,9 +335,9 @@ fn incremental_classifies_create_update_remove() {
 
     // s2 = s1 minus inode 3, plus inode 4, with inode 2's content updated.
     let mut s2 = empty_state();
-    push(&mut s2, 1, "alpha");          // unchanged
-    push(&mut s2, 2, "beta-CHANGED");   // updated
-    push(&mut s2, 4, "delta");          // created (3 is removed implicitly)
+    push(&mut s2, 1, "alpha"); // unchanged
+    push(&mut s2, 2, "beta-CHANGED"); // updated
+    push(&mut s2, 4, "delta"); // created (3 is removed implicitly)
 
     let report = save_state_native_incremental(&mut dev, &s2).unwrap();
     assert!(!report.fell_back_to_full_save);
@@ -406,7 +425,11 @@ fn incremental_passes_fsck() {
     save_state_native_incremental(&mut dev, &state).unwrap();
 
     let fsck = crate::storage::ondisk::fsck::check(&dev).unwrap();
-    assert!(fsck.is_clean(), "issues after incremental: {:?}", fsck.issues);
+    assert!(
+        fsck.is_clean(),
+        "issues after incremental: {:?}",
+        fsck.issues
+    );
 }
 
 #[test]
@@ -414,7 +437,9 @@ fn root_inode_pointer_records_directory() {
     let mut dev = fresh_device(4096);
     format_device(&mut dev, &default_options()).unwrap();
     let mut state = empty_state();
-    state.active_inodes.push(sample_inode(1, "/", InodeKind::Directory, 0));
+    state
+        .active_inodes
+        .push(sample_inode(1, "/", InodeKind::Directory, 0));
     save_state_native(&mut dev, &state).unwrap();
     let sb_bytes = dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap();
     let sb = crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();

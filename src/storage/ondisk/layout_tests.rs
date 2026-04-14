@@ -49,9 +49,7 @@ fn inode_record_location_maps_into_table() {
     assert_eq!(block, geom.inode_table_start);
     assert_eq!(offset, 0);
 
-    let (block, offset) = geom
-        .inode_record_location(INODES_PER_BLOCK - 1)
-        .unwrap();
+    let (block, offset) = geom.inode_record_location(INODES_PER_BLOCK - 1).unwrap();
     assert_eq!(block, geom.inode_table_start);
     assert_eq!(offset, (INODES_PER_BLOCK - 1) * INODE_SIZE);
 

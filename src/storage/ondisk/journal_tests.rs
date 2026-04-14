@@ -126,7 +126,9 @@ fn multi_transaction_replay_preserves_order() {
     let applied = j.replay().unwrap();
     assert_eq!(applied.len(), 3);
     for i in 0..3 {
-        let data = dev.read_at((sb.data_start + i) * BLOCK_SIZE, BLOCK_SIZE).unwrap();
+        let data = dev
+            .read_at((sb.data_start + i) * BLOCK_SIZE, BLOCK_SIZE)
+            .unwrap();
         assert!(data.iter().all(|b| *b == i as u8 + 1));
     }
 }

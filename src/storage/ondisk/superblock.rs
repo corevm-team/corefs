@@ -167,9 +167,11 @@ impl Superblock {
         w.write_all(&self.total_inodes.to_le_bytes()).unwrap();
         w.write_all(&self.free_inodes.to_le_bytes()).unwrap();
         w.write_all(&self.block_bitmap_start.to_le_bytes()).unwrap();
-        w.write_all(&self.block_bitmap_blocks.to_le_bytes()).unwrap();
+        w.write_all(&self.block_bitmap_blocks.to_le_bytes())
+            .unwrap();
         w.write_all(&self.inode_bitmap_start.to_le_bytes()).unwrap();
-        w.write_all(&self.inode_bitmap_blocks.to_le_bytes()).unwrap();
+        w.write_all(&self.inode_bitmap_blocks.to_le_bytes())
+            .unwrap();
         w.write_all(&self.inode_table_start.to_le_bytes()).unwrap();
         w.write_all(&self.inode_table_blocks.to_le_bytes()).unwrap();
         w.write_all(&self.journal_start.to_le_bytes()).unwrap();
@@ -219,8 +221,7 @@ impl Superblock {
                 .unwrap(),
         );
         let mut block_copy = block.to_vec();
-        block_copy[SUPERBLOCK_CHECKSUM_OFFSET..SUPERBLOCK_CHECKSUM_OFFSET + 4]
-            .fill(0);
+        block_copy[SUPERBLOCK_CHECKSUM_OFFSET..SUPERBLOCK_CHECKSUM_OFFSET + 4].fill(0);
         let expected = Crc32c::hash(&block_copy);
         if expected != stored {
             return Err(CoreFsError::State(format!(

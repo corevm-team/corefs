@@ -201,9 +201,8 @@ impl<'d> OdfReader<'d> {
     /// Read the domain [`Inode`] attached to `slot` via its attr block.
     pub fn read_inode_metadata(&self, slot: u64) -> CoreFsResult<Inode> {
         let rec = self.read_on_disk_inode(slot)?;
-        self.decode_attr(&rec)?.ok_or_else(|| {
-            CoreFsError::State(format!("OdfReader: slot {slot} has no attr block"))
-        })
+        self.decode_attr(&rec)?
+            .ok_or_else(|| CoreFsError::State(format!("OdfReader: slot {slot} has no attr block")))
     }
 
     /// Read the full content of the file at `slot` (returns an empty
@@ -248,7 +247,9 @@ impl<'d> OdfReader<'d> {
         if rec.xattr_block_addr == 0 {
             return Ok(None);
         }
-        let buf = self.device.read_at(rec.xattr_block_addr * BLOCK_SIZE, BLOCK_SIZE)?;
+        let buf = self
+            .device
+            .read_at(rec.xattr_block_addr * BLOCK_SIZE, BLOCK_SIZE)?;
         let attr = AttrBlock::decode(&buf)?;
         bincode::deserialize::<Inode>(&attr.payload)
             .map(Some)

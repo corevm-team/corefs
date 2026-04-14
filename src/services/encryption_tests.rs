@@ -14,7 +14,10 @@ fn encrypt_decrypt_roundtrip() {
     let svc = test_service();
     let plaintext = b"hello encrypted world!";
     let encrypted = svc.encrypt(plaintext).expect("encrypt");
-    assert_ne!(encrypted, plaintext, "ciphertext must differ from plaintext");
+    assert_ne!(
+        encrypted, plaintext,
+        "ciphertext must differ from plaintext"
+    );
     assert!(
         encrypted.len() > plaintext.len(),
         "ciphertext must be larger (nonce + tag overhead)"
@@ -50,7 +53,10 @@ fn derive_key_from_produces_deterministic_key() {
 
     let mut c = EncryptionService::default();
     c.derive_key_from(b"different");
-    assert_ne!(a.key, c.key, "different material must produce different key");
+    assert_ne!(
+        a.key, c.key,
+        "different material must produce different key"
+    );
 }
 
 #[test]
@@ -58,7 +64,10 @@ fn each_encryption_produces_unique_ciphertext() {
     let svc = test_service();
     let a = svc.encrypt(b"same").expect("encrypt");
     let b = svc.encrypt(b"same").expect("encrypt");
-    assert_ne!(a, b, "random nonce must produce different ciphertext each time");
+    assert_ne!(
+        a, b,
+        "random nonce must produce different ciphertext each time"
+    );
     // Both must still decrypt to the same plaintext.
     assert_eq!(svc.decrypt(&a).unwrap(), svc.decrypt(&b).unwrap());
 }

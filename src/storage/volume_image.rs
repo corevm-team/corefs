@@ -773,10 +773,7 @@ fn encode_snapshot_payload(segment: &SnapshotSegment) -> Result<Vec<u8>, String>
     Ok(bytes)
 }
 
-fn push_snapshot_inode(
-    bytes: &mut Vec<u8>,
-    snap_inode: &SnapshotInode,
-) -> Result<(), String> {
+fn push_snapshot_inode(bytes: &mut Vec<u8>, snap_inode: &SnapshotInode) -> Result<(), String> {
     push_u8(bytes, encode_inode_kind(snap_inode.kind));
     push_u64(bytes, snap_inode.size as u64);
     push_system_time(bytes, snap_inode.created_at)?;
@@ -2000,17 +1997,69 @@ fn build_image(
     let mut segments = vec![
         raw_segment_from_bytes(*b"SUPR", vec![0; SUPERBLOCK_SIZE]),
         raw_segment_from_bytes(*b"SUP2", vec![0; SUPERBLOCK_SIZE]),
-        serialize_segment(*b"CNFG", &ConfigSegment { config: state.config.clone() }, path)?,
-        serialize_segment(*b"VOLM", &VolumeSegment { volume: state.volume.clone() }, path)?,
+        serialize_segment(
+            *b"CNFG",
+            &ConfigSegment {
+                config: state.config.clone(),
+            },
+            path,
+        )?,
+        serialize_segment(
+            *b"VOLM",
+            &VolumeSegment {
+                volume: state.volume.clone(),
+            },
+            path,
+        )?,
         serialize_inode_segment(*b"AINO", &state.active_inodes, path)?,
         serialize_inode_segment(*b"DINO", &state.deleted_inodes, path)?,
         serialize_journal_segment(*b"JOUR", &state.journal_entries, path)?,
-        serialize_segment(*b"VERS", &VersionSegment { versions: state.versions.clone() }, path)?,
-        serialize_segment(*b"SYNC", &SyncSegment { sync_statuses: state.sync_statuses.clone() }, path)?,
-        serialize_segment(*b"HOTP", &HotPathSegment { records: state.hot_path_records.clone() }, path)?,
-        serialize_snapshot_segment(*b"SNAP", &SnapshotSegment { snapshots: state.snapshots.clone(), next_snapshot_id: state.next_snapshot_id }, path)?,
-        serialize_segment(*b"TXNJ", &JournalRuntimeSegment { clean_unmount: state.clean_unmount, runtime: state.journal_runtime.clone(), pending_wal: state.pending_wal.clone() }, path)?,
-        serialize_segment(*b"FREE", &FreeSpaceSegment { policy: state.allocator_policy.clone(), extents: state.free_extents.clone() }, path)?,
+        serialize_segment(
+            *b"VERS",
+            &VersionSegment {
+                versions: state.versions.clone(),
+            },
+            path,
+        )?,
+        serialize_segment(
+            *b"SYNC",
+            &SyncSegment {
+                sync_statuses: state.sync_statuses.clone(),
+            },
+            path,
+        )?,
+        serialize_segment(
+            *b"HOTP",
+            &HotPathSegment {
+                records: state.hot_path_records.clone(),
+            },
+            path,
+        )?,
+        serialize_snapshot_segment(
+            *b"SNAP",
+            &SnapshotSegment {
+                snapshots: state.snapshots.clone(),
+                next_snapshot_id: state.next_snapshot_id,
+            },
+            path,
+        )?,
+        serialize_segment(
+            *b"TXNJ",
+            &JournalRuntimeSegment {
+                clean_unmount: state.clean_unmount,
+                runtime: state.journal_runtime.clone(),
+                pending_wal: state.pending_wal.clone(),
+            },
+            path,
+        )?,
+        serialize_segment(
+            *b"FREE",
+            &FreeSpaceSegment {
+                policy: state.allocator_policy.clone(),
+                extents: state.free_extents.clone(),
+            },
+            path,
+        )?,
         serialize_segment(*b"BLKD", &BlockDescriptorSegment { descriptors }, path)?,
         serialize_bytes_segment(*b"DATA", &block_data, path)?,
     ];
@@ -2075,10 +2124,7 @@ fn build_image(
 }
 
 /// Writes a fully built image to the device sector-by-sector and syncs.
-fn write_full_image(
-    device: &mut dyn BlockDevice,
-    built: &BuiltImage,
-) -> CoreFsResult<()> {
+fn write_full_image(device: &mut dyn BlockDevice, built: &BuiltImage) -> CoreFsResult<()> {
     let sector_size = device.sector_size() as usize;
     let padded_size = built.bytes.len();
     let mut write_offset = 0u64;
@@ -2096,10 +2142,7 @@ fn write_full_image(
 /// The image is built in memory (identical binary format as the file-based
 /// path), then written sector-aligned to the device.  The device must be
 /// large enough to hold the entire image.
-pub fn save_to_device(
-    device: &mut dyn BlockDevice,
-    state: &PersistedState,
-) -> CoreFsResult<()> {
+pub fn save_to_device(device: &mut dyn BlockDevice, state: &PersistedState) -> CoreFsResult<()> {
     let built = build_image(state, device.sector_size() as usize, device.capacity())?;
     write_full_image(device, &built)
 }
@@ -2143,11 +2186,15 @@ pub fn persist_to_device_incremental(
 
     // Determine if we can do an in-place incremental update.
     let can_incremental = cache.as_ref().is_some_and(|c| {
-        built.segments.iter().zip(built.entries.iter()).all(|(seg, entry)| {
-            c.segments
-                .get(&seg.kind)
-                .is_some_and(|(off, cached)| cached.len() == seg.payload.len() && *off == entry.offset)
-        })
+        built
+            .segments
+            .iter()
+            .zip(built.entries.iter())
+            .all(|(seg, entry)| {
+                c.segments.get(&seg.kind).is_some_and(|(off, cached)| {
+                    cached.len() == seg.payload.len() && *off == entry.offset
+                })
+            })
     });
 
     if !can_incremental {
@@ -2270,9 +2317,8 @@ pub fn load_from_device(device: &dyn BlockDevice) -> CoreFsResult<PersistedState
         )));
     }
 
-    let segment_count = u32::from_le_bytes(
-        header_sector[12..16].try_into().expect("fixed slice"),
-    ) as usize;
+    let segment_count =
+        u32::from_le_bytes(header_sector[12..16].try_into().expect("fixed slice")) as usize;
 
     // Calculate how much data we need: parse the directory to find the last segment end.
     let directory_offset = HEADER_SIZE;
@@ -2291,9 +2337,9 @@ pub fn load_from_device(device: &dyn BlockDevice) -> CoreFsResult<PersistedState
     };
 
     // Parse directory to find the total image extent.
-    let directory = header_bytes.get(directory_offset..directory_end).ok_or_else(|| {
-        CoreFsError::State("truncated CoreFS directory on device".to_string())
-    })?;
+    let directory = header_bytes
+        .get(directory_offset..directory_end)
+        .ok_or_else(|| CoreFsError::State("truncated CoreFS directory on device".to_string()))?;
     let entries = parse_directory(directory)?;
     let image_end = entries
         .iter()
@@ -2368,9 +2414,9 @@ pub fn inspect_device(device: &dyn BlockDevice) -> CoreFsResult<VolumeImageInspe
         header_sector
     };
 
-    let directory = header_bytes.get(directory_offset..directory_end).ok_or_else(|| {
-        CoreFsError::State("truncated CoreFS directory on device".to_string())
-    })?;
+    let directory = header_bytes
+        .get(directory_offset..directory_end)
+        .ok_or_else(|| CoreFsError::State("truncated CoreFS directory on device".to_string()))?;
     let entries = parse_directory(directory)?;
     let image_end = entries
         .iter()
@@ -2404,17 +2450,69 @@ pub fn build_volume_image_bytes(state: &PersistedState) -> CoreFsResult<Vec<u8>>
     let mut segments = vec![
         raw_segment_from_bytes(*b"SUPR", vec![0; SUPERBLOCK_SIZE]),
         raw_segment_from_bytes(*b"SUP2", vec![0; SUPERBLOCK_SIZE]),
-        serialize_segment(*b"CNFG", &ConfigSegment { config: state.config.clone() }, path)?,
-        serialize_segment(*b"VOLM", &VolumeSegment { volume: state.volume.clone() }, path)?,
+        serialize_segment(
+            *b"CNFG",
+            &ConfigSegment {
+                config: state.config.clone(),
+            },
+            path,
+        )?,
+        serialize_segment(
+            *b"VOLM",
+            &VolumeSegment {
+                volume: state.volume.clone(),
+            },
+            path,
+        )?,
         serialize_inode_segment(*b"AINO", &state.active_inodes, path)?,
         serialize_inode_segment(*b"DINO", &state.deleted_inodes, path)?,
         serialize_journal_segment(*b"JOUR", &state.journal_entries, path)?,
-        serialize_segment(*b"VERS", &VersionSegment { versions: state.versions.clone() }, path)?,
-        serialize_segment(*b"SYNC", &SyncSegment { sync_statuses: state.sync_statuses.clone() }, path)?,
-        serialize_segment(*b"HOTP", &HotPathSegment { records: state.hot_path_records.clone() }, path)?,
-        serialize_snapshot_segment(*b"SNAP", &SnapshotSegment { snapshots: state.snapshots.clone(), next_snapshot_id: state.next_snapshot_id }, path)?,
-        serialize_segment(*b"TXNJ", &JournalRuntimeSegment { clean_unmount: state.clean_unmount, runtime: state.journal_runtime.clone(), pending_wal: state.pending_wal.clone() }, path)?,
-        serialize_segment(*b"FREE", &FreeSpaceSegment { policy: state.allocator_policy.clone(), extents: state.free_extents.clone() }, path)?,
+        serialize_segment(
+            *b"VERS",
+            &VersionSegment {
+                versions: state.versions.clone(),
+            },
+            path,
+        )?,
+        serialize_segment(
+            *b"SYNC",
+            &SyncSegment {
+                sync_statuses: state.sync_statuses.clone(),
+            },
+            path,
+        )?,
+        serialize_segment(
+            *b"HOTP",
+            &HotPathSegment {
+                records: state.hot_path_records.clone(),
+            },
+            path,
+        )?,
+        serialize_snapshot_segment(
+            *b"SNAP",
+            &SnapshotSegment {
+                snapshots: state.snapshots.clone(),
+                next_snapshot_id: state.next_snapshot_id,
+            },
+            path,
+        )?,
+        serialize_segment(
+            *b"TXNJ",
+            &JournalRuntimeSegment {
+                clean_unmount: state.clean_unmount,
+                runtime: state.journal_runtime.clone(),
+                pending_wal: state.pending_wal.clone(),
+            },
+            path,
+        )?,
+        serialize_segment(
+            *b"FREE",
+            &FreeSpaceSegment {
+                policy: state.allocator_policy.clone(),
+                extents: state.free_extents.clone(),
+            },
+            path,
+        )?,
         serialize_segment(*b"BLKD", &BlockDescriptorSegment { descriptors }, path)?,
         serialize_bytes_segment(*b"DATA", &block_data, path)?,
     ];

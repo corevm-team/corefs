@@ -127,8 +127,7 @@ fn device_session_format_and_read_back() {
 #[test]
 fn device_session_format_creates_valid_volume() {
     let dev = memory_device();
-    let session =
-        DeviceVolumeSession::format_new(dev, CoreFsConfig::default()).expect("format");
+    let session = DeviceVolumeSession::format_new(dev, CoreFsConfig::default()).expect("format");
     assert_eq!(session.service().volume_name(), "corefs");
     assert!(session.service().list_paths().is_empty()); // empty volume, no files yet
 }

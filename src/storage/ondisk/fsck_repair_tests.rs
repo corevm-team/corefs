@@ -59,7 +59,8 @@ fn clean_volume_needs_no_repair() {
     assert!(
         rep.ops_committed == 0,
         "unexpected repair writes on clean volume: fixed={:?}, issues={:?}",
-        rep.fixed, report.issues
+        rep.fixed,
+        report.issues
     );
 }
 
@@ -77,7 +78,10 @@ fn repairs_stale_tertiary_superblock() {
 
     let report = check(&dev).unwrap();
     assert!(
-        report.issues.iter().any(|i| i.code == "ODF.SB.TERTIARY_UNREADABLE"),
+        report
+            .issues
+            .iter()
+            .any(|i| i.code == "ODF.SB.TERTIARY_UNREADABLE"),
         "pre-repair report: {:?}",
         report.issues
     );
@@ -88,7 +92,10 @@ fn repairs_stale_tertiary_superblock() {
     // Post-repair fsck should now consider the tertiary OK.
     let after = check(&dev).unwrap();
     assert!(
-        !after.issues.iter().any(|i| i.code == "ODF.SB.TERTIARY_UNREADABLE"),
+        !after
+            .issues
+            .iter()
+            .any(|i| i.code == "ODF.SB.TERTIARY_UNREADABLE"),
         "post-repair issues: {:?}",
         after.issues
     );
@@ -114,7 +121,8 @@ fn repairs_stale_secondary_superblock() {
             .issues
             .iter()
             .any(|i| i.code == "ODF.SB.SECONDARY_UNREADABLE"),
-        "remaining issues: {:?}", after.issues
+        "remaining issues: {:?}",
+        after.issues
     );
 }
 
@@ -129,8 +137,10 @@ fn repairs_stale_block_bitmap_crc_field() {
     sb2.block_bitmap_crc ^= 0xDEAD_BEEF;
     sb_bytes = sb2.encode_block();
     dev.write_at(BLOCK_SIZE, &sb_bytes).unwrap();
-    dev.write_at(sb.tertiary_superblock_block * BLOCK_SIZE, &sb_bytes).unwrap();
-    dev.write_at(sb.secondary_superblock_block * BLOCK_SIZE, &sb_bytes).unwrap();
+    dev.write_at(sb.tertiary_superblock_block * BLOCK_SIZE, &sb_bytes)
+        .unwrap();
+    dev.write_at(sb.secondary_superblock_block * BLOCK_SIZE, &sb_bytes)
+        .unwrap();
 
     let report = check(&dev).unwrap();
     assert!(report.issues.iter().any(|i| i.code == "ODF.BBM.CRC"));
@@ -141,7 +151,8 @@ fn repairs_stale_block_bitmap_crc_field() {
     let after = check(&dev).unwrap();
     assert!(
         !after.issues.iter().any(|i| i.code == "ODF.BBM.CRC"),
-        "post-repair: {:?}", after.issues
+        "post-repair: {:?}",
+        after.issues
     );
 }
 
@@ -155,8 +166,10 @@ fn repairs_wrong_free_blocks_counter() {
     sb2.free_blocks = sb.free_blocks / 2; // deliberately wrong
     sb_bytes = sb2.encode_block();
     dev.write_at(BLOCK_SIZE, &sb_bytes).unwrap();
-    dev.write_at(sb.tertiary_superblock_block * BLOCK_SIZE, &sb_bytes).unwrap();
-    dev.write_at(sb.secondary_superblock_block * BLOCK_SIZE, &sb_bytes).unwrap();
+    dev.write_at(sb.tertiary_superblock_block * BLOCK_SIZE, &sb_bytes)
+        .unwrap();
+    dev.write_at(sb.secondary_superblock_block * BLOCK_SIZE, &sb_bytes)
+        .unwrap();
 
     let report = check(&dev).unwrap();
     assert!(report.issues.iter().any(|i| i.code == "ODF.SB.FREE_BLOCKS"));
@@ -165,7 +178,8 @@ fn repairs_wrong_free_blocks_counter() {
     let after = check(&dev).unwrap();
     assert!(
         !after.issues.iter().any(|i| i.code == "ODF.SB.FREE_BLOCKS"),
-        "post-repair: {:?}", after.issues
+        "post-repair: {:?}",
+        after.issues
     );
 }
 

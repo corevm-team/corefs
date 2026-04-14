@@ -101,7 +101,10 @@ fn stop_after_n_writes_silently_drops_later_writes() {
     // 3rd write returns Ok but is silently dropped.
     dev.write_at(2 * BLOCK_SIZE, &buf).unwrap();
     let read = dev.read_at(2 * BLOCK_SIZE, BLOCK_SIZE).unwrap();
-    assert!(read.iter().all(|b| *b == 0), "write should have been dropped");
+    assert!(
+        read.iter().all(|b| *b == 0),
+        "write should have been dropped"
+    );
     let s = dev.stats();
     assert_eq!(s.writes_persisted, 2);
     assert_eq!(s.writes_silently_dropped, 1);
