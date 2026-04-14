@@ -640,13 +640,16 @@ impl CoreFsService {
 
     /// Restores the filesystem to the state recorded in snapshot `snapshot_id`.
     ///
-    /// For each file in `snapshot.file_data`:
-    /// - If the file still exists it is overwritten via `write_file`.
-    /// - If the file was deleted after the snapshot it is recreated via `create_file`.
+    /// For every entry captured in `snapshot.inodes` (ordered shallow-first):
+    /// - Missing directories are recreated via `create_directory`.
+    /// - Missing symlinks are recreated via `create_symlink` with the captured target.
+    /// - Files are overwritten via `write_file` or recreated via `create_file`
+    ///   from `snapshot.file_data`.
+    /// - Captured metadata (mode, uid, gid, ACLs, tags, xattrs) and timestamps
+    ///   are reapplied to the restored inode.
     ///
     /// Paths that cannot be written (e.g. quota exceeded) are reported in
     /// `SnapshotRestoreReport.skipped_paths` rather than aborting the whole restore.
-    /// Directories are not recreated — only file content is restored.
     pub fn restore_snapshot(&mut self, snapshot_id: u64) -> CoreFsResult<SnapshotRestoreReport> {
         let snapshot = self
             .snapshots
@@ -658,26 +661,57 @@ impl CoreFsService {
         let mut restored_files = 0usize;
         let mut skipped_paths: Vec<String> = Vec::new();
 
-        for (path, bytes) in &snapshot.file_data {
-            let is_file = self
-                .catalog
-                .get(path)
-                .is_some_and(|i| i.kind == InodeKind::File);
-            let missing = self.catalog.get(path).is_none();
+        // Ordered iteration (BTreeMap) → parent directories before their children.
+        for (path, snap_inode) in &snapshot.inodes {
+            let current_kind = self.catalog.get(path).map(|i| i.kind);
+            let ensure_result: CoreFsResult<()> = match snap_inode.kind {
+                InodeKind::Directory => match current_kind {
+                    Some(InodeKind::Directory) => Ok(()),
+                    Some(_) => Err(CoreFsError::InvalidInput(format!(
+                        "path exists with different kind: {path}"
+                    ))),
+                    None => self.create_directory(path),
+                },
+                InodeKind::Symlink => {
+                    let target = snap_inode.symlink_target.as_deref().unwrap_or("");
+                    match current_kind {
+                        Some(InodeKind::Symlink) => Ok(()),
+                        Some(_) => Err(CoreFsError::InvalidInput(format!(
+                            "path exists with different kind: {path}"
+                        ))),
+                        None => self.create_symlink(path, target),
+                    }
+                }
+                InodeKind::File => {
+                    let bytes = snapshot
+                        .file_data
+                        .get(path)
+                        .cloned()
+                        .unwrap_or_default();
+                    match current_kind {
+                        Some(InodeKind::File) => self.write_file(path, &bytes),
+                        Some(_) => Err(CoreFsError::InvalidInput(format!(
+                            "path exists with different kind: {path}"
+                        ))),
+                        None => self.create_file(path, &bytes, &[]),
+                    }
+                }
+            };
 
-            if is_file {
-                match self.write_file(path, bytes) {
-                    Ok(()) => restored_files += 1,
-                    Err(e) => skipped_paths.push(format!("{path}: {e}")),
+            match ensure_result {
+                Ok(()) => {
+                    // Reapply captured metadata and timestamps.
+                    if let Some(inode) = self.catalog.get_mut(path) {
+                        inode.metadata = snap_inode.metadata.clone();
+                        inode.created_at = snap_inode.created_at;
+                        inode.modified_at = snap_inode.modified_at;
+                        inode.changed_at = snap_inode.changed_at;
+                    }
+                    if snap_inode.kind == InodeKind::File {
+                        restored_files += 1;
+                    }
                 }
-            } else if missing {
-                match self.create_file(path, bytes, &[]) {
-                    Ok(()) => restored_files += 1,
-                    Err(e) => skipped_paths.push(format!("{path}: {e}")),
-                }
-            } else {
-                // Path exists but is not a regular file (directory, symlink) — skip.
-                skipped_paths.push(format!("{path}: not a regular file"));
+                Err(e) => skipped_paths.push(format!("{path}: {e}")),
             }
         }
 

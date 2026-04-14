@@ -581,6 +581,50 @@ fn snapshot_captures_historical_metadata() {
 }
 
 #[test]
+fn snapshot_restore_reapplies_captured_metadata() {
+    let mut fs = CoreFsService::format(CoreFsConfig::default());
+    fs.create_file("/doc.txt", b"v1", &[]).expect("file");
+    fs.set_mode("/doc.txt", 0o640).expect("chmod");
+    fs.create_directory("/dir").expect("mkdir");
+    fs.set_mode("/dir", 0o750).expect("chmod dir");
+
+    let snap_id = fs.create_snapshot("pre").id;
+
+    // Mutate after snapshot.
+    fs.set_mode("/doc.txt", 0o600).expect("chmod");
+    fs.set_mode("/dir", 0o700).expect("chmod dir");
+    fs.write_file("/doc.txt", b"v2").expect("write");
+
+    fs.restore_snapshot(snap_id).expect("restore");
+
+    let file = fs.get_inode("/doc.txt").expect("file restored");
+    assert_eq!(file.metadata.mode, 0o640, "file mode must be restored");
+    let dir = fs.get_inode("/dir").expect("dir still exists");
+    assert_eq!(dir.metadata.mode, 0o750, "dir mode must be restored");
+    assert_eq!(fs.read_file("/doc.txt").unwrap(), b"v1".to_vec());
+}
+
+#[test]
+fn snapshot_restore_recreates_missing_directory_with_metadata() {
+    let mut fs = CoreFsService::format(CoreFsConfig::default());
+    fs.create_directory("/keep").expect("mkdir");
+    fs.set_mode("/keep", 0o711).expect("chmod");
+
+    let snap_id = fs.create_snapshot("pre").id;
+
+    // Directory removed after snapshot — rename out of the way since there is
+    // no direct rmdir; simulate absence by renaming.
+    fs.rename_entry("/keep", "/gone").expect("rename");
+
+    fs.restore_snapshot(snap_id).expect("restore");
+
+    let dir = fs
+        .get_inode("/keep")
+        .expect("directory recreated by restore");
+    assert_eq!(dir.metadata.mode, 0o711);
+}
+
+#[test]
 fn snapshot_captures_uncompressed_bytes_for_compressed_files() {
     let config = CoreFsConfig {
         performance: crate::config::PerformancePolicy {
