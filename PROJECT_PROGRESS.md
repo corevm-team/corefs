@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `630/630` Tests erfolgreich  
+**Test-Status:** `636/636` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -261,6 +261,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
   - **Property-Based-Tests** (`property.rs`): eigene deterministische xorshift64-PRNG ohne externe Deps, `generate_sequence(seed, len)` produziert reproduzierbare Op-Sequenzen aus `Op::{CreateFile, DeleteFile, OverwriteFile, CreateDirectory, CreateSnapshot}`; `run_and_check` appliziert gegen frische Session und prüft nach JEDEM Op: fsck clean, load_state_native roundtrippt; 8 Seeds × 15 Ops = 120 zufällige Mutate+Check-Zyklen
   - **Concurrency-Tests** (`concurrency.rs`): demonstriert was sicher ist und was nicht — CRC32C über N Threads (stateless), disjoint Bitmaps parallel mutiert und gemerged, N Reader unter `Arc<Mutex>` auf geteiltem Device, Single-Writer-Multi-Reader-Snapshot-Pattern, Session-Move zwischen Threads (Send), Snapshot-Reader sehen Mutations nach dem Snapshot nicht, `Send`-Bounds compile-time verifiziert
   - **FUSE-ODF-Mount** (`mount_odf_image`): Read-only-FUSE-Mount eines ODF-Images, lädt state via `FileImageDevice::open(..., read_only=true)` + `load_state_native`, verwendet das bestehende `CoreFsFuseView`-Gerüst — kein Duplikat der 2500-Zeilen-FUSE-Mount-Infrastruktur nötig
+  - **FUSE-ODF-RW-Mount** (`mount_odf_image_rw`): voll beschreibbarer FUSE-Mount eines ODF-Images — `FuseBacking::Odf`-Variante im bestehenden `CoreFsFuseMountRw`, beim `open_odf_session` wird die FileImageDevice read-write geöffnet, `recover_pending_transactions` spielt halbfertige Journal-Transaktionen aus vorherigen Mounts zurück, Dirty-Marker wird via `save_state_native_incremental` gesetzt; jeder `persist()` während der Mount-Lifetime ist inkremental (nur geänderte Inodes werden rewritten) und crash-consistent (Metadata durch Journal, Data direkt); CLI-Kommando `mount-odf-rw <image> <mount-point>` (Linux-only)
   - Top-Level-APIs `format_device`/`save_state`/`load_state`/`inspect` (Blob-Modus) + `save_state_native`/`load_state_native` (Native-Modus) auf beliebigen `BlockDevice`-Implementierungen
   - Getestet mit **303 Unit-Tests** (Layout-Planer, CRC32C-Testvektoren, Superblock-Roundtrip+Korruptionsprüfung, Bitmap-Allokation, Inode-Record-Roundtrip, Extent-Chain-Roundtrip+Loop-Detection, Dir-Block-Roundtrip+Pack, Attr-Block-Roundtrip, Xattr-Block-Roundtrip+Principal-Reject, Allocator-First/Best-Fit+Inode-Slots, Journal-Commit/Replay/Abort/Partial-Discard/Multi-Txn-Ordering, Format+Save+Load-Roundtrip, redundanter Superblock-Fallback, Native-Roundtrip-Scenarios, Encryption-Flag-Propagation, fsck-Clean/Corrupt/Read-Only, Micro-Benchmark, CLI-End-to-End) plus 2 neue CLI-Integrations-Tests
 

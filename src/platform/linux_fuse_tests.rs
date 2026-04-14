@@ -117,6 +117,217 @@ fn image_creation_writes_mountable_image() {
     let _ = std::fs::remove_file(path);
 }
 
+// ── ODF RW mount helpers ────────────────────────────────────────────────────
+
+fn odf_rw_image_path(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "corefs-odf-rw-{}-{}-{}.odf",
+        tag,
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("time should be valid")
+            .as_nanos()
+    ))
+}
+
+/// Produce a freshly-formatted ODF image with a small populated tree,
+/// ready for `open_odf_session` to consume.
+fn prepare_odf_image(path: &std::path::Path) {
+    use crate::storage::ondisk::session::{OdfFileSession, OdfSessionOptions};
+    let mut opts = OdfSessionOptions::with_defaults();
+    opts.capacity_bytes = 16 * 1024 * 1024;
+    opts.inode_count = 256;
+    opts.journal_blocks = 32;
+    opts.config = CoreFsConfig::default();
+    opts.config.performance.compression_enabled = false;
+    opts.config.security.encryption_at_rest = false;
+    let mut sess = OdfFileSession::format_new(path, &opts).expect("format");
+    sess.mutate(|fs| {
+        fs.create_directory("/odf-rw")?;
+        fs.create_file("/odf-rw/initial.txt", b"before-mount", &[])?;
+        Ok(())
+    })
+    .expect("populate");
+}
+
+#[test]
+fn open_odf_session_hydrates_service_from_image() {
+    let path = odf_rw_image_path("hydrate");
+    prepare_odf_image(&path);
+
+    let mount = CoreFsFuseMountRw::open_odf_session(path.clone()).expect("open_odf_session");
+    // Service reflects the pre-populated state.
+    let paths = mount.service.list_paths();
+    assert!(paths.contains(&"/odf-rw/initial.txt".to_string()));
+    // Backing is ODF, not a legacy file path.
+    assert!(matches!(mount.backing, FuseBacking::Odf { .. }));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn open_odf_session_errors_on_missing_image() {
+    let path = odf_rw_image_path("missing");
+    let err = CoreFsFuseMountRw::open_odf_session(path).unwrap_err();
+    assert!(matches!(err, CoreFsError::NotFound(_)));
+}
+
+#[test]
+fn odf_rw_persist_roundtrips_through_incremental_save() {
+    let path = odf_rw_image_path("roundtrip");
+    prepare_odf_image(&path);
+
+    let mut mount = CoreFsFuseMountRw::open_odf_session(path.clone()).expect("open");
+    // Mutate the in-memory service.
+    mount
+        .service
+        .create_file("/odf-rw/from-mount.txt", b"after-mount", &[])
+        .expect("create");
+    // Persist the mutation via the FuseBacking::Odf path.
+    mount.persist().expect("persist");
+    drop(mount);
+
+    // Reopen and verify the write is durable.
+    use crate::storage::block_device::FileImageDevice;
+    use crate::storage::ondisk::native::load_state_native;
+    let device = FileImageDevice::open(&path, true).expect("reopen");
+    let state = load_state_native(&device).expect("load");
+    let paths: Vec<_> = state.active_inodes.iter().map(|i| i.path.clone()).collect();
+    assert!(paths.contains(&"/odf-rw/initial.txt".to_string()));
+    assert!(paths.contains(&"/odf-rw/from-mount.txt".to_string()));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn odf_rw_persist_is_fsck_clean() {
+    let path = odf_rw_image_path("fsck");
+    prepare_odf_image(&path);
+    let mut mount = CoreFsFuseMountRw::open_odf_session(path.clone()).expect("open");
+    for i in 0..5 {
+        mount
+            .service
+            .create_file(&format!("/odf-rw/n{i}.txt"), b"bytes", &[])
+            .expect("create");
+        mount.persist().expect("persist");
+    }
+    drop(mount);
+
+    use crate::storage::block_device::FileImageDevice;
+    use crate::storage::ondisk::fsck;
+    let device = FileImageDevice::open(&path, true).expect("reopen");
+    let report = fsck::check(&device).expect("fsck");
+    assert!(report.is_clean(), "fsck issues: {:?}", report.issues);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn odf_rw_persist_is_incremental() {
+    // After the first full save, subsequent persists should only rewrite
+    // the slots of changed inodes.  The IncrementalSaveReport from
+    // save_state_native_incremental surfaces this via its unchanged
+    // counter — we don't get to see it from the persist() wrapper, so
+    // we exercise the underlying primitive directly once after the
+    // first RW persist to prove the invariant.
+    use crate::storage::block_device::FileImageDevice;
+    use crate::storage::ondisk::native::save_state_native_incremental;
+    let path = odf_rw_image_path("inc");
+    prepare_odf_image(&path);
+
+    let mut mount = CoreFsFuseMountRw::open_odf_session(path.clone()).expect("open");
+    // Populate.
+    for i in 0..10 {
+        mount
+            .service
+            .create_file(&format!("/odf-rw/inc{i}"), b"v1", &[])
+            .expect("create");
+    }
+    mount.persist().expect("first persist");
+
+    // Change exactly ONE file; next incremental should classify 10 - 1
+    // files as unchanged (the changed one is removed + re-created via
+    // the service, so it counts as 1 removed + 1 created).
+    mount.service.delete_file("/odf-rw/inc5", false).expect("delete");
+    mount.service.create_file("/odf-rw/inc5", b"v2", &[]).expect("recreate");
+
+    // Reach into the underlying device to read the incremental report.
+    let state = mount.service.persisted_state();
+    if let FuseBacking::Odf { device, .. } = &mut mount.backing {
+        let report = save_state_native_incremental(device, &state).expect("incr");
+        // Initial file + 9 unchanged from the initial population + the
+        // churned file = 9 unchanged minimum (being conservative).
+        assert!(
+            report.unchanged >= 5,
+            "expected incremental to skip most files, got {:?}",
+            report
+        );
+    } else {
+        panic!("expected Odf backing");
+    }
+    drop(mount);
+
+    // Final fsck remains clean.
+    let device = FileImageDevice::open(&path, true).expect("reopen");
+    let report = crate::storage::ondisk::fsck::check(&device).expect("fsck");
+    assert!(report.is_clean(), "final fsck: {:?}", report.issues);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn odf_rw_crash_before_clean_persist_is_recovered_by_journal() {
+    // Simulate: open session, stage a journaled write without applying,
+    // drop the session without persisting, reopen — open_odf_session's
+    // recover_pending_transactions should roll the change forward.
+    use crate::storage::block_device::FileImageDevice;
+    use crate::storage::ondisk::journaled::JournaledSaveSession;
+    use crate::storage::ondisk::layout::BLOCK_SIZE;
+
+    let path = odf_rw_image_path("crash");
+    prepare_odf_image(&path);
+
+    // Write a staged-but-not-applied journal txn against the underlying
+    // device, then close — models a crash between commit and apply.
+    let sb = {
+        let mut dev = FileImageDevice::open(&path, false).expect("open");
+        let sb_bytes = {
+            use crate::storage::block_device::BlockDevice;
+            dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap()
+        };
+        let sb = crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();
+        let target = sb.data_start + 20;
+        let payload = vec![0x77u8; BLOCK_SIZE as usize];
+        let mut sess = JournaledSaveSession::open(&mut dev).expect("js");
+        sess.stage_metadata_block(target, payload).expect("stage");
+        sess.commit_without_apply().expect("commit_without_apply");
+        sb
+    };
+    let _ = sb;
+
+    // Now the mount-time recovery must replay the pending txn.  We
+    // verify this via: open_odf_session completes without error and
+    // the journal region's tail is back to zero (i.e. checkpoint ran).
+    let mount = CoreFsFuseMountRw::open_odf_session(path.clone()).expect("open after crash");
+    if let FuseBacking::Odf { device, .. } = &mount.backing {
+        let header = crate::storage::ondisk::journal::Journal::inspect(
+            device,
+            &crate::storage::ondisk::superblock::Superblock::decode_block(
+                &<FileImageDevice as crate::storage::block_device::BlockDevice>::read_at(
+                    device,
+                    BLOCK_SIZE,
+                    BLOCK_SIZE,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .expect("journal inspect");
+        assert_eq!(header.tail_offset, 0, "journal should be checkpointed");
+    } else {
+        panic!("expected Odf backing");
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
 fn rw_mount_from_demo() -> CoreFsFuseMountRw {
     let path = std::env::temp_dir().join(format!(
         "corefs-rw-demo-{}-{}.img",

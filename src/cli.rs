@@ -652,6 +652,28 @@ where
                 ));
             }
         }
+        "mount-odf-rw" => {
+            #[cfg(target_os = "linux")]
+            {
+                let image_path = args.get(2).ok_or_else(|| {
+                    CoreFsError::InvalidCommand(
+                        "mount-odf-rw <image-path> <mount-point>".to_string(),
+                    )
+                })?;
+                let mount_point = args.get(3).ok_or_else(|| {
+                    CoreFsError::InvalidCommand(
+                        "mount-odf-rw <image-path> <mount-point>".to_string(),
+                    )
+                })?;
+                linux_fuse::mount_odf_image_rw(image_path, mount_point)?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(CoreFsError::InvalidCommand(
+                    "mount-odf-rw is only available on Linux".to_string(),
+                ));
+            }
+        }
         "odf-session-demo" => {
             // End-to-end CLI demo: format a fresh ODF image, populate it
             // via OdfFileSession, list inodes via OdfReader, print results.
@@ -863,7 +885,8 @@ fn print_usage() {
     println!("  fsck-odf <path>");
     println!("  inspect-odf <path>");
     println!("  migrate-to-odf <src.img> <dst.odf> [--size <bytes>]");
-    println!("  mount-odf <image-path> <mount-point>  (Linux only)");
+    println!("  mount-odf <image-path> <mount-point>  (Linux only, read-only)");
+    println!("  mount-odf-rw <image-path> <mount-point>  (Linux only, read-write)");
     println!("  odf-session-demo <image-path> [--size <bytes>]");
 }
 

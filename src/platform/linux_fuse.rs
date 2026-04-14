@@ -517,8 +517,20 @@ struct VirtFile {
     modified_at: SystemTime,
 }
 
-/// Backing store for the FUSE RW mount: either a file path or a block device
-/// with an optional incremental-persist cache.
+/// Backing store for the FUSE RW mount.
+///
+/// Three persistence targets are supported:
+///
+/// * [`FuseBacking::File`] — legacy `volume_image` file format, full
+///   atomic rewrite via temp-file + rename on each persist.
+/// * [`FuseBacking::Device`] — legacy `volume_image` on a
+///   [`crate::storage::block_device::BlockDevice`], incremental
+///   segment-level writes via `persist_to_device_incremental`.
+/// * [`FuseBacking::Odf`] — native ODF v1 volume on a file-backed
+///   [`crate::storage::block_device::FileImageDevice`], persisted
+///   through
+///   [`crate::storage::ondisk::native::save_state_native_incremental`]
+///   with crash-consistent journal semantics.
 enum FuseBacking {
     File(PathBuf),
     Device {
@@ -527,6 +539,13 @@ enum FuseBacking {
         /// Populated on first write; reset whenever the image layout changes.
         cache: Option<crate::storage::volume_image::DeviceImageCache>,
     },
+    /// ODF-native backing — the FUSE daemon mutates an in-memory
+    /// `CoreFsService`, and every sync / unmount goes through
+    /// `save_state_native_incremental` against the held FileImageDevice.
+    Odf {
+        device: crate::storage::block_device::FileImageDevice,
+        image_path: PathBuf,
+    },
 }
 
 impl std::fmt::Debug for FuseBacking {
@@ -534,6 +553,7 @@ impl std::fmt::Debug for FuseBacking {
         match self {
             Self::File(path) => write!(f, "File({:?})", path),
             Self::Device { device, .. } => write!(f, "Device({:?})", device.geometry()),
+            Self::Odf { image_path, .. } => write!(f, "Odf({:?})", image_path),
         }
     }
 }
@@ -672,12 +692,69 @@ impl CoreFsFuseMountRw {
         ))
     }
 
+    /// Open an RW session backed by an ODF-native image file.
+    ///
+    /// Steps performed:
+    ///
+    /// 1. Open `image_path` as a read-write [`FileImageDevice`].
+    /// 2. Replay any pending journal transactions via
+    ///    [`recover_pending_transactions`] — crash-consistent recovery
+    ///    from a prior interrupted persist.
+    /// 3. Hydrate a [`CoreFsService`] from the on-disk state via
+    ///    [`load_state_native`].
+    /// 4. Mark the session as unclean on disk (so a future crash
+    ///    before unmount is visible to `fsck-odf`) and flush.
+    /// 5. Return the mount wrapper with `FuseBacking::Odf`.
+    ///
+    /// [`FileImageDevice`]: crate::storage::block_device::FileImageDevice
+    /// [`recover_pending_transactions`]: crate::storage::ondisk::journaled::recover_pending_transactions
+    /// [`load_state_native`]: crate::storage::ondisk::native::load_state_native
+    fn open_odf_session(image_path: PathBuf) -> CoreFsResult<Self> {
+        use crate::storage::block_device::FileImageDevice;
+        use crate::storage::ondisk::journaled::recover_pending_transactions;
+        use crate::storage::ondisk::native::{
+            load_state_native, save_state_native_incremental,
+        };
+        if !image_path.exists() {
+            return Err(CoreFsError::NotFound(format!(
+                "ODF RW mount: image not found: {}",
+                image_path.display()
+            )));
+        }
+        let mut device = FileImageDevice::open(&image_path, false)?;
+        recover_pending_transactions(&mut device)?;
+        let state = load_state_native(&device)?;
+        let mut service = CoreFsService::from_persisted_state(state);
+
+        // Dirty-marker flush: bump generation + write "unclean" state so
+        // a power-loss before clean unmount is visible.  Crash-consistent
+        // because the write itself goes through the journal.
+        service.mark_unclean_shutdown();
+        let dirty_state = service.persisted_state();
+        save_state_native_incremental(&mut device, &dirty_state)?;
+
+        Ok(Self::from_service(
+            service,
+            FuseBacking::Odf {
+                device,
+                image_path,
+            },
+        ))
+    }
+
     /// Persists the current service state to the backing store.
     ///
-    /// For file-backed mounts this writes the full image atomically via
-    /// temp-file + rename.  For device-backed mounts this uses
-    /// [`persist_to_device_incremental`], which only rewrites segments
-    /// whose bytes actually changed when the image layout is stable.
+    /// * [`FuseBacking::File`] — full atomic rewrite via temp-file + rename.
+    /// * [`FuseBacking::Device`] — incremental segment-level writes via
+    ///   `persist_to_device_incremental`; only segments whose bytes
+    ///   actually changed are rewritten.
+    /// * [`FuseBacking::Odf`] — incremental per-inode writes via
+    ///   [`crate::storage::ondisk::native::save_state_native_incremental`]:
+    ///   unchanged inodes stay untouched, changed or new inodes get
+    ///   fresh slots, removed inodes are freed.  Every persist runs
+    ///   through the transactional journal so a crash during the
+    ///   persist is either fully replayed on next mount or leaves the
+    ///   previous generation intact.
     fn persist(&mut self) -> CoreFsResult<()> {
         match &mut self.backing {
             FuseBacking::File(path) => self.service.save_image_to_path(path),
@@ -688,6 +765,14 @@ impl CoreFsFuseMountRw {
                     &state,
                     cache,
                 )?;
+                Ok(())
+            }
+            FuseBacking::Odf { device, .. } => {
+                let state = self.service.persisted_state();
+                let _report =
+                    crate::storage::ondisk::native::save_state_native_incremental(
+                        device, &state,
+                    )?;
                 Ok(())
             }
         }
@@ -1413,6 +1498,18 @@ impl CoreFsFuseMountRw {
                 let used_bytes: u64 = self.nodes_by_ino.values().map(|n| n.data.len() as u64).sum();
                 let used_blocks = used_bytes.div_ceil(FUSE_BLOCK_SIZE as u64);
                 let total_blocks = device.capacity() / FUSE_BLOCK_SIZE as u64;
+                let free_blocks = total_blocks.saturating_sub(used_blocks);
+                (total_blocks, free_blocks)
+            }
+            FuseBacking::Odf { device, .. } => {
+                // Use the device capacity as the statfs backbone so df(1)
+                // shows a meaningful total — not the FUSE in-memory sum.
+                use crate::storage::block_device::BlockDevice as _;
+                let used_bytes: u64 =
+                    self.nodes_by_ino.values().map(|n| n.data.len() as u64).sum();
+                let used_blocks = used_bytes.div_ceil(FUSE_BLOCK_SIZE as u64);
+                let total_blocks =
+                    device.capacity() / FUSE_BLOCK_SIZE as u64;
                 let free_blocks = total_blocks.saturating_sub(used_blocks);
                 (total_blocks, free_blocks)
             }
@@ -2387,6 +2484,63 @@ impl Filesystem for CoreFsFuseMountRw {
         }
         reply.ok();
     }
+}
+
+/// RW FUSE mount of an ODF-native image file.
+///
+/// End-to-end crash-consistent mount path:
+///
+/// 1. Opens `image_path` as a [`crate::storage::block_device::FileImageDevice`]
+///    in read-write mode.
+/// 2. Replays any pending journal transactions left over from a
+///    previous interrupted persist via
+///    [`crate::storage::ondisk::journaled::recover_pending_transactions`].
+/// 3. Hydrates a [`CoreFsService`] from the on-disk state through
+///    [`crate::storage::ondisk::native::load_state_native`].
+/// 4. Writes a dirty marker (unclean_shutdown flag) so a crash before
+///    unmount is visible to `fsck-odf` on next boot.
+/// 5. Enters the FUSE event loop.  Every sync / fsync / unmount
+///    triggers [`crate::storage::ondisk::native::save_state_native_incremental`],
+///    rewriting only the inode slots that changed and bumping the
+///    superblock generation atomically through the journal.
+///
+/// This is the ODF-native counterpart of [`mount_image_rw`].  Unlike
+/// the legacy `volume_image` RW mount, every persist here:
+///
+/// * is **crash-consistent** — the commit record lands before any
+///   metadata write is applied, so a power loss at any point either
+///   preserves the prior generation or rolls forward to the new one
+///   on next mount;
+/// * is **incremental** — unchanged inodes stay untouched, so a
+///   100 000-file volume where one file changes writes O(1) slots
+///   instead of O(N);
+/// * goes through the same `save_state_native_incremental` path that
+///   has been covered by section-C resilience and stress tests.
+pub fn mount_odf_image_rw(
+    image_path: impl AsRef<Path>,
+    mount_point: impl AsRef<Path>,
+) -> CoreFsResult<()> {
+    let image_path = image_path.as_ref();
+    let mount_point = mount_point.as_ref();
+    let mount = CoreFsFuseMountRw::open_odf_session(image_path.to_path_buf())?;
+    let fs_name = format!("corefs-odf:{}", mount.service.volume_name());
+
+    fuser::mount2(
+        mount,
+        mount_point,
+        &[
+            MountOption::RW,
+            MountOption::FSName(fs_name),
+            MountOption::DefaultPermissions,
+        ],
+    )
+    .map_err(|error| {
+        CoreFsError::State(format!(
+            "failed to RW-mount ODF image {} on {}: {error}",
+            image_path.display(),
+            mount_point.display()
+        ))
+    })
 }
 
 pub fn mount_image_rw(
