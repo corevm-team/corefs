@@ -1,10 +1,10 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
-//! On-disk block- and inode-allocator layered on top of [`Bitmap`].
+//! On-disk block- and inode-allocator layered on top of [`super::bitmap::Bitmap`].
 //!
 //! The allocator operates entirely in memory: callers load the bitmaps
-//! from disk, perform one or more [`allocate_*`] / [`free_*`] operations
+//! from disk, perform one or more `allocate_*` / `free_*` operations
 //! against the allocator, then flush the mutated bitmap bytes back to the
 //! device (together with the superblock CRC fields).  This keeps the
 //! persistence envelope explicit and fsync-friendly.
@@ -33,7 +33,7 @@ pub enum AllocationStrategy {
     BestFit,
 }
 
-/// Stateful allocator operating on an owned [`Bitmap`] pair.
+/// Stateful allocator operating on an owned [`super::bitmap::Bitmap`] pair.
 #[derive(Debug)]
 pub struct OndiskAllocator {
     block_bitmap: Bitmap,

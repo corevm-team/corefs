@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 //! Enterprise-grade resilience scenarios that exercise the ODF save /
-//! load paths against a [`FaultyDevice`].
+//! load paths against a [`super::fault_injection::FaultyDevice`].
 //!
 //! This module is test-only: it contains no production code, just the
 //! end-to-end fault scenarios.  Its job is to convert the guarantees

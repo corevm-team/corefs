@@ -3,15 +3,15 @@
 
 //! Locality-preserving allocator on top of a [`BlockGroupTable`] (P2.7).
 //!
-//! Each block group owns its own [`Bitmap`] for data-block allocation;
-//! the inode bitmap stays global (one allocator-wide [`Bitmap`]).  The
+//! Each block group owns its own [`super::bitmap::Bitmap`] for data-block allocation;
+//! the inode bitmap stays global (one allocator-wide [`super::bitmap::Bitmap`]).  The
 //! allocator's `allocate_*_near` family of methods picks the home group
 //! of an inode slot first and only spills to other groups when the home
 //! group can't satisfy the request.  This minimises the seek distance
 //! between an inode record (logical home group) and its data extents,
 //! which is the core motivation for block groups in ext4 / XFS.
 //!
-//! The on-disk format is described in [`block_group`].  This allocator
+//! The on-disk format is described in [`super::block_group`].  This allocator
 //! operates entirely in memory; persistence is the caller's
 //! responsibility (write each per-group bitmap back at
 //! `descriptor.bitmap_block` and refresh the [`BlockGroupTable`]).

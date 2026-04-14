@@ -7,14 +7,14 @@
 //! [`PersistedState`] as a single bincode blob pinned to system inode #0.
 //! The native layout instead gives every domain [`Inode`] its own on-disk
 //! inode slot, allocates real extents for the file content and places the
-//! inode's per-inode metadata (path, [`FileMetadata`], ACLs, tags, etc.)
-//! in a sibling [`attr_block::AttrBlock`].
+//! inode's per-inode metadata (path, [`crate::domain::metadata::FileMetadata`], ACLs, tags, etc.)
+//! in a sibling [`super::attr_block::AttrBlock`].
 //!
 //! This enables:
 //!
 //! * per-inode `fsck` walks (see [`super::fsck`]),
-//! * per-inode encryption / compression / xattr flags ([`FLAG_ENCRYPTED`],
-//!   [`FLAG_COMPRESSED`], [`FLAG_HAS_XATTRS`]),
+//! * per-inode encryption / compression / xattr flags ([`super::inode::FLAG_ENCRYPTED`],
+//!   [`super::inode::FLAG_COMPRESSED`], [`super::inode::FLAG_HAS_XATTRS`]),
 //! * per-data-block CRC32C via [`OnDiskInode::data_crc`],
 //! * future directory-block layout via [`super::dir_entry::DirBlock`].
 //!
@@ -30,8 +30,8 @@
 //! ## Flags
 //!
 //! `OnDiskInode::flags` carries the already-defined
-//! [`FLAG_HAS_EXTENT_INDEX`] / [`FLAG_ENCRYPTED`] / [`FLAG_COMPRESSED`] /
-//! [`FLAG_HAS_XATTRS`] bits plus the native-specific
+//! [`super::inode::FLAG_HAS_EXTENT_INDEX`] / [`super::inode::FLAG_ENCRYPTED`] / [`super::inode::FLAG_COMPRESSED`] /
+//! [`super::inode::FLAG_HAS_XATTRS`] bits plus the native-specific
 //! [`FLAG_DELETED`] below which marks an on-disk inode as logically
 //! removed but retained for recovery.
 
@@ -866,8 +866,10 @@ fn read_inode_at_slot(
     OnDiskInode::decode(&buf[offset as usize..offset as usize + INODE_RECORD_SIZE])
 }
 
-/// Public variant of [`read_all_extent_bytes`] used by the grouped
-/// layout.  Callers outside this module get the same semantics.
+/// Public variant of the internal `read_all_extent_bytes` helper,
+/// used by the grouped layout.  Reads every extent of an inode (or
+/// walks its indirect extent chain) and concatenates the bytes,
+/// capped at `inode.size_bytes`.
 pub fn read_all_extent_bytes_public(
     device: &dyn BlockDevice,
     inode: &OnDiskInode,
@@ -922,8 +924,8 @@ pub fn ancillary_into_state(anc: AncillaryStateRef) -> PersistedState {
     }
 }
 
-/// Opaque wrapper exposing [`AncillaryState`] to grouped callers
-/// without leaking its internal fields.
+/// Opaque wrapper exposing the internal `AncillaryState` struct to
+/// grouped-layout callers without leaking its fields.
 pub struct AncillaryStateRef(AncillaryState);
 
 fn read_all_extent_bytes(

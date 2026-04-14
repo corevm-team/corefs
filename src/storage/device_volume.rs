@@ -3,7 +3,7 @@
 
 //! On-demand sector-level I/O and device-resident journal.
 //!
-//! [`DeviceVolume`] wraps a [`BlockDevice`] and provides segment-level
+//! [`DeviceVolume`] wraps a [`crate::storage::block_device::BlockDevice`] and provides segment-level
 //! random access to a CoreFS volume without loading the entire image into
 //! RAM.  It maintains a read cache for frequently accessed segments and a
 //! write buffer that flushes dirty segments individually.
@@ -71,7 +71,7 @@ impl SegmentIndex {
 // ---------------------------------------------------------------------------
 
 /// Provides on-demand, segment-granular access to a CoreFS volume stored
-/// on a [`BlockDevice`].
+/// on a [`crate::storage::block_device::BlockDevice`].
 ///
 /// Instead of loading the entire image into RAM, `DeviceVolume` reads only
 /// the header and segment directory at open time.  Individual segments are
@@ -143,7 +143,7 @@ impl DeviceVolume {
 
     /// Stages a segment for writing.
     ///
-    /// The segment is buffered and will be written on the next [`flush`].
+    /// The segment is buffered and will be written on the next [`Self::flush`].
     pub fn write_segment(&mut self, kind: [u8; 4], data: Vec<u8>) {
         self.read_cache.remove(&kind);
         self.write_buffer.insert(kind, data);
@@ -335,7 +335,7 @@ impl DeviceVolume {
 
 const JOURNAL_HEADER_SIZE: usize = 64;
 
-/// A write-ahead log stored in a reserved region on the [`BlockDevice`].
+/// A write-ahead log stored in a reserved region on the [`crate::storage::block_device::BlockDevice`].
 ///
 /// The journal occupies a fixed-size region (256 KiB by default) on the
 /// device, placed immediately after the volume image data.  Layout:

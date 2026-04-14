@@ -1,10 +1,10 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
-//! Fault-injecting [`BlockDevice`] wrapper for enterprise-grade
+//! Fault-injecting [`crate::storage::block_device::BlockDevice`] wrapper for enterprise-grade
 //! resilience tests.
 //!
-//! `FaultyDevice<D>` wraps an arbitrary [`BlockDevice`] and exposes
+//! `FaultyDevice<D>` wraps an arbitrary [`crate::storage::block_device::BlockDevice`] and exposes
 //! configurable failure modes for write paths, read paths and fsync
 //! barriers.  Tests opt in to one or more fault modes via
 //! [`FaultPlan`] and observe the fired-fault counters via

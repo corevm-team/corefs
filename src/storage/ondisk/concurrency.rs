@@ -11,14 +11,14 @@
 //!
 //! Scope of what each test demonstrates:
 //!
-//! * pure primitives ([`Crc32c`], [`Bitmap`] operating on disjoint
+//! * pure primitives ([`super::checksum::Crc32c`], [`super::bitmap::Bitmap`] operating on disjoint
 //!   owned instances) are trivially thread-safe because they don't
 //!   share state — verified by exercising them across real
 //!   `std::thread` spawns.
-//! * [`OdfReader`]: an `Arc<dyn BlockDevice>` wrapped in a `Mutex` can
+//! * [`super::reader::OdfReader`]: an `Arc<dyn BlockDevice>` wrapped in a `Mutex` can
 //!   service many concurrent read-only consumers (serialised on the
 //!   mutex, correct under contention).
-//! * [`OdfDeviceSession`]: mutate is **not** safe to run concurrently
+//! * [`super::session::OdfDeviceSession`]: mutate is **not** safe to run concurrently
 //!   on the same volume; the test documents this by showing a safe
 //!   pattern (one writer, N readers via periodic flush + reopen).
 //!

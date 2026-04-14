@@ -86,7 +86,7 @@
 //! ## Testing
 //!
 //! Every sub-module has a sibling `*_tests.rs` unit-test file.  Integration
-//! tests covering whole-volume roundtrips live in [`volume_tests`].  The
+//! tests covering whole-volume roundtrips live alongside [`volume`].  The
 //! suite exercises formatting, payload roundtrip, CRC detection, redundant
 //! superblock fallback and sizing limits on a [`MemoryDevice`][mem].
 //!

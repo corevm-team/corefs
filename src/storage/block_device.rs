@@ -39,7 +39,8 @@ pub struct DeviceGeometry {
 /// Abstraction over a raw, sector-addressable storage medium.
 ///
 /// Implementations exist for file-backed images ([`FileImageDevice`]) and,
-/// on Linux, for raw block devices ([`RawBlockDevice`]).
+/// on Linux, for raw block devices (`RawBlockDevice` — Linux-only, see
+/// the `#[cfg(target_os = "linux")]` module below).
 ///
 /// All offsets and lengths are in **bytes** and must be aligned to the
 /// device's sector size.  Implementations return
@@ -351,7 +352,7 @@ pub fn verify_device_capacity(
 // FileImageDevice — file-backed .img storage
 // ---------------------------------------------------------------------------
 
-/// A [`BlockDevice`] backed by a regular file (`.img`).
+/// A [`crate::storage::block_device::BlockDevice`] backed by a regular file (`.img`).
 ///
 /// The file is memory-mapped conceptually: reads and writes go through
 /// `std::fs::File` with `seek` + `read_exact` / `write_all`.
@@ -807,7 +808,7 @@ pub mod raw {
     // RawBlockDevice
     // -----------------------------------------------------------------------
 
-    /// A [`BlockDevice`] backed by a raw Linux block device (`/dev/sdX1`).
+    /// A [`crate::storage::block_device::BlockDevice`] backed by a raw Linux block device (`/dev/sdX1`).
     ///
     /// Uses `O_RDWR | O_SYNC` for writes to ensure persistence ordering.
     /// Sector-alignment is enforced at the trait boundary.
@@ -988,7 +989,7 @@ pub mod raw {
 // MemoryDevice — in-memory block device for testing
 // ===========================================================================
 
-/// A [`BlockDevice`] backed entirely by an in-memory buffer.
+/// A [`crate::storage::block_device::BlockDevice`] backed entirely by an in-memory buffer.
 ///
 /// Useful for unit tests and as a reference implementation.
 #[derive(Debug, Clone)]

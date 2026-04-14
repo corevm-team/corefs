@@ -3,8 +3,8 @@
 
 //! Indirect-block extent chains for large files.
 //!
-//! An on-disk inode can describe up to [`MAX_INLINE_EXTENTS`] extents
-//! directly.  Files that need more extents set [`FLAG_HAS_EXTENT_INDEX`]
+//! An on-disk inode can describe up to [`super::inode::MAX_INLINE_EXTENTS`] extents
+//! directly.  Files that need more extents set [`super::inode::FLAG_HAS_EXTENT_INDEX`]
 //! and point at a chain of [`ExtentIndexBlock`]s via `index_block_addr`.
 //!
 //! ## Index-block layout (4 KiB)

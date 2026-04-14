@@ -3,7 +3,7 @@
 
 //! Self-healing background scrubber (D.10).
 //!
-//! [`fsck::check`][super::fsck::check] is a structural check: it
+//! [`super::fsck::check`] is a structural check: it
 //! validates the superblock chain, bitmap CRCs, inode records and
 //! extent addressing — but it does **not** read every single data
 //! block.  Silent bit-rot in the data region goes undetected by fsck

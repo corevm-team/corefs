@@ -5,7 +5,7 @@
 //!
 //! Provides the two primitives an enterprise tiering policy needs:
 //!
-//! * [`TieredDevice`] — a [`BlockDevice`] that routes every read and
+//! * [`TieredDevice`] — a [`crate::storage::block_device::BlockDevice`] that routes every read and
 //!   write to one of two inner devices (hot / cold) based on a
 //!   [`TierMap`] block-level assignment.  The outer device looks
 //!   exactly like a single flat block address space to upper layers
@@ -172,7 +172,7 @@ impl TierPolicy {
     }
 }
 
-/// [`BlockDevice`] wrapper that routes every I/O to one of two
+/// [`crate::storage::block_device::BlockDevice`] wrapper that routes every I/O to one of two
 /// underlying devices based on a [`TierMap`].
 pub struct TieredDevice<H: BlockDevice, C: BlockDevice> {
     hot: H,

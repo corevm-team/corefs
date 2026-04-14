@@ -382,7 +382,7 @@ impl BlockStore {
 
     /// Drains and returns all device-block ranges freed since the last drain.
     ///
-    /// The caller can forward these to [`BlockDevice::trim`] for DISCARD.
+    /// The caller can forward these to [`crate::storage::block_device::BlockDevice::trim`] for DISCARD.
     pub fn drain_freed_extents(&mut self) -> Vec<FreedExtent> {
         std::mem::take(&mut self.pending_trims)
     }

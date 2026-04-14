@@ -34,11 +34,11 @@
 //! ```
 //!
 //! Flag bits:
-//! * [`FLAG_HAS_EXTENT_INDEX`] — extents are stored in the index-block chain
+//! * [`super::inode::FLAG_HAS_EXTENT_INDEX`] — extents are stored in the index-block chain
 //!   pointed to by `index_block_addr`; inline extent slots are ignored.
-//! * [`FLAG_ENCRYPTED`]        — data blocks are encrypted at rest.
-//! * [`FLAG_COMPRESSED`]       — data blocks are compressed.
-//! * [`FLAG_HAS_XATTRS`]       — `xattr_block_addr` points at a valid xattr
+//! * [`super::inode::FLAG_ENCRYPTED`]        — data blocks are encrypted at rest.
+//! * [`super::inode::FLAG_COMPRESSED`]       — data blocks are compressed.
+//! * [`super::inode::FLAG_HAS_XATTRS`]       — `xattr_block_addr` points at a valid xattr
 //!   block holding key/value pairs and ACL entries.
 
 use super::checksum::Crc32c;
@@ -153,7 +153,7 @@ impl OnDiskInode {
     }
 
     /// Encode into a 256-byte record.  Rejects extent lists that exceed
-    /// [`MAX_INLINE_EXTENTS`] — callers must spill to an indirect block
+    /// [`super::inode::MAX_INLINE_EXTENTS`] — callers must spill to an indirect block
     /// before writing (not supported in ODF v1).
     pub fn encode(&self) -> CoreFsResult<[u8; INODE_RECORD_SIZE]> {
         if self.extents.len() > MAX_INLINE_EXTENTS {

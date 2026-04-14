@@ -33,8 +33,8 @@
 //!
 //! [`RefCountTable`] owns a flat `Vec<u16>` sized to the data-region
 //! capacity, transparently loadable from or persistable to its on-disk
-//! encoding via [`Self::encode`] / [`Self::decode`].  Every counter
-//! change goes through [`Self::acquire`] / [`Self::release`], which
+//! encoding via [`RefCountTable::encode`] / [`RefCountTable::decode`].  Every counter
+//! change goes through [`RefCountTable::acquire`] / [`RefCountTable::release`], which
 //! return the new value and surface overflow / underflow as errors.
 //!
 //! ## Feature flag

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
-//! Crash-consistent save pipeline on top of the [`journal`] WAL.
+//! Crash-consistent save pipeline on top of the [`super::journal`] WAL.
 //!
 //! The classic "ordered-mode" strategy from ext4/JBD2: data blocks
 //! (payload content, attr blocks, ancillary blob) are written directly

@@ -15,7 +15,7 @@
 //!   sequence from a 64-bit seed.  The same seed always produces the
 //!   same sequence — so failure messages include a reproducible seed.
 //! * [`run_and_check(seed, len)`] applies the generated ops against
-//!   a fresh ODF-backed [`OdfDeviceSession`] and checks the following
+//!   a fresh ODF-backed [`super::session::OdfDeviceSession`] and checks the following
 //!   invariants **after every single op**:
 //!   1. `fsck::check` has no Error-severity issues.
 //!   2. The set of `active_inodes` paths observed via the service is

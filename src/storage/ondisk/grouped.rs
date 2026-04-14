@@ -4,7 +4,7 @@
 //! Block-group-aware volume driver (A.2 / P2.7 activated).
 //!
 //! Activates the [`BlockGroupTable`] + [`MultiGroupAllocator`] pair
-//! introduced by [`block_group`] and [`multi_group_allocator`].  A
+//! introduced by [`super::block_group`] and [`super::multi_group_allocator`].  A
 //! grouped volume carries the [`FEATURE_INCOMPAT_BLOCK_GROUPS`] flag in
 //! its superblock; readers without support for that flag refuse to
 //! open the volume per ODF's standard incompat-flag contract.
@@ -32,7 +32,7 @@
 //! `inode_range_start` / `inode_range_count` pair to tell the allocator
 //! which inode slots should prefer each group for locality.
 //!
-//! Existing single-group volumes created by [`volume::format_device`]
+//! Existing single-group volumes created by [`super::volume::format_device`]
 //! are untouched.  The two paths coexist via the incompat flag.
 
 use crate::app::PersistedState;

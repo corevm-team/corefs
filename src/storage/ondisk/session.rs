@@ -7,7 +7,7 @@
 //! Analogue of [`crate::storage::volume_session::VolumeSession`] /
 //! [`crate::storage::volume_session::DeviceVolumeSession`] but persisting
 //! through the [`super::native`] layout instead of the legacy
-//! [`volume_image`] segment-frame format.
+//! [`crate::storage::volume_image`] segment-frame format.
 //!
 //! ## Responsibilities
 //!
@@ -21,7 +21,7 @@
 //! ## Crash recovery
 //!
 //! `open` (and `open_or_format` on an existing volume) calls
-//! [`journaled::recover_pending_transactions`] before reading the
+//! [`super::journaled::recover_pending_transactions`] before reading the
 //! state, so any half-finished save from a previous mount is replayed
 //! transparently before the session exposes data.
 
@@ -201,7 +201,7 @@ impl OdfFileSession {
 // OdfDeviceSession — block-device-backed ODF volume
 // ---------------------------------------------------------------------------
 
-/// Session backed by an owned [`BlockDevice`] trait object (file image,
+/// Session backed by an owned [`crate::storage::block_device::BlockDevice`] trait object (file image,
 /// `/dev/sdX`, in-memory, etc.) instead of a file path.
 pub struct OdfDeviceSession {
     device: Box<dyn BlockDevice>,

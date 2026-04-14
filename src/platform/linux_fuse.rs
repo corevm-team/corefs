@@ -222,7 +222,7 @@ impl CoreFsFuseView {
     }
 
     /// Load a `CoreFsFuseView` from an ODF-native volume image.  The
-    /// file is opened read-only via [`FileImageDevice`] and the state
+    /// file is opened read-only via [`crate::storage::block_device::FileImageDevice`] and the state
     /// is reconstructed through [`crate::storage::ondisk::native::load_state_native`].
     /// Pending journal transactions (if any) are **not** replayed by
     /// this path — read-only mounts treat the on-disk state as-is.
@@ -299,7 +299,7 @@ pub fn create_image(path: impl AsRef<Path>, include_demo: bool) -> CoreFsResult<
 
 /// Read-only FUSE mount of an ODF-native image.
 ///
-/// The image file is opened through [`FileImageDevice`] in read-only
+/// The image file is opened through [`crate::storage::block_device::FileImageDevice`] in read-only
 /// mode; the filesystem view is reconstructed via
 /// [`crate::storage::ondisk::native::load_state_native`].  No writes
 /// are accepted — analogous to [`mount_image`] for the legacy
@@ -2419,7 +2419,7 @@ pub fn mount_image_rw(
 
 // ── Block-device mount helpers ──────────────────────────────────────────────
 
-/// Mounts a CoreFS volume from a [`BlockDevice`] read-write via FUSE.
+/// Mounts a CoreFS volume from a [`crate::storage::block_device::BlockDevice`] read-write via FUSE.
 ///
 /// The device is loaded into memory, served through the FUSE RW stack,
 /// and flushed directly back to the device on sync/unmount — no temporary
@@ -2462,7 +2462,7 @@ pub fn mount_device_rw(
     })
 }
 
-/// Formats a [`BlockDevice`] with a new empty CoreFS volume.
+/// Formats a [`crate::storage::block_device::BlockDevice`] with a new empty CoreFS volume.
 pub fn format_device(
     device: &mut dyn crate::storage::block_device::BlockDevice,
     config: crate::config::CoreFsConfig,
