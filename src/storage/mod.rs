@@ -1,10 +1,13 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
-pub mod allocator;
+// Re-exports of platform-neutral storage primitives that now live in
+// corefs-core. Existing call sites such as `crate::storage::allocator::*`,
+// `crate::storage::catalog::*` and `crate::storage::block_store::*` continue
+// to compile unchanged.
+pub use corefs_core::storage::{allocator, catalog, block_store};
+
 pub mod block_device;
-pub mod block_store;
-pub mod catalog;
 pub mod device_volume;
 pub mod ondisk;
 pub mod volume_image;

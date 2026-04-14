@@ -4,14 +4,18 @@
 use super::*;
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::domain::metadata::FileMetadata;
+use crate::platform::Timestamp;
+use alloc::string::ToString;
+use alloc::vec;
 
 #[test]
 fn catalog_tracks_active_and_deleted_entries() {
-    let inode = Inode::new(
+    let inode = Inode::new_at(
         InodeId(1),
         InodeKind::File,
         "/data.txt".to_string(),
         FileMetadata::default(),
+        Timestamp::EPOCH,
     );
     let mut catalog = Catalog::default();
     catalog.insert(inode.clone());

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use alloc::string::ToString;
+use alloc::{vec, vec::Vec};
 
 #[test]
 fn write_read_verify_and_remove_manage_blocks() {

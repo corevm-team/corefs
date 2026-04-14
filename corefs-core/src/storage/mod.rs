@@ -9,4 +9,7 @@
 //! Datei- und Linux-spezifische Block-Device-Backends bleiben weiterhin
 //! im main `corefs` crate (bzw. wandern langfristig in `corefs-std`).
 
+pub mod allocator;
 pub mod block_device;
+pub mod block_store;
+pub mod catalog;

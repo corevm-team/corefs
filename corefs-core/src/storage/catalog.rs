@@ -1,8 +1,15 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+//! In-Memory-Katalog für aktive und soft-gelöschte Inodes.
+//!
+//! Hält zwei `BTreeMap`s (alloc-only) — einen für aktive Pfade und
+//! einen für gelöschte. Beides ist no_std-fähig.
+
 use crate::domain::inode::{Inode, InodeId, InodeKind};
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 #[derive(Debug, Default)]
 pub struct Catalog {

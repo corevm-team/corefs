@@ -1,8 +1,14 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+//! Inode-Slot-Allokator (in-memory).
+//!
+//! Vergibt fortlaufende [`InodeId`]-Werte und recycelt freigegebene IDs
+//! aus einer FIFO-Queue. Nutzt nur `alloc::collections::VecDeque` und
+//! ist damit no_std-fähig.
+
 use crate::domain::inode::InodeId;
-use std::collections::VecDeque;
+use alloc::collections::VecDeque;
 
 #[derive(Debug, Default)]
 pub struct InodeAllocator {

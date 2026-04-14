@@ -1,9 +1,15 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+//! In-Memory-Block-Store mit CoW, Dedup, Defragmentierung und
+//! Heat-Tracking. Plattformneutral (alloc + hashbrown statt std).
+
 use crate::domain::inode::InodeId;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockRecord {
@@ -385,7 +391,7 @@ impl BlockStore {
     ///
     /// The caller can forward these to [`crate::storage::block_device::BlockDevice::trim`] for DISCARD.
     pub fn drain_freed_extents(&mut self) -> Vec<FreedExtent> {
-        std::mem::take(&mut self.pending_trims)
+        core::mem::take(&mut self.pending_trims)
     }
 
     /// Returns the pending TRIM list without draining it.
