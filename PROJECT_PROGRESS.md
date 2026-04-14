@@ -396,7 +396,7 @@ Ziel: CoreFS als natives Dateisystem des eigenen Betriebssystems AnyOS (`/daten1
 ### 5.1 Workspace-Split in CoreFS
 
 - [x] Cargo-Workspace in `corefs/` anlegen (root-Manifest mit `.`, `corefs-core`, `corefs-tools`, `corefs-std`, `corefs-fuse-proto`, `corefs-fuse-adapter` als Member; `[workspace.package]` und `[workspace.dependencies]` zentralisiert)
-- [~] Crate `corefs-core` (no_std + alloc) — `domain/` + `config` + `platform` + `error` + `storage::block_device` (Trait, `DeviceGeometry`, `MemoryDevice`, Alignment-Helfer) strikt no_std+alloc und migriert; restliches `storage` (BlockStore, Catalog, Allocator, ondisk/) + `services` weiter im main crate (späterer Migrationsschritt)
+- [~] Crate `corefs-core` (no_std + alloc) — `domain/`, `config`, `platform`, `error`, `services/*` (außer `integrity` + `compression`), `storage::{allocator, block_device, block_store, catalog}` und 15 von ~30 `storage::ondisk/*`-Modulen strikt no_std+alloc und migriert. Verbleibende ondisk-Module (`volume`, `native`, `grouped`, `journaled`, `fsck_repair`, `reader`, `scrub`, `session`, `concurrency`, `benchmark`, `resilience`, `stress`, `property`) bleiben im main crate, da sie an `crate::app::PersistedState` oder `std::{path, sync, thread, time::Instant}` hängen — eine `PersistedState`-Migration ist eine eigenständige Folge-Refaktorierung.
 - [x] Crate `corefs-tools` (std, später no_std) — Operation-APIs: mkfs, fsck, repair, scrub, dump, defrag, snapshot (8/10 implementiert; resize+tier als planned dokumentiert; siehe 5.3)
 - [x] Crate `corefs-std` (std) — `Clock`-/`Rng`-Re-Exports + `StdRng`-Implementierung; langfristiger Sammelpunkt für `FileImageDevice`/`RawBlockDevice` (Migration mit storage)
 - [x] Crate `corefs-fuse-proto` (no_std + alloc) — AnyOS-natives Wire-Format: `Request`/`Reply`/`ReplyPayload`-Enums, `FrameHeader`, `Attr`, `DirEntry`, `StatFs`; `wire`-Modul mit bincode-Encode/Decode hinter `std`-Feature; `PROTOCOL_VERSION` (1.0)
@@ -417,7 +417,7 @@ Ziel: CoreFS als natives Dateisystem des eigenen Betriebssystems AnyOS (`/daten1
 - [x] Feature `std` für std-Bequemlichkeiten — Default = no_std; `Timestamp::now()`, `Inode::new`/`touch_*`, `VolumeDescriptor::from_config`, `From<SystemTime>`/`Into<SystemTime>` hinter `std`-Feature; `*_at(now)`-APIs auch ohne `std` verfügbar
 - [ ] CI-Build für Custom-Target `x86_64-anyos` (no_std) grün
 - [~] CI-Build für `x86_64-unknown-linux-gnu` grün (lokal verifiziert; CI-Hook folgt)
-- [x] Alle Tests auf Linux weiterhin grün (631 main + 21 corefs-core + 1 doctest = 653; zusätzlich 17 Tests grün im strikten no_std-Modus via `cargo test -p corefs-core --no-default-features`)
+- [x] Alle Tests auf Linux weiterhin grün — Workspace-Summe ≈ 789 Tests (413 main + 252 corefs-core + 29 cli + 65 tools + 7 std + 9 fuse-proto/adapter + Doctests). Im strikten `no_std + alloc`-Modus laufen 248 Tests grün (`cargo test -p corefs-core --no-default-features`) — Beweis, dass die kritischen FS-Bausteine kernel-tauglich sind.
 
 ### 5.3 Tool-Logik extrahieren nach `corefs-tools`
 
