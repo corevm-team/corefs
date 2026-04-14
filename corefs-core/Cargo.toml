@@ -6,20 +6,25 @@ license = { workspace = true }
 description = "CoreFS core — plattformneutrale, no_std-fähige Domain- und Storage-Logik für das CoreFS-Dateisystem."
 
 [features]
-default = []
+default = ["crypto"]
 # `std` aktiviert std-Bequemlichkeiten (Display, std::error::Error-Impls,
 # From-Konvertierungen von std::time::SystemTime, …) und zieht die
 # `getrandom`-Erweiterung von `chacha20poly1305` nach, damit die bequeme
 # `EncryptionService::encrypt`-Variante (mit OS-CSPRNG-Nonce) verfügbar
-# ist. Ohne `std` ist die Crate strikt `no_std + alloc` und nutzt
-# `EncryptionService::encrypt_with_rng(plaintext, &mut dyn Rng)` —
-# der Aufrufer liefert eine eigene CSPRNG-Implementierung.
-std = ["chacha20poly1305/getrandom"]
+# ist.  Ohne `std` ist die Crate `no_std + alloc`.
+std = ["crypto", "chacha20poly1305/getrandom"]
+# `crypto` aktiviert ChaCha20-Poly1305-Encryption über `chacha20poly1305`.
+# Standardmässig an. Bare-Metal-Targets (AnyOS-Kernel, `x86_64-anyos`)
+# müssen das Feature deaktivieren, weil die transitive Abhängigkeit
+# `poly1305` SIMD-Intrinsics ohne soft-float-Fallback verwendet.
+# Ohne `crypto` entfällt der `EncryptionService` aus dem Build —
+# Volumes ohne Encryption-at-rest funktionieren weiterhin.
+crypto = ["dep:chacha20poly1305"]
 
 [dependencies]
 serde = { workspace = true }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more", "serde"] }
-chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"], optional = true }
 bincode = { workspace = true }
 
 [dev-dependencies]

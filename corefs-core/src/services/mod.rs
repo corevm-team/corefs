@@ -7,6 +7,7 @@
 //! daher im AnyOS-Kernel gelinkt werden können. Plattformspezifische Services
 //! (z. B. `integrity`, `compression`) verbleiben in der main-Crate.
 
+#[cfg(feature = "crypto")]
 pub mod encryption;
 pub mod hot_paths;
 pub mod indexing;
