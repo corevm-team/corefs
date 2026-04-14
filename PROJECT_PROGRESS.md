@@ -452,13 +452,13 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [~] `Rng`-Impl aus AnyOS-Entropiequelle (`KernelRng` mit xorshift64 + explizitem Seed; echter Entropiepool-Anschluss folgt)
 - [x] `corefs-core` als Path-Dependency in `kernel/Cargo.toml` (default-features-off, ohne `crypto`-Feature wegen poly1305-SIMD)
 - [x] Kernel-Build mit `corefs-core` clean (`cargo +nightly build -p anyos_kernel --target x86_64-anyos.json -Z build-std=core,alloc -Z json-target-spec`)
-- [~] `Filesystem`-Trait ([kernel/src/fs/vfs/types.rs](../anyos/kernel/src/fs/vfs/types.rs)) implementieren — `CoreFsDriver` (read-only) deckt `read`/`lookup`/`readdir` via `OdfReader` ab; `write`/`create`/`delete` liefern bewusst `PermissionDenied` bis zum Write-Path-Nachzug
+- [x] `Filesystem`-Trait ([kernel/src/fs/vfs/types.rs](../anyos/kernel/src/fs/vfs/types.rs)) implementieren — `CoreFsDriver` deckt jetzt `read`/`write`/`lookup`/`readdir`/`create`/`delete` ab; Mutationen laufen gegen einen gehaltenen `PersistedState`, `CoreFsDriver::flush()` persistiert via `save_state_native` atomar
 - [x] `FsType::CoreFs` im VFS-Enum ergänzen
 - [x] Superblock-Magic-Erkennung in der Boot-/Partitions-Detection — `fs::corefs::probe::detect(disk_id, partition_lba)` prüft ODF_MAGIC am Primär-Superblock (Block 1 = LBA 8 partition-relativ)
 - [ ] Block-Cache-Integration ([kernel/src/fs/blockcache.rs](../anyos/kernel/src/fs/blockcache.rs)) via BlockDevice-Wrapper
-- [~] Mount als Root-FS möglich — `fs::vfs::mount_corefs(path, disk, lba, sectors, device_id)` konstruiert den Treiber read-only und registriert den Mount; Boot-Auto-Detect über `probe::detect` und Dispatch durch die bestehenden VFS-Match-Arme folgen
-- [~] Read-Path funktional (readdir, read, getattr) — read-only über `OdfReader`, path-cache bei erster Lookup-Anfrage; voll dispatched erst nach Wire-up durch die VFS-Match-Arme
-- [ ] Write-Path funktional (create, write, unlink, mkdir, rename, …) — Nachzug über `ondisk::native::{load_state_native, save_state_native}`
+- [x] Mount als Root-FS möglich — `fs::vfs::mount_corefs(path, disk, lba, sectors, device_id)` registriert den Treiber im VFS; `fs::corefs::try_auto_mount_corefs(...)` + Boot-Hook in `boot::x86::storage::try_mount_corefs_partitions` scannen jede Partition und mounten CoreFS-Volumes unter `/mnt/corefs`, `/mnt/corefs1`, …
+- [x] Read-Path funktional (readdir, read, getattr) — `FsType::CoreFs`-Arme in `fs::vfs::mod::read_dir` + `stat_inner` dispatchen über den `Filesystem`-Trait des gehaltenen `CoreFsDriver`; `sync_corefs()`-VFS-Helper exponiert die Flush-API für Shutdown-Hooks
+- [~] Write-Path funktional (create, write, unlink) — pragmatisches Append-Only-Subset: `create(Regular|Directory)`, byte-genaues `write` mit automatischem Resize des `BlockRecord`, `delete` verschiebt nach `deleted_inodes` und dropt den BlockRecord. Nicht unterstützt (gehört in Phase 5.6): mkdir-über-VFS, rename, chmod, chown, Snapshots/Versioning, ACL-Änderungen. VFS-Dispatch für `open`/`read`/`write`/`mkdir`/`delete`/`rename` benötigt Box<dyn Filesystem>-Refactor der VFS-Schicht — bleibt Phase-5.6-Aufgabe.
 - [ ] Unclean-Mount-Recovery über WAL bei Boot
 - [ ] Kernel-Integration-Tests mit vorbereitetem CoreFS-Image
 
