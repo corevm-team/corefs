@@ -619,7 +619,7 @@ fn write_user_inode(
         gid: inode.metadata.gid,
         link_count: 1,
         flags,
-        size_bytes: inode.size as u64,
+        size_bytes: content.len() as u64,
         blocks_allocated: extents.iter().map(|e| u64::from(e.length_blocks)).sum(),
         created_at: systime_to_secs(inode.created_at),
         modified_at: systime_to_secs(inode.modified_at),
