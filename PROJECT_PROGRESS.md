@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `325/325` Tests erfolgreich  
+**Test-Status:** `373/373` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -200,7 +200,6 @@
 
 Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten, aber noch nicht als vollständige reale Implementierung vorhanden:
 
-- produktionsnahes blockorientiertes On-Disk-Format
 - vollständig segmentgranulares On-Demand I/O für FUSE-Mount (aktuell: `DeviceVolume` für Segment-Level-Zugriff vorhanden; FUSE-Mount lädt noch komplett in RAM und schreibt bei Unmount zurück)
 - persistentes physisch device-blockadressiertes Write-Ahead-Log direkt im Volume statt des aktuellen extent-orientierten Pending-WAL
 - Self-Healing mit Redundanzquellen
@@ -233,6 +232,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - `DeviceVolumeSession` für Block-Device-basierte Volume-Sitzungen
 - `DeviceVolume` für On-Demand-Segment-I/O mit Read-Cache und Write-Buffer
 - `DeviceJournal` für geräteresidentes Write-Ahead-Log mit Barrier-Semantik
+- `storage::ondisk` — vollständig blockorientiertes On-Disk-Format (ODF v1) mit fixen 4-KiB-Blöcken, strukturiertem Superblock (Magic, UUID, Label, Versions- und Feature-Flags, Generation-Counter, Clean/Dirty-State), dreifach-redundanten Superblock-Kopien bei Block 1, N/2 und N-1, dedizierter Block- und Inode-Bitmap, fixer 256-Byte-Inode-Tabelle mit Extent-Pointern, reservierter Journal-Region, CRC32C-Checksummen auf Block-, Inode- und Payload-Ebene und automatischem Fallback auf Backup-Superblocks bei Korruption; Top-Level-API `format_device`/`save_state`/`load_state`/`inspect` auf beliebigen `BlockDevice`-Implementierungen; getestet mit 48 Unit-Tests (Layout-Planer, CRC32C Castagnoli Testvektoren, Superblock-Roundtrip + Checksum/Magic/Feature-Validierung, Bitmap-Allokation, Inode-Record-Roundtrip, Format+Save+Load-Roundtrip, redundanter Superblock-Fallback, Payload-CRC-Erkennung, Generation-Fortschreibung, Bitmap-Alignment)
 
 ### `src/services`
 
