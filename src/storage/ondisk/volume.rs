@@ -243,11 +243,18 @@ pub fn save_state(
     write_inode_record(device, &geom, 0, &system_inode)?;
 
     // --- Bump + rewrite superblock(s) with bitmap CRCs --------------------
+    // Count actual allocated blocks inside the data region so the
+    // superblock matches what the bitmap reports.  mark_reserved_blocks
+    // pinned the two redundant-superblock copies inside this region.
+    let allocated_in_data = (geom.data_start..geom.total_blocks)
+        .filter(|b| block_bitmap.is_set(*b).unwrap_or(true))
+        .count() as u64;
+
     sb.generation += 1;
     sb.last_write_at = now;
     sb.state = STATE_CLEAN;
     sb.payload_inode = 0;
-    sb.free_blocks = geom.data_blocks - payload_blocks_needed;
+    sb.free_blocks = geom.data_blocks - allocated_in_data;
     sb.free_inodes = geom.inode_count - 1;
     sb.block_bitmap_crc = Crc32c::hash(block_bitmap.as_bytes());
     sb.inode_bitmap_crc = Crc32c::hash(inode_bitmap.as_bytes());

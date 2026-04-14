@@ -102,6 +102,7 @@ pub mod checksum;
 pub mod dir_entry;
 pub mod extent_tree;
 pub mod fsck;
+pub mod fsck_repair;
 pub mod grouped;
 pub mod inode;
 pub mod journal;
