@@ -27,4 +27,11 @@ pub mod superblock;
 pub mod tiering;
 pub mod xattr;
 
+// Std-gebundene Treiber-Module (Volume-Blob-Mode, Native-Layout, Grouped,
+// Journaled, FSCK-Repair, Reader, Scrub).  Sie nutzen `bincode` zur
+// PersistedState-Serialisierung und `Timestamp::now` — beides steht nur mit
+// aktiviertem `std`-Feature zur Verfügung.
+#[cfg(feature = "std")]
+pub mod volume;
+
 pub use checksum::Crc32c;

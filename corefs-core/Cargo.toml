@@ -7,14 +7,17 @@ description = "CoreFS core — plattformneutrale, no_std-fähige Domain- und Sto
 
 [features]
 default = []
-# `std` aktiviert std-Bequemlichkeiten (Display, std::error::Error-Impls, From-Konvertierungen von std::time::SystemTime, …).
-# Ohne `std` ist die Crate `no_std + alloc` und kann im AnyOS-Kernel gelinkt werden.
-std = []
+# `std` aktiviert std-Bequemlichkeiten (Display, std::error::Error-Impls, From-Konvertierungen von std::time::SystemTime, …)
+# sowie die std-gebundenen ondisk-Module (volume, native, grouped, journaled, fsck_repair, reader, scrub),
+# die auf `bincode` angewiesen sind.  Ohne `std` ist die Crate `no_std + alloc` und kann im AnyOS-Kernel
+# gelinkt werden.
+std = ["dep:bincode"]
 
 [dependencies]
 serde = { workspace = true }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more", "serde"] }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "getrandom"] }
+bincode = { version = "1", optional = true }
 
 [dev-dependencies]
 bincode = "1"

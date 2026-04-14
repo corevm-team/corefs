@@ -13,10 +13,15 @@
 //!   superblock, transparently falling back to the redundant copies if the
 //!   primary block is corrupted.
 
-use crate::app::PersistedState;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::error::{CoreFsError, CoreFsResult};
+use crate::platform::Timestamp;
 use crate::storage::block_device::BlockDevice;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::storage::persisted_state::PersistedState;
 
 use super::bitmap::Bitmap;
 use super::checksum::Crc32c;
@@ -538,10 +543,7 @@ fn read_inode_record(
 }
 
 fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    Timestamp::now().as_secs() as i64
 }
 
 #[cfg(test)]

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::app::PersistedState;
 use crate::config::CoreFsConfig;
 use crate::domain::volume::VolumeDescriptor;
 use crate::services::journal::JournalRuntimeState;
@@ -10,6 +9,7 @@ use crate::storage::block_device::MemoryDevice;
 use crate::storage::block_store::AllocatorPolicy;
 use crate::storage::ondisk::inode::OnDiskKind;
 use crate::storage::ondisk::layout::BLOCK_SIZE;
+use crate::storage::persisted_state::PersistedState;
 
 fn empty_state() -> PersistedState {
     let config = CoreFsConfig::default();

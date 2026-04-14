@@ -105,11 +105,11 @@ pub mod resilience;
 pub mod scrub;
 pub mod session;
 pub mod stress;
-pub mod volume;
 
 pub use corefs_core::storage::ondisk::{
     allocator, attr_block, bitmap, block_group, checksum, dir_entry, extent_tree, fault_injection,
-    fsck, inode, journal, layout, multi_group_allocator, refcount, superblock, tiering, xattr,
+    fsck, inode, journal, layout, multi_group_allocator, refcount, superblock, tiering, volume,
+    xattr,
 };
 
 // Tests for `fsck` live in this main crate because they depend on
