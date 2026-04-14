@@ -97,14 +97,13 @@ pub mod benchmark;
 pub mod concurrency;
 pub mod property;
 pub mod resilience;
-pub mod scrub;
 pub mod session;
 pub mod stress;
 
 pub use corefs_core::storage::ondisk::{
     allocator, attr_block, bitmap, block_group, checksum, dir_entry, extent_tree, fault_injection,
     fsck, fsck_repair, grouped, inode, journal, journaled, layout, multi_group_allocator, native,
-    reader, refcount, superblock, tiering, volume, xattr,
+    reader, refcount, scrub, superblock, tiering, volume, xattr,
 };
 
 // Tests for `fsck` live in this main crate because they depend on
@@ -120,6 +119,11 @@ mod fsck_tests;
 #[cfg(test)]
 #[path = "reader_tests.rs"]
 mod reader_tests;
+
+// Tests for `scrub` live here for the same reason as `reader_tests`.
+#[cfg(test)]
+#[path = "scrub_tests.rs"]
+mod scrub_tests;
 
 pub use volume::{
     FormatOptions, FormatReport, SaveReport, VolumeInfo, format_device, inspect, load_state,

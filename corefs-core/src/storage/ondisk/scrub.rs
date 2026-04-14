@@ -28,6 +28,10 @@
 //! redundancy can extend the scrubber to use the redundant source
 //! automatically.
 
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::error::CoreFsResult;
 use crate::storage::block_device::BlockDevice;
 
@@ -193,6 +197,5 @@ pub fn run(device: &mut dyn BlockDevice, plan: &ScrubPlan) -> CoreFsResult<Scrub
     Ok(report)
 }
 
-#[cfg(test)]
-#[path = "scrub_tests.rs"]
-mod tests;
+// Tests live in the main `corefs` crate — they depend on
+// `session::OdfDeviceSession`, which is std-bound and not migrated.
