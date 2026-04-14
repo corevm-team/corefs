@@ -14,7 +14,7 @@ use crate::storage::persisted_state::PersistedState;
 fn empty_state() -> PersistedState {
     let config = CoreFsConfig::default();
     PersistedState {
-        volume: VolumeDescriptor::from_config(&config),
+        volume: VolumeDescriptor::from_config_at(&config, crate::platform::Timestamp::EPOCH),
         config,
         clean_unmount: true,
         pending_wal: None,
@@ -252,8 +252,8 @@ fn bitmap_crc_is_recorded_in_superblock() {
 #[test]
 fn state_with_snapshot_roundtrips() {
     use crate::domain::snapshot::Snapshot;
-    use std::collections::BTreeMap;
-    use std::time::SystemTime;
+    use crate::platform::Timestamp;
+    use alloc::collections::BTreeMap;
 
     let mut dev = fresh_device(4096);
     format_device(&mut dev, &default_options()).unwrap();
@@ -262,7 +262,7 @@ fn state_with_snapshot_roundtrips() {
         id: 1,
         name: "v1".to_string(),
         scope_root: "/".to_string(),
-        created_at: SystemTime::UNIX_EPOCH.into(),
+        created_at: Timestamp::EPOCH,
         paths: vec!["/".to_string()],
         file_data: BTreeMap::new(),
         inodes: BTreeMap::new(),

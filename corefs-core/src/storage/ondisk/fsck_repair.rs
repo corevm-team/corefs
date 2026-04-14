@@ -265,8 +265,18 @@ fn parse_block_from_message(msg: &str) -> Option<u64> {
     rest[..end].parse::<u64>().ok()
 }
 
+#[cfg(feature = "std")]
 fn now_secs() -> i64 {
     crate::platform::Timestamp::now().as_secs() as i64
+}
+
+/// Im no_std-Build steht keine Wallclock zur Verfügung — der Treiber gibt
+/// `Timestamp::EPOCH` zurück. Hostseitige Aufrufer sollten Zeitstempel
+/// stattdessen explizit über die ohnehin bevorzugten `*_at(now: Timestamp)`-
+/// Pfade vorgeben.
+#[cfg(not(feature = "std"))]
+fn now_secs() -> i64 {
+    crate::platform::Timestamp::EPOCH.as_secs() as i64
 }
 
 // Ensure LayoutGeometry import is used in release builds too.

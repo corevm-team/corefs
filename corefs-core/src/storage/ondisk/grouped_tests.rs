@@ -31,7 +31,7 @@ fn opts_with(group_count: usize) -> GroupedFormatOptions {
 fn empty_state() -> PersistedState {
     let config = CoreFsConfig::default();
     PersistedState {
-        volume: VolumeDescriptor::from_config(&config),
+        volume: VolumeDescriptor::from_config_at(&config, crate::platform::Timestamp::EPOCH),
         config,
         clean_unmount: true,
         pending_wal: None,
