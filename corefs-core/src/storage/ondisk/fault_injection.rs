@@ -34,6 +34,9 @@
 //! `#[derive(Clone)]`-snapshot the stats before and after to assert
 //! exactly which faults fired.
 
+use alloc::format;
+use alloc::vec::Vec;
+
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::storage::block_device::{BlockDevice, DeviceGeometry};
 

@@ -1,6 +1,9 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::*;
 use crate::storage::block_device::MemoryDevice;
 use crate::storage::ondisk::layout::BLOCK_SIZE;

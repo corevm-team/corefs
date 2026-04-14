@@ -1,6 +1,9 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::*;
 
 fn descriptor(start: u64, blocks: u64, inode_start: u64, inode_count: u64) -> BlockGroupDescriptor {

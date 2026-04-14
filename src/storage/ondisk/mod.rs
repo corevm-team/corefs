@@ -93,16 +93,12 @@
 //! [`PersistedState`]: crate::app::PersistedState
 //! [mem]: crate::storage::block_device::MemoryDevice
 
-pub mod allocator;
 pub mod benchmark;
 pub mod concurrency;
-pub mod fault_injection;
 pub mod fsck;
 pub mod fsck_repair;
 pub mod grouped;
-pub mod journal;
 pub mod journaled;
-pub mod multi_group_allocator;
 pub mod native;
 pub mod property;
 pub mod reader;
@@ -110,12 +106,11 @@ pub mod resilience;
 pub mod scrub;
 pub mod session;
 pub mod stress;
-pub mod tiering;
 pub mod volume;
 
 pub use corefs_core::storage::ondisk::{
-    attr_block, bitmap, block_group, checksum, dir_entry, extent_tree, inode, layout, refcount,
-    superblock, xattr,
+    allocator, attr_block, bitmap, block_group, checksum, dir_entry, extent_tree, fault_injection,
+    inode, journal, layout, multi_group_allocator, refcount, superblock, tiering, xattr,
 };
 
 pub use volume::{

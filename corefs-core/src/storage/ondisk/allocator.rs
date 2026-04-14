@@ -21,6 +21,9 @@
 //! need to fill a fragmented volume request a list of smaller extents
 //! instead via [`OndiskAllocator::allocate_any`].
 
+use alloc::format;
+use alloc::vec::Vec;
+
 use super::bitmap::Bitmap;
 use super::inode::Extent;
 use super::layout::LayoutGeometry;

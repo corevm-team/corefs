@@ -1,6 +1,9 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::*;
 use crate::storage::ondisk::bitmap::Bitmap;
 use crate::storage::ondisk::layout::{LayoutGeometry, LayoutParams};

@@ -1,22 +1,24 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::*;
-use crate::storage::block_device::MemoryDevice;
-use crate::storage::ondisk::layout::BLOCK_SIZE;
-use crate::storage::ondisk::volume::{FormatOptions, format_device};
+use crate::storage::block_device::{BlockDevice, MemoryDevice};
+use crate::storage::ondisk::layout::{BLOCK_SIZE, LayoutGeometry, LayoutParams};
 
 fn formatted_device() -> (MemoryDevice, Superblock) {
     let mut dev = MemoryDevice::new(4096 * BLOCK_SIZE, 4096).unwrap();
-    let opts = FormatOptions {
-        label: "j".into(),
-        uuid: [0u8; 16],
+    let geom = LayoutGeometry::plan(LayoutParams {
+        total_blocks: 4096,
         inode_count: 256,
         journal_blocks: 32,
-    };
-    format_device(&mut dev, &opts).unwrap();
-    let sb_bytes = dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap();
-    let sb = Superblock::decode_block(&sb_bytes).unwrap();
+    })
+    .unwrap();
+    let sb = Superblock::for_new_volume(&geom, [0u8; 16], "j", 0);
+    let sb_bytes = sb.encode_block();
+    dev.write_at(BLOCK_SIZE, &sb_bytes).unwrap();
     (dev, sb)
 }
 

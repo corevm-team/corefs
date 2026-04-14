@@ -31,7 +31,10 @@
 //! table.  The current primitives are the foundation — wiring into
 //! [`super::volume::format_device`] is a follow-up.
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::vec::Vec;
+use core::fmt;
 
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::storage::block_device::{BlockDevice, DeviceGeometry};
@@ -180,8 +183,8 @@ pub struct TieredDevice<H: BlockDevice, C: BlockDevice> {
     geometry: DeviceGeometry,
 }
 
-impl<H: BlockDevice, C: BlockDevice> std::fmt::Debug for TieredDevice<H, C> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<H: BlockDevice, C: BlockDevice> fmt::Debug for TieredDevice<H, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TieredDevice")
             .field("hot_capacity", &self.hot.capacity())
             .field("cold_capacity", &self.cold.capacity())

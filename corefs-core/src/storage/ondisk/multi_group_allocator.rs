@@ -16,6 +16,10 @@
 //! responsibility (write each per-group bitmap back at
 //! `descriptor.bitmap_block` and refresh the [`BlockGroupTable`]).
 
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::bitmap::Bitmap;
 use super::block_group::{BlockGroupDescriptor, BlockGroupTable};
 use super::checksum::Crc32c;
