@@ -115,6 +115,7 @@ pub mod native;
 pub mod reader;
 pub mod refcount;
 pub mod resilience;
+pub mod scrub;
 pub mod session;
 pub mod stress;
 pub mod superblock;
