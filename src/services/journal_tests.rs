@@ -124,19 +124,19 @@ fn reconcile_persisted_state_normalizes_entries_and_blocks() {
         ],
         journal_entries: vec![
             JournalEntry {
-                timestamp: SystemTime::now(),
+                timestamp: Timestamp::now(),
                 operation: "delete".to_string(),
                 target: "/a".to_string(),
                 details: String::new(),
             },
             JournalEntry {
-                timestamp: SystemTime::now(),
+                timestamp: Timestamp::now(),
                 operation: "restore".to_string(),
                 target: "/b".to_string(),
                 details: String::new(),
             },
             JournalEntry {
-                timestamp: SystemTime::now(),
+                timestamp: Timestamp::now(),
                 operation: "snapshot".to_string(),
                 target: "/".to_string(),
                 details: String::new(),
@@ -149,7 +149,7 @@ fn reconcile_persisted_state_normalizes_entries_and_blocks() {
             id: 1,
             name: "baseline".to_string(),
             scope_root: "/".to_string(),
-            created_at: SystemTime::now(),
+            created_at: Timestamp::now(),
             paths: vec!["/".to_string()],
             file_data: std::collections::BTreeMap::new(),
             inodes: std::collections::BTreeMap::new(),

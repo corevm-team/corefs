@@ -1,9 +1,19 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+//! Inode-Domänentypen.
+//!
+//! Inodes sind plattformneutrale Grund-Datensätze einer Datei, eines Verzeichnisses
+//! oder eines Symlinks. Zeitstempel liegen als [`Timestamp`] vor (nicht als
+//! `std::time::SystemTime`), damit der Kern auch im no_std-Kontext verwendet
+//! werden kann. Die Wire-Kompatibilität mit bestehenden `SystemTime`-Serialisaten
+//! ist in [`crate::platform`] dokumentiert und durch einen Regressionstest
+//! abgesichert.
+
 use crate::domain::metadata::FileMetadata;
+use crate::platform::Timestamp;
+use alloc::string::String;
 use serde::{Deserialize, Serialize};
-use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct InodeId(pub u64);
@@ -22,19 +32,30 @@ pub struct Inode {
     pub path: String,
     pub size: usize,
     /// POSIX `birth time` — set on creation, never updated afterwards.
-    pub created_at: SystemTime,
+    pub created_at: Timestamp,
     /// POSIX `mtime` — updated when file **content** changes
     /// (write, truncate).  Not updated by chown/chmod/rename.
-    pub modified_at: SystemTime,
+    pub modified_at: Timestamp,
     /// POSIX `ctime` — updated on any inode change: content changes,
     /// metadata changes (chown/chmod), or rename.
-    pub changed_at: SystemTime,
+    pub changed_at: Timestamp,
     pub metadata: FileMetadata,
 }
 
 impl Inode {
-    pub fn new(id: InodeId, kind: InodeKind, path: String, metadata: FileMetadata) -> Self {
-        let now = SystemTime::now();
+    /// Konstruiert einen neuen Inode mit dem gegebenen Zeitstempel für alle
+    /// drei POSIX-Zeitstempelfelder (crtime, mtime, ctime).
+    ///
+    /// Diese Variante ist no_std-fähig — der Aufrufer liefert die Zeit explizit,
+    /// etwa aus einer [`crate::platform::Clock`]-Implementierung oder aus einem
+    /// bekannten Zeitpunkt (Tests, Replay).
+    pub fn new_at(
+        id: InodeId,
+        kind: InodeKind,
+        path: String,
+        metadata: FileMetadata,
+        now: Timestamp,
+    ) -> Self {
         Self {
             id,
             kind,
@@ -47,18 +68,36 @@ impl Inode {
         }
     }
 
-    /// Marks the inode as having its content modified (updates both
-    /// `modified_at` and `changed_at`).
-    pub fn touch_modified(&mut self) {
-        let now = SystemTime::now();
+    /// Konstruiert einen neuen Inode mit der aktuellen Systemzeit.
+    ///
+    /// Bequemere Variante von [`Inode::new_at`] für std-basierte Umgebungen.
+    #[cfg(feature = "std")]
+    pub fn new(id: InodeId, kind: InodeKind, path: String, metadata: FileMetadata) -> Self {
+        Self::new_at(id, kind, path, metadata, Timestamp::now())
+    }
+
+    /// Markiert den Inode als inhaltlich modifiziert (setzt sowohl
+    /// `modified_at` als auch `changed_at` auf `now`).
+    pub fn touch_modified_at(&mut self, now: Timestamp) {
         self.modified_at = now;
         self.changed_at = now;
     }
 
-    /// Marks the inode as having its status changed (metadata-only update).
-    /// Updates `changed_at` but leaves `modified_at` untouched.
+    /// Markiert den Inode als inhaltlich modifiziert, mit aktueller Systemzeit.
+    #[cfg(feature = "std")]
+    pub fn touch_modified(&mut self) {
+        self.touch_modified_at(Timestamp::now());
+    }
+
+    /// Markiert den Inode als metadata-seitig verändert (setzt nur `changed_at`).
+    pub fn touch_changed_at(&mut self, now: Timestamp) {
+        self.changed_at = now;
+    }
+
+    /// Markiert den Inode als metadata-seitig verändert, mit aktueller Systemzeit.
+    #[cfg(feature = "std")]
     pub fn touch_changed(&mut self) {
-        self.changed_at = SystemTime::now();
+        self.touch_changed_at(Timestamp::now());
     }
 }
 

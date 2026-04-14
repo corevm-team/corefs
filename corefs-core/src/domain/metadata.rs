@@ -3,6 +3,8 @@
 
 use crate::config::StorageTier;
 use crate::domain::acl::AclEntry;
+use alloc::string::String;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

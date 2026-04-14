@@ -255,7 +255,7 @@ fn state_with_snapshot_roundtrips() {
         id: 1,
         name: "v1".to_string(),
         scope_root: "/".to_string(),
-        created_at: SystemTime::UNIX_EPOCH,
+        created_at: SystemTime::UNIX_EPOCH.into(),
         paths: vec!["/".to_string()],
         file_data: BTreeMap::new(),
         inodes: BTreeMap::new(),

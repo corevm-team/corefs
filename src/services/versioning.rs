@@ -3,13 +3,13 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::time::SystemTime;
+use corefs_core::platform::Timestamp;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileVersion {
     pub version_id: u64,
     pub path: String,
-    pub created_at: SystemTime,
+    pub created_at: Timestamp,
     pub bytes: Vec<u8>,
 }
 
@@ -25,7 +25,7 @@ impl VersioningService {
         let version = FileVersion {
             version_id: self.next_version,
             path: path.to_string(),
-            created_at: SystemTime::now(),
+            created_at: Timestamp::now(),
             bytes,
         };
         self.versions
@@ -49,7 +49,7 @@ impl VersioningService {
             .find(|version| version.version_id == version_id)
     }
 
-    pub fn version_at_or_before(&self, path: &str, instant: SystemTime) -> Option<&FileVersion> {
+    pub fn version_at_or_before(&self, path: &str, instant: Timestamp) -> Option<&FileVersion> {
         self.list_versions(path)
             .iter()
             .rev()

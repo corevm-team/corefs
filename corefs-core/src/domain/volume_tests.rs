@@ -3,10 +3,13 @@
 
 use super::*;
 use crate::config::CoreFsConfig;
+use crate::platform::Timestamp;
 
 #[test]
 fn volume_descriptor_exposes_enabled_features() {
-    let descriptor = VolumeDescriptor::from_config(&CoreFsConfig::default());
+    // Uses the no_std-friendly `from_config_at` so the test runs both with and
+    // without the `std` feature of `corefs-core`.
+    let descriptor = VolumeDescriptor::from_config_at(&CoreFsConfig::default(), Timestamp::EPOCH);
 
     assert_eq!(descriptor.name, "corefs");
     assert_eq!(descriptor.block_size, 4096);

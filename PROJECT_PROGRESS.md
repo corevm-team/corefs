@@ -408,16 +408,16 @@ Ziel: CoreFS als natives Dateisystem des eigenen Betriebssystems AnyOS (`/daten1
 ### 5.2 no_std-Migration `corefs-core`
 
 - [x] `#![no_std]` + `extern crate alloc` in `corefs-core` (konditional über `cfg_attr(not(feature = "std"), no_std)`, zzgl. `forbid(unsafe_code)` und `warn(missing_docs)`)
-- [~] `std::collections::{BTreeMap, HashMap}` → `alloc::collections::BTreeMap` / `hashbrown::HashMap` (snapshot.rs umgestellt; weitere Stellen folgen mit der storage/services-Migration)
-- [ ] `std::time::SystemTime` entfernen → eigener `Timestamp(u64)`-Typ (ns seit Epoch) (Typ vorhanden in `platform::Timestamp`, Umstellung der Domain-Typen noch offen)
+- [~] `std::collections::{BTreeMap, HashMap}` → `alloc::collections::BTreeMap` / `hashbrown::HashMap` (Domain-Layer umgestellt; weitere Stellen folgen mit der storage/services-Migration)
+- [x] `std::time::SystemTime` entfernen → eigener `Timestamp`-Typ (secs + nanos) — Domain-Feld-Typen, Services (`JournalEntry.timestamp`, `JournalRuntimeState.started_at`, `FileVersion.created_at`), Storage-Kodierung und alle Call-Sites im main crate migriert. `Timestamp` ist **bincode-wire-kompatibel** mit `SystemTime`; bestehende Volume-Images bleiben byte-identisch lesbar (Regressionstest `wire_compatible_with_system_time_bincode`).
 - [ ] `std::path::PathBuf`/`Path` aus dem Kern entfernen — Kern arbeitet mit `&str`/`PathRef`; vollständige PathBuf-Nutzung nur in `corefs-std`/`corefs-cli`
 - [ ] `std::io::{Read, Write, Error}` → eigener `io`-Trait-Satz im Kern
 - [~] Abhängigkeiten auf `default-features = false` umstellen (serde mit `default-features = false, features = ["derive", "alloc"]` bereits zentral; bincode/lz4_flex/chacha20poly1305 noch im main crate)
-- [x] `trait Clock` + `trait Rng` als Plattform-Abstraktionen einführen (siehe `corefs-core::platform`)
-- [x] Feature `std` für std-Bequemlichkeiten (Display, Error-Trait) — Default = no_std (umgesetzt; `From<SystemTime> for Timestamp` unter `std`-Feature)
+- [x] `trait Clock` + `trait Rng` als Plattform-Abstraktionen einführen (siehe `corefs-core::platform`); zusätzlich `SystemClock`-Default-Impl unter `std`-Feature
+- [x] Feature `std` für std-Bequemlichkeiten — Default = no_std; `Timestamp::now()`, `Inode::new`/`touch_*`, `VolumeDescriptor::from_config`, `From<SystemTime>`/`Into<SystemTime>` hinter `std`-Feature; `*_at(now)`-APIs auch ohne `std` verfügbar
 - [ ] CI-Build für Custom-Target `x86_64-anyos` (no_std) grün
 - [~] CI-Build für `x86_64-unknown-linux-gnu` grün (lokal verifiziert; CI-Hook folgt)
-- [x] Alle Tests auf Linux weiterhin grün
+- [x] Alle Tests auf Linux weiterhin grün (631 main + 21 corefs-core + 1 doctest = 653; zusätzlich 17 Tests grün im strikten no_std-Modus via `cargo test -p corefs-core --no-default-features`)
 
 ### 5.3 Tool-Logik extrahieren nach `corefs-tools`
 

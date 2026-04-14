@@ -67,9 +67,9 @@ fn clean_native_volume_has_no_errors() {
         kind: InodeKind::File,
         path: "/x".into(),
         size: 0,
-        created_at: UNIX_EPOCH + std::time::Duration::from_secs(1),
-        modified_at: UNIX_EPOCH + std::time::Duration::from_secs(2),
-        changed_at: UNIX_EPOCH + std::time::Duration::from_secs(3),
+        created_at: (UNIX_EPOCH + std::time::Duration::from_secs(1)).into(),
+        modified_at: (UNIX_EPOCH + std::time::Duration::from_secs(2)).into(),
+        changed_at: (UNIX_EPOCH + std::time::Duration::from_secs(3)).into(),
         metadata: FileMetadata::default(),
     });
     state.block_records.push(BlockRecord {
@@ -132,9 +132,9 @@ fn extent_pointing_outside_data_region_is_error() {
         kind: InodeKind::File,
         path: "/y".into(),
         size: 0,
-        created_at: UNIX_EPOCH,
-        modified_at: UNIX_EPOCH,
-        changed_at: UNIX_EPOCH,
+        created_at: UNIX_EPOCH.into(),
+        modified_at: UNIX_EPOCH.into(),
+        changed_at: UNIX_EPOCH.into(),
         metadata: FileMetadata::default(),
     });
     state.block_records.push(BlockRecord {
@@ -195,9 +195,9 @@ fn report_counts_inodes_and_extents() {
             kind: InodeKind::File,
             path: format!("/f{i}"),
             size: 0,
-            created_at: SystemTime::now(),
-            modified_at: SystemTime::now(),
-            changed_at: SystemTime::now(),
+            created_at: SystemTime::now().into(),
+            modified_at: SystemTime::now().into(),
+            changed_at: SystemTime::now().into(),
             metadata: FileMetadata::default(),
         });
         state.block_records.push(BlockRecord {

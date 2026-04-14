@@ -136,9 +136,9 @@ fn i3_silent_data_block_corruption_is_caught_by_data_crc() {
         kind: InodeKind::File,
         path: "/f".into(),
         size: content.len(),
-        created_at: UNIX_EPOCH,
-        modified_at: UNIX_EPOCH,
-        changed_at: UNIX_EPOCH,
+        created_at: UNIX_EPOCH.into(),
+        modified_at: UNIX_EPOCH.into(),
+        changed_at: UNIX_EPOCH.into(),
         metadata: FileMetadata::default(),
     });
     state.block_records.push(BlockRecord {

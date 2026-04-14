@@ -3,6 +3,7 @@
 
 use crate::app::{CoreFsService, PersistedState};
 use crate::domain::inode::{Inode, InodeId, InodeKind};
+use corefs_core::platform::Timestamp;
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::storage::volume_wal::{VolumeWal, WalOperation};
 use fuser::{
@@ -81,19 +82,19 @@ impl FuseNode {
         let mtime = self
             .inode
             .as_ref()
-            .map(|inode| inode.modified_at)
+            .map(|inode| inode.modified_at.into())
             .unwrap_or(now);
         // POSIX ctime — status-change time.  Falls back to mtime when the
         // inode has no explicit changed_at yet.
         let ctime = self
             .inode
             .as_ref()
-            .map(|inode| inode.changed_at)
+            .map(|inode| inode.changed_at.into())
             .unwrap_or(now);
         let crtime = self
             .inode
             .as_ref()
-            .map(|inode| inode.created_at)
+            .map(|inode| inode.created_at.into())
             .unwrap_or(now);
 
         FileAttr {
@@ -507,14 +508,14 @@ struct VirtDir {
     snapshot_id: u64,
     /// The corresponding real path inside the snapshot (e.g. "/" or "/etc").
     fs_path: String,
-    modified_at: SystemTime,
+    modified_at: Timestamp,
 }
 
 /// A virtual read-only file node (snapshot version or time-travel).
 #[derive(Debug, Clone)]
 struct VirtFile {
     bytes: Vec<u8>,
-    modified_at: SystemTime,
+    modified_at: Timestamp,
 }
 
 /// Backing store for the FUSE RW mount.
@@ -597,13 +598,13 @@ struct OpenFileHandle {
 #[derive(Debug, Clone)]
 enum TimeTravelSpec {
     /// Find the version at or before this instant.
-    At(SystemTime),
+    At(Timestamp),
     /// Find the exact version by ID.
     VersionId(u64),
 }
 
-/// Parse `YYYY-MM-DD` into a `SystemTime` at midnight UTC.
-fn parse_date(s: &str) -> Option<SystemTime> {
+/// Parse `YYYY-MM-DD` into a `Timestamp` at midnight UTC.
+fn parse_date(s: &str) -> Option<Timestamp> {
     let parts: Vec<&str> = s.split('-').collect();
     if parts.len() != 3 {
         return None;
@@ -616,19 +617,19 @@ fn parse_date(s: &str) -> Option<SystemTime> {
     }
     // Approximate seconds since UNIX epoch (good enough for version lookups).
     let days = days_since_epoch(y, m, d)?;
-    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(days * 86400))
+    Some(Timestamp::from_secs(days * 86400))
 }
 
 /// Parse `YYYY-MM-DDTHH:MM` or `YYYY-MM-DDTHH:MM:SS`.
-fn parse_datetime(s: &str) -> Option<SystemTime> {
+fn parse_datetime(s: &str) -> Option<Timestamp> {
     let (date_part, time_part) = s.split_once('T')?;
     let base = parse_date(date_part)?;
     let time_parts: Vec<&str> = time_part.split(':').collect();
     let h: u64 = time_parts.first()?.parse().ok()?;
     let min: u64 = time_parts.get(1)?.parse().ok()?;
     let sec: u64 = time_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let offset = Duration::from_secs(h * 3600 + min * 60 + sec);
-    Some(base + offset)
+    let offset_secs = h * 3600 + min * 60 + sec;
+    Some(Timestamp::from_secs(base.as_secs().saturating_add(offset_secs)))
 }
 
 /// Returns days since Unix epoch (1970-01-01) for a proleptic Gregorian date.
@@ -804,11 +805,8 @@ impl CoreFsFuseMountRw {
         ino
     }
 
-    fn virt_dir_attr(ino: u64, modified_at: SystemTime) -> FileAttr {
-        let ts = modified_at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default();
-        let t = std::time::UNIX_EPOCH + ts;
+    fn virt_dir_attr(ino: u64, modified_at: Timestamp) -> FileAttr {
+        let t: SystemTime = modified_at.into();
         FileAttr {
             ino,
             size: 0,
@@ -828,11 +826,8 @@ impl CoreFsFuseMountRw {
         }
     }
 
-    fn virt_file_attr(ino: u64, size: u64, modified_at: SystemTime) -> FileAttr {
-        let ts = modified_at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default();
-        let t = std::time::UNIX_EPOCH + ts;
+    fn virt_file_attr(ino: u64, size: u64, modified_at: Timestamp) -> FileAttr {
+        let t: SystemTime = modified_at.into();
         FileAttr {
             ino,
             size,
@@ -856,7 +851,7 @@ impl CoreFsFuseMountRw {
 
     /// Returns `(snapshot_id, snapshot.created_at)` for the snapshot whose subdir INO
     /// is `ino`, or `None` if `ino` is not a top-level snapshot dir.
-    fn snapshot_for_subdir_ino(&self, ino: u64) -> Option<(u64, SystemTime)> {
+    fn snapshot_for_subdir_ino(&self, ino: u64) -> Option<(u64, Timestamp)> {
         if ino <= SNAP_SUBDIR_BASE {
             return None;
         }
@@ -953,7 +948,7 @@ impl CoreFsFuseMountRw {
     fn lookup_in_snapshot(
         &mut self,
         snap_id: u64,
-        snap_ts: SystemTime,
+        snap_ts: Timestamp,
         parent_fs_path: &str,
         name: &str,
         reply: ReplyEntry,
@@ -1399,7 +1394,7 @@ impl CoreFsFuseMountRw {
         if let Some(node) = self.nodes_by_ino.get_mut(&ino) {
             if let Some(ref mut inode) = node.inode {
                 inode.size = new_total;
-                inode.modified_at = SystemTime::now();
+                inode.modified_at = Timestamp::now();
             }
         }
         self.dirty = true;
@@ -1538,7 +1533,7 @@ impl Filesystem for CoreFsFuseMountRw {
 
         // ── .snapshots/ virtual root ─────────────────────────────────────────
         if parent == ROOT_INO && name_str == ".snapshots" {
-            let attr = Self::virt_dir_attr(SNAPSHOTS_DIR_INO, SystemTime::UNIX_EPOCH);
+            let attr = Self::virt_dir_attr(SNAPSHOTS_DIR_INO, Timestamp::EPOCH);
             reply.entry(&TTL, &attr, 0);
             return;
         }
@@ -1603,7 +1598,7 @@ impl Filesystem for CoreFsFuseMountRw {
                             fs_path: file_path,
                             version_id,
                         };
-                        let mtime = SystemTime::now();
+                        let mtime = Timestamp::now();
                         let ino =
                             self.get_or_create_virt_file(key, VirtFile { bytes, modified_at: mtime });
                         let attr = Self::virt_file_attr(ino, size, mtime);
@@ -1623,7 +1618,7 @@ impl Filesystem for CoreFsFuseMountRw {
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
         if ino == SNAPSHOTS_DIR_INO {
-            reply.attr(&TTL, &Self::virt_dir_attr(ino, SystemTime::UNIX_EPOCH));
+            reply.attr(&TTL, &Self::virt_dir_attr(ino, Timestamp::EPOCH));
             return;
         }
         if let Some((_, ts)) = self.snapshot_for_subdir_ino(ino) {
@@ -2391,7 +2386,7 @@ impl Filesystem for CoreFsFuseMountRw {
         }
 
         // ── Snapshot root dir (.snapshots/snap-N-name/) or deeper snapshot virt_dir ──
-        let snapshot_info: Option<(u64, SystemTime)> = if let Some(info) = self.snapshot_for_subdir_ino(ino) {
+        let snapshot_info: Option<(u64, Timestamp)> = if let Some(info) = self.snapshot_for_subdir_ino(ino) {
             Some(info)
         } else if let Some(d) = self.virt_dirs.get(&ino) {
             Some((d.snapshot_id, d.modified_at))

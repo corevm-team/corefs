@@ -41,7 +41,7 @@ use crate::error::{CoreFsError, CoreFsResult};
 use crate::storage::block_device::BlockDevice;
 use crate::storage::block_store::BlockRecord;
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use corefs_core::platform::Timestamp;
 
 use super::allocator::{AllocationStrategy, OndiskAllocator};
 use super::attr_block::AttrBlock;
@@ -956,14 +956,12 @@ fn read_all_extent_bytes(
     Ok(out)
 }
 
-fn systime_to_secs(t: SystemTime) -> i64 {
-    t.duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+fn systime_to_secs(t: Timestamp) -> i64 {
+    t.as_secs() as i64
 }
 
 fn now_secs() -> i64 {
-    systime_to_secs(SystemTime::now())
+    systime_to_secs(Timestamp::now())
 }
 
 #[cfg(test)]

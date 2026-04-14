@@ -50,7 +50,7 @@ fn sample_state() -> PersistedState {
             id: 1,
             name: "baseline".to_string(),
             scope_root: "/".to_string(),
-            created_at: SystemTime::now(),
+            created_at: SystemTime::now().into(),
             paths: vec!["/".to_string()],
             file_data: std::collections::BTreeMap::new(),
             inodes: std::collections::BTreeMap::new(),
@@ -267,13 +267,13 @@ fn repair_volume_image_applies_journal_reconciliation() {
         ],
         journal_entries: vec![
             JournalEntry {
-                timestamp: SystemTime::now(),
+                timestamp: SystemTime::now().into(),
                 operation: "delete".to_string(),
                 target: "/a".to_string(),
                 details: String::new(),
             },
             JournalEntry {
-                timestamp: SystemTime::now(),
+                timestamp: SystemTime::now().into(),
                 operation: "restore".to_string(),
                 target: "/b".to_string(),
                 details: String::new(),
@@ -661,9 +661,9 @@ fn incremental_persist_writes_only_changed_metadata_segment() {
         kind: InodeKind::File,
         path: "/owned.txt".to_string(),
         size: 0,
-        created_at: std::time::SystemTime::now(),
-        modified_at: std::time::SystemTime::now(),
-        changed_at: std::time::SystemTime::now(),
+        created_at: std::time::SystemTime::now().into(),
+        modified_at: std::time::SystemTime::now().into(),
+        changed_at: std::time::SystemTime::now().into(),
         metadata: crate::domain::metadata::FileMetadata::default(),
     });
 
@@ -714,9 +714,9 @@ fn incremental_persist_falls_back_to_full_on_size_change() {
         kind: InodeKind::File,
         path: "/new-file.txt".to_string(),
         size: 0,
-        created_at: std::time::SystemTime::now(),
-        modified_at: std::time::SystemTime::now(),
-        changed_at: std::time::SystemTime::now(),
+        created_at: std::time::SystemTime::now().into(),
+        modified_at: std::time::SystemTime::now().into(),
+        changed_at: std::time::SystemTime::now().into(),
         metadata: crate::domain::metadata::FileMetadata::default(),
     });
 
@@ -740,9 +740,9 @@ fn incremental_persist_bytes_written_is_much_less_than_full() {
         kind: InodeKind::File,
         path: "/big.bin".to_string(),
         size: 64 * 1024,
-        created_at: std::time::SystemTime::now(),
-        modified_at: std::time::SystemTime::now(),
-        changed_at: std::time::SystemTime::now(),
+        created_at: std::time::SystemTime::now().into(),
+        modified_at: std::time::SystemTime::now().into(),
+        changed_at: std::time::SystemTime::now().into(),
         metadata: crate::domain::metadata::FileMetadata::default(),
     });
     state.block_records = vec![

@@ -3,11 +3,11 @@
 
 use crate::domain::inode::InodeKind;
 use crate::domain::metadata::FileMetadata;
+use crate::platform::Timestamp;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
-use std::time::SystemTime;
 
 /// Per-path metadata captured at snapshot creation time.
 ///
@@ -18,9 +18,9 @@ use std::time::SystemTime;
 pub struct SnapshotInode {
     pub kind: InodeKind,
     pub size: usize,
-    pub created_at: SystemTime,
-    pub modified_at: SystemTime,
-    pub changed_at: SystemTime,
+    pub created_at: Timestamp,
+    pub modified_at: Timestamp,
+    pub changed_at: Timestamp,
     pub metadata: FileMetadata,
     /// For symlinks: the target path captured at snapshot time.
     /// `None` for files and directories.
@@ -39,7 +39,7 @@ pub struct Snapshot {
     pub id: u64,
     pub name: String,
     pub scope_root: String,
-    pub created_at: SystemTime,
+    pub created_at: Timestamp,
     /// All paths (files, directories, symlinks) that existed at snapshot time.
     pub paths: Vec<String>,
     /// Captured uncompressed content for every regular file at snapshot time,

@@ -42,7 +42,7 @@ fn sample_state() -> PersistedState {
             id: 1,
             name: "baseline".to_string(),
             scope_root: "/".to_string(),
-            created_at: SystemTime::now(),
+            created_at: SystemTime::now().into(),
             paths: vec!["/".to_string()],
             file_data: std::collections::BTreeMap::new(),
             inodes: std::collections::BTreeMap::new(),

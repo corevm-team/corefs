@@ -226,9 +226,9 @@ fn load_image_recovers_unclean_runtime_state_and_aborts_pending_transaction() {
         pending_transaction: Some(JournalTransaction {
             id: 1,
             label: "rw-writeback".to_string(),
-            started_at: SystemTime::now(),
+            started_at: SystemTime::now().into(),
             operations: vec![crate::services::journal::JournalEntry {
-                timestamp: SystemTime::now(),
+                timestamp: SystemTime::now().into(),
                 operation: "write_file".to_string(),
                 target: "/runtime.txt".to_string(),
                 details: "bytes=7".to_string(),

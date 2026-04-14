@@ -12,7 +12,8 @@ use crate::storage::block_device::MemoryDevice;
 use crate::storage::block_store::{AllocatorPolicy, BlockRecord};
 use crate::storage::ondisk::layout::BLOCK_SIZE;
 use crate::storage::ondisk::volume::{FormatOptions, format_device};
-use std::time::{SystemTime, UNIX_EPOCH};
+use corefs_core::platform::Timestamp;
+use std::time::UNIX_EPOCH;
 
 fn fresh_device(blocks: u64) -> MemoryDevice {
     MemoryDevice::new(blocks * BLOCK_SIZE, 4096).unwrap()
@@ -49,8 +50,8 @@ fn empty_state() -> PersistedState {
     }
 }
 
-fn t(epoch_offset: u64) -> SystemTime {
-    UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + epoch_offset)
+fn t(epoch_offset: u64) -> Timestamp {
+    (UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + epoch_offset)).into()
 }
 
 fn sample_inode(id: u64, path: &str, kind: InodeKind, size: usize) -> Inode {

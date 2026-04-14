@@ -40,7 +40,7 @@ use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::storage::block_device::BlockDevice;
 use crate::storage::block_store::BlockRecord;
-use std::time::{SystemTime, UNIX_EPOCH};
+use corefs_core::platform::Timestamp;
 
 use super::attr_block::AttrBlock;
 use super::bitmap::Bitmap;
@@ -690,14 +690,12 @@ fn read_inode_at_slot(
     OnDiskInode::decode(&buf[offset as usize..offset as usize + INODE_RECORD_SIZE])
 }
 
-fn systime_to_secs(t: SystemTime) -> i64 {
-    t.duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+fn systime_to_secs(t: Timestamp) -> i64 {
+    t.as_secs() as i64
 }
 
 fn now_secs() -> i64 {
-    systime_to_secs(SystemTime::now())
+    systime_to_secs(Timestamp::now())
 }
 
 #[cfg(test)]

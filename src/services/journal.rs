@@ -5,11 +5,11 @@ use crate::app::PersistedState;
 use crate::domain::inode::{Inode, InodeKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::time::SystemTime;
+use corefs_core::platform::Timestamp;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalEntry {
-    pub timestamp: SystemTime,
+    pub timestamp: Timestamp,
     pub operation: String,
     pub target: String,
     pub details: String,
@@ -19,7 +19,7 @@ pub struct JournalEntry {
 pub struct JournalTransaction {
     pub id: u64,
     pub label: String,
-    pub started_at: SystemTime,
+    pub started_at: Timestamp,
     pub operations: Vec<JournalEntry>,
 }
 
@@ -66,7 +66,7 @@ pub struct JournalRecoverySummary {
 impl JournalService {
     pub fn record(&mut self, operation: &str, target: &str, details: impl Into<String>) {
         let entry = JournalEntry {
-            timestamp: SystemTime::now(),
+            timestamp: Timestamp::now(),
             operation: operation.to_string(),
             target: target.to_string(),
             details: details.into(),
@@ -101,7 +101,7 @@ impl JournalService {
         self.runtime.pending_transaction = Some(JournalTransaction {
             id,
             label: label.into(),
-            started_at: SystemTime::now(),
+            started_at: Timestamp::now(),
             operations: Vec::new(),
         });
         id
@@ -112,14 +112,14 @@ impl JournalService {
         let id = transaction.id;
         let operation_count = transaction.operations.len();
         self.entries.push(JournalEntry {
-            timestamp: SystemTime::now(),
+            timestamp: Timestamp::now(),
             operation: "tx_begin".to_string(),
             target: transaction.label.clone(),
             details: format!("id={id} ops={operation_count}"),
         });
         self.entries.extend(transaction.operations);
         self.entries.push(JournalEntry {
-            timestamp: SystemTime::now(),
+            timestamp: Timestamp::now(),
             operation: "tx_commit".to_string(),
             target: transaction.label,
             details: format!("id={id} ops={operation_count}"),
@@ -132,7 +132,7 @@ impl JournalService {
         let transaction = self.runtime.pending_transaction.take()?;
         let id = transaction.id;
         self.entries.push(JournalEntry {
-            timestamp: SystemTime::now(),
+            timestamp: Timestamp::now(),
             operation: "tx_abort".to_string(),
             target: transaction.label,
             details: format!("id={id} reason={reason}"),
@@ -164,7 +164,7 @@ impl JournalService {
 
         if summary.aborted_pending_transaction || summary.cleared_unclean_shutdown {
             self.entries.push(JournalEntry {
-                timestamp: SystemTime::now(),
+                timestamp: Timestamp::now(),
                 operation: "recovery_replay".to_string(),
                 target: "/".to_string(),
                 details: format!(

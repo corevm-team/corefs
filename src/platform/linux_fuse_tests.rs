@@ -877,7 +877,7 @@ fn snapshots_dir_ino_is_reachable_from_root() {
     // The normal lookup_child won't find virtual nodes; that is intentional.
     // Instead verify the INO constant and getattr path.
     assert_eq!(
-        CoreFsFuseMountRw::virt_dir_attr(SNAPSHOTS_DIR_INO, SystemTime::UNIX_EPOCH).ino,
+        CoreFsFuseMountRw::virt_dir_attr(SNAPSHOTS_DIR_INO, SystemTime::UNIX_EPOCH.into()).ino,
         SNAPSHOTS_DIR_INO
     );
 }

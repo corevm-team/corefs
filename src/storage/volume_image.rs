@@ -8,6 +8,7 @@ use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::domain::metadata::{ContentClass, FileMetadata};
 use crate::domain::snapshot::{Snapshot, SnapshotInode};
 use crate::domain::volume::VolumeDescriptor;
+use corefs_core::platform::Timestamp;
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::services::hot_paths::HotPathRecord;
 use crate::services::journal::JournalEntry;
@@ -1028,19 +1029,18 @@ fn decode_storage_tier(value: u8) -> Result<StorageTier, String> {
     }
 }
 
-fn push_system_time(bytes: &mut Vec<u8>, time: SystemTime) -> Result<(), String> {
-    let duration = time
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "system time before unix epoch is unsupported".to_string())?;
-    push_u64(bytes, duration.as_secs());
-    push_u32(bytes, duration.subsec_nanos());
+fn push_system_time(bytes: &mut Vec<u8>, time: Timestamp) -> Result<(), String> {
+    // Wire format: (secs: u64, nanos: u32) — byte-identical to the previous
+    // SystemTime encoding, so existing on-disk images remain readable.
+    push_u64(bytes, time.as_secs());
+    push_u32(bytes, time.subsec_nanos());
     Ok(())
 }
 
-fn read_system_time(bytes: &[u8], cursor: &mut usize) -> Result<SystemTime, String> {
+fn read_system_time(bytes: &[u8], cursor: &mut usize) -> Result<Timestamp, String> {
     let secs = read_u64(bytes, cursor)?;
     let nanos = read_u32(bytes, cursor)?;
-    Ok(UNIX_EPOCH + std::time::Duration::new(secs, nanos))
+    Ok(Timestamp::from_secs_nanos(secs, nanos))
 }
 
 fn push_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), String> {

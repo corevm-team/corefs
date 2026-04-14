@@ -12,19 +12,17 @@
 //!
 //! ## Aktueller Migrationsstand (Phase 5.2)
 //!
-//! Die Migration läuft inkrementell. Der `platform`-Modul ist bereits
-//! strikt `no_std + alloc`. Die Module [`config`] und [`domain`] sind
-//! aktuell noch an `std` gebunden (`std::time::SystemTime` in einigen
-//! Domain-Typen) und daher hinter dem Feature-Flag `std` versteckt.
-//! Spätere Schritte ersetzen `SystemTime` durch [`platform::Timestamp`]
-//! und heben die Feature-Gates auf.
+//! Die Migration läuft inkrementell. Die Module [`platform`], [`config`] und
+//! [`domain`] sind bereits strikt `no_std + alloc` — sie kompilieren im
+//! AnyOS-Kernel. `storage` und `services` folgen in späteren Schritten.
 //!
 //! ## Feature-Flags
 //!
-//! - `std` — aktiviert die Module [`config`] und [`domain`] sowie std-seitige
-//!   Bequemlichkeiten (`From<SystemTime> for Timestamp`, zukünftig
-//!   `std::error::Error`-Impls). Ohne dieses Feature ist die Crate strikt
-//!   `no_std + alloc`.
+//! - `std` — aktiviert std-seitige Bequemlichkeiten: `Timestamp::now()`,
+//!   [`platform::SystemClock`], `From<SystemTime>`/`Into<SystemTime>`-Konversionen,
+//!   `Inode::new`/`touch_modified`/`touch_changed` (die Varianten ohne
+//!   explizites `Timestamp`-Argument). Ohne dieses Feature ist die Crate
+//!   strikt `no_std + alloc` und verwendet durchgängig `*_at(now: Timestamp)`-APIs.
 //!
 //! ## Plattform-Abstraktionen
 //!
@@ -45,11 +43,7 @@
 extern crate alloc;
 
 pub mod platform;
-
-#[cfg(feature = "std")]
 pub mod config;
-
-#[cfg(feature = "std")]
 pub mod domain;
 
 /// Versions-String der `corefs-core`-Crate (aus `Cargo.toml`).

@@ -3,6 +3,7 @@
 
 use crate::config::CoreFsConfig;
 use crate::domain::acl::{AclEntry, Principal};
+use corefs_core::platform::Timestamp;
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::domain::metadata::FileMetadata;
 use crate::domain::snapshot::{Snapshot, SnapshotInode};
@@ -581,7 +582,7 @@ impl CoreFsService {
             id: self.next_snapshot_id,
             name: name.to_string(),
             scope_root: scope_root.to_string(),
-            created_at: SystemTime::now(),
+            created_at: Timestamp::now(),
             paths,
             file_data,
             inodes,
@@ -1285,7 +1286,7 @@ impl CoreFsService {
 
     /// Content of `path` at the latest version at or before `at`.
     /// Returns `None` if no version exists at or before that instant.
-    pub fn version_bytes_at(&self, path: &str, at: SystemTime) -> Option<Vec<u8>> {
+    pub fn version_bytes_at(&self, path: &str, at: Timestamp) -> Option<Vec<u8>> {
         self.versioning
             .version_at_or_before(path, at)
             .map(|v| v.bytes.clone())
@@ -1299,7 +1300,7 @@ impl CoreFsService {
     }
 
     /// `(version_id, created_at)` pairs for all versions of `path`, oldest first.
-    pub fn file_version_ids(&self, path: &str) -> Vec<(u64, SystemTime)> {
+    pub fn file_version_ids(&self, path: &str) -> Vec<(u64, Timestamp)> {
         self.versioning
             .list_versions(path)
             .iter()

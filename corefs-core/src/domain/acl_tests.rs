@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use alloc::string::ToString;
 
 #[test]
 fn full_access_grants_all_permissions() {

@@ -121,7 +121,7 @@ fn synthetic_state(files: usize, payload: usize) -> PersistedState {
         snapshots: Vec::new(),
         next_snapshot_id: 0,
     };
-    let now = std::time::SystemTime::UNIX_EPOCH;
+    let now = corefs_core::platform::Timestamp::EPOCH;
     for i in 0..files {
         let id = InodeId(1000 + i as u64);
         state.active_inodes.push(Inode {
