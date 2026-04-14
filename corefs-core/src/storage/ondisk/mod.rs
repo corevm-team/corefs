@@ -5,9 +5,13 @@
 //!
 //! Diese Untermodule bilden die `no_std`-fähige Basis der ODF-Schichten
 //! (Layout, Checksumme, Bitmap, Inodes, Extents, Superblock, Allokator,
-//! Journal, Fault-Injection, Tiering, …).  Komplexere Top-Level-Module
-//! (Volume, fsck, Native-Layout, Reader, Scrub, Session, …) verbleiben
-//! vorerst im main `corefs` crate.
+//! Journal, Fault-Injection, Tiering, …).  Die std-gebundenen Treiber
+//! (`volume`, `native`, `grouped`, `journaled`, `fsck_repair`, `reader`,
+//! `scrub`) sind hinter dem `std`-Feature verfügbar; sie verwenden
+//! `bincode` zur PersistedState-Serialisierung und `Timestamp::now`.
+//! Nur `session`, `concurrency`, `benchmark`, `resilience`, `stress`,
+//! `property` verbleiben im main `corefs` crate (std-gebundene
+//! Dateisystem-/Thread-/Zeit-Nutzung).
 
 pub mod allocator;
 pub mod attr_block;
