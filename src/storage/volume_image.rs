@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use crate::app::PersistedState;
 use crate::config::{CoreFsConfig, StorageTier};
 use crate::domain::acl::{AclEntry, Principal};

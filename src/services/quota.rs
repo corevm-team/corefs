@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Christian Möller
+// SPDX-License-Identifier: MIT
+
 use crate::config::QuotaPolicy;
 use crate::domain::inode::{Inode, InodeKind};
 use crate::error::{CoreFsError, CoreFsResult};

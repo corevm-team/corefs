@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use crate::domain::inode::InodeId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};

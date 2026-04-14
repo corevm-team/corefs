@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use crate::error::{CoreFsError, CoreFsResult};
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
 use std::io::{Read, Write};

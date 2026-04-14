@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use crate::error::{CoreFsError, CoreFsResult};
 use std::fmt;
 use std::path::{Path, PathBuf};

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Christian Möller
+// SPDX-License-Identifier: MIT
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

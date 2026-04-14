@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 pub mod allocator;
 pub mod block_device;
 pub mod block_store;

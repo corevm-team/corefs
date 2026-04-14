@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 //! On-demand sector-level I/O and device-resident journal.
 //!
 //! [`DeviceVolume`] wraps a [`BlockDevice`] and provides segment-level

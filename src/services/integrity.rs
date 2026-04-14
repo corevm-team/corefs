@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::error::CoreFsResult;
 use crate::services::compression::CompressionService;

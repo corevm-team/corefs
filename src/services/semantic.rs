@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Christian Möller
+// SPDX-License-Identifier: MIT
+
 use crate::domain::metadata::ContentClass;
 use std::collections::BTreeMap;
 

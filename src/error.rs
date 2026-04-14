@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use crate::config::CoreFsConfig;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;

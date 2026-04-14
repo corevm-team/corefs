@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Christian Möller
+// SPDX-License-Identifier: MIT
+
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::platform::linux_fuse::LinuxMountOptions;
 use crate::services::integrity::{ImageIntegrityReport, IntegrityService};

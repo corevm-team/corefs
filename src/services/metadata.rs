@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Christian Möller
+// SPDX-License-Identifier: MIT
+
 use crate::config::StorageTier;
 use crate::domain::inode::Inode;
 use crate::error::CoreFsResult;

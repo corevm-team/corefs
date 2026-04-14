@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Christian Möller
+// SPDX-License-Identifier: MIT
+
 use crate::config::{CoreFsConfig, StorageTier};
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::domain::snapshot::Snapshot;

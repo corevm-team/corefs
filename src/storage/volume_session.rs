@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Christian Möller
+// SPDX-License-Identifier: MIT
+
 use crate::app::CoreFsService;
 use crate::config::CoreFsConfig;
 use crate::error::{CoreFsError, CoreFsResult};

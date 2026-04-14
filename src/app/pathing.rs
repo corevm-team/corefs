@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Christian Möller
+// SPDX-License-Identifier: MIT
+
 use crate::error::{CoreFsError, CoreFsResult};
 
 pub(super) fn validate_path(path: &str) -> CoreFsResult<()> {

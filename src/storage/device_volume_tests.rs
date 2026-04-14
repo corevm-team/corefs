@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use super::*;
 use crate::app::CoreFsService;
 use crate::config::CoreFsConfig;

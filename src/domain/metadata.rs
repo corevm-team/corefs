@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use crate::config::StorageTier;
 use crate::domain::acl::AclEntry;
 use serde::{Deserialize, Serialize};

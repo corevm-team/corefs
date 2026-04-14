@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use crate::error::{CoreFsError, CoreFsResult};
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
 use chacha20poly1305::ChaCha20Poly1305;

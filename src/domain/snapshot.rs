@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use crate::domain::inode::InodeKind;
 use crate::domain::metadata::FileMetadata;
 use serde::{Deserialize, Serialize};

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use crate::config::CoreFsConfig;
 use crate::domain::acl::{AclEntry, Principal};
 use crate::domain::inode::{Inode, InodeId, InodeKind};

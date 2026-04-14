@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolRegistry {
     pub mkfs: String,

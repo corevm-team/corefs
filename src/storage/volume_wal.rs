@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use crate::app::CoreFsService;
 use crate::domain::inode::InodeId;
 use crate::error::CoreFsResult;

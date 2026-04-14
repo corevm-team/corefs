@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Mike Strathmann
+// SPDX-License-Identifier: MIT
+
 use super::*;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
