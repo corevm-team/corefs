@@ -486,14 +486,14 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 
 ### 5.8 AnyOS — Tool-Apps
 
-- [x] `anyos/bin/mkfs.corefs/` — wrappt `corefs_core::storage::ondisk::volume::format_device`; `--device --capacity [--label --inodes --journal-blocks --json]`
+- [x] `anyos/bin/mkfs.corefs/` — wrappt jetzt `OdfDeviceSession::format_new_at` (NATIVE-Mode direkt nach format); `--device --capacity [--label --inodes --journal-blocks --json]`
 - [x] `anyos/bin/fsck.corefs/` — wrappt `fsck::check` + optional `fsck_repair::repair`; strukturierte Severity-Berichte in Text + JSON; Exit-Code reflektiert clean/dirty
 - [x] `anyos/bin/corefs-dump/` — Subcommands `superblock` (via `volume::inspect`) und `inode <slot>` (via `OdfReader`); Text + JSON
 - [x] `anyos/bin/corefs-scrub/` — wrappt `scrub::run`; `--mode full|structural|read-only`; Data-Corruption- und Residual-Issues-Listen
-- [x] `anyos/bin/corefs-defrag/` — **Stub** (`ExitCode::Unsupported`): Defragmentierung hängt an `OdfDeviceSession` im std-gebundenen main `corefs` crate; CLI parst Args und prüft Device-Handle
-- [x] `anyos/bin/corefs-snapshot/` — **Stub** (`ExitCode::Unsupported`): list/create/delete/restore Subcommand-Dispatch vorhanden, blockiert auf `OdfDeviceSession`
-- [x] `anyos/bin/corefs-resize/` — **Stub** (`ExitCode::Unsupported`): grow/shrink Pfad noch nicht in `corefs-core`
-- [x] `anyos/bin/corefs-tier/` — **Stub** (`ExitCode::Unsupported`): promote/demote/status, blockiert auf `OdfDeviceSession`
+- [x] `anyos/bin/corefs-defrag/` — **funktional**: hydriert `OdfDeviceSession`, ruft `PersistedState::defragment_in_place()`, persistiert via `mutate`/flush. Reports moved_entries/reclaimed_gaps/final_device_blocks (Text+JSON).
+- [~] `anyos/bin/corefs-snapshot/` — **list/create/delete funktional**, restore noch deferred. `create` erfasst Inode-Metadaten (kind/size/timestamps/mode), `Snapshot.file_data` bleibt leer (`metadata_only: true` im Report) — Content-Capture braucht die std-gebundene `read_file`-Pipeline (decompress+decrypt). `restore` liefert weiterhin `ExitCode::Unsupported`.
+- [ ] `anyos/bin/corefs-resize/` — **Stub** (`ExitCode::Unsupported`): grow/shrink Pfad noch nicht in `corefs-core`
+- [ ] `anyos/bin/corefs-tier/` — **Stub** (`ExitCode::Unsupported`): promote/demote/status; benötigt `tier::migrate` und Hot+Cold-Device-Setup
 - [x] Gemeinsames Arg-Parsing-Hilfsmodul: `anyos/libs/libcorefs-tools/args.rs` — GNU-style long-option Parser (`--device 0`, `--capacity 16M`, `--json`) mit `_`-Digit-Separator und k/M/G/T-Multiplikatoren
 - [x] Einheitliche Report-Rendering-Routinen: `anyos/libs/libcorefs-tools/report.rs` — `Report`-Trait + handrolliger `JsonBuilder` (kein `serde_json`, `no_std+alloc`-fähig)
 - [x] Build-Integration: `anyos/cmake/UserPrograms.cmake` — Cargo-Package-Namen mit `_` (Cargo verbietet `.`), Sysroot-ELFs werden via `anyelf` nach `/System/sbin/mkfs.corefs`, `/System/sbin/fsck.corefs`, `/System/sbin/corefs-*` umbenannt
