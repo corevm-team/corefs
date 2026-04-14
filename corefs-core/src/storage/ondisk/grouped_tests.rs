@@ -2,18 +2,17 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::app::PersistedState;
 use crate::config::CoreFsConfig;
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::domain::metadata::FileMetadata;
 use crate::domain::volume::VolumeDescriptor;
+use crate::platform::Timestamp;
 use crate::services::journal::JournalRuntimeState;
 use crate::storage::block_device::MemoryDevice;
 use crate::storage::block_store::{AllocatorPolicy, BlockRecord};
 use crate::storage::ondisk::block_group::BlockGroupTable;
 use crate::storage::ondisk::layout::BLOCK_SIZE;
-use corefs_core::platform::Timestamp;
-use std::time::UNIX_EPOCH;
+use crate::storage::persisted_state::PersistedState;
 
 fn fresh_device(blocks: u64) -> MemoryDevice {
     MemoryDevice::new(blocks * BLOCK_SIZE, 4096).unwrap()
@@ -52,7 +51,7 @@ fn empty_state() -> PersistedState {
 }
 
 fn t(offset: u64) -> Timestamp {
-    (UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + offset)).into()
+    Timestamp::from_secs(1_700_000_000 + offset)
 }
 
 fn sample_inode(id: u64, path: &str, kind: InodeKind, size: usize) -> Inode {
@@ -148,7 +147,7 @@ fn populated_state_grouped_roundtrip() {
     assert_eq!(loaded.active_inodes.len(), 10);
     assert_eq!(loaded.block_records.len(), 10);
 
-    let contents: std::collections::HashMap<u64, &[u8]> = loaded
+    let contents: hashbrown::HashMap<u64, &[u8]> = loaded
         .block_records
         .iter()
         .map(|r| (r.inode.0, r.bytes.as_slice()))

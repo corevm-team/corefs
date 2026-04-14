@@ -35,12 +35,18 @@
 //! Existing single-group volumes created by [`super::volume::format_device`]
 //! are untouched.  The two paths coexist via the incompat flag.
 
-use crate::app::PersistedState;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::error::{CoreFsError, CoreFsResult};
+use crate::platform::Timestamp;
 use crate::storage::block_device::BlockDevice;
 use crate::storage::block_store::BlockRecord;
-use corefs_core::platform::Timestamp;
+use crate::storage::persisted_state::PersistedState;
+use hashbrown::HashMap;
 
 use super::attr_block::AttrBlock;
 use super::bitmap::Bitmap;
@@ -377,8 +383,8 @@ pub fn save_state_native_grouped(
     write_inode_at_slot(device, &sb, ANCILLARY_INODE_SLOT, &anc_inode)?;
 
     // Bytes-per-inode map.
-    let mut bytes_by_inode: std::collections::HashMap<InodeId, &[u8]> =
-        std::collections::HashMap::new();
+    let mut bytes_by_inode: HashMap<InodeId, &[u8]> =
+        HashMap::new();
     for rec in &state.block_records {
         bytes_by_inode.insert(rec.inode, rec.bytes.as_slice());
     }
