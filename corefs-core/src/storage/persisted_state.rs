@@ -78,6 +78,34 @@ impl PersistedState {
     pub fn empty(config: CoreFsConfig) -> Self {
         Self::empty_at(config, crate::platform::Timestamp::now())
     }
+
+    /// Defragmentiert den Block-Store-Anteil dieses `PersistedState` in-place.
+    ///
+    /// Konstruiert temporär einen [`crate::storage::block_store::BlockStore`]
+    /// aus den aktuellen `block_records`, `allocator_policy` und
+    /// `free_extents`, ruft [`crate::storage::block_store::BlockStore::defragment`]
+    /// auf und schreibt das defragmentierte Ergebnis zurück in den Zustand.
+    /// Liefert den Defragmentation-Report.
+    ///
+    /// no_std-fähig — der Aufrufer muss anschließend persistieren (z. B. via
+    /// [`crate::storage::ondisk::session::OdfDeviceSession::flush`]).
+    pub fn defragment_in_place(
+        &mut self,
+    ) -> crate::storage::block_store::DefragmentationReport {
+        use crate::storage::block_store::BlockStore;
+        let block_size = self.volume.block_size;
+        let mut store = BlockStore::from_records_with_allocator(
+            core::mem::take(&mut self.block_records),
+            block_size,
+            self.allocator_policy.clone(),
+            core::mem::take(&mut self.free_extents),
+        );
+        let report = store.defragment();
+        self.block_records = store.records();
+        self.allocator_policy = store.allocator_policy().clone();
+        self.free_extents = store.free_extents();
+        report
+    }
 }
 
 /// Vollständiger, persistierbarer Zustand eines CoreFS-Volumes.
@@ -165,6 +193,19 @@ mod tests {
         assert_eq!(state.next_snapshot_id, 0);
         assert_eq!(state.volume.name, "corefs");
         assert_eq!(state.volume.created_at, crate::platform::Timestamp::EPOCH);
+    }
+
+    #[test]
+    fn defragment_in_place_on_empty_state_is_noop() {
+        let mut state =
+            PersistedState::empty_at(CoreFsConfig::default(), crate::platform::Timestamp::EPOCH);
+        let report = state.defragment_in_place();
+        assert_eq!(report.moved_entries, 0);
+        assert_eq!(report.reclaimed_gaps, 0);
+        // `final_device_blocks` ist die Block-Belegung nach Defrag — auf einem
+        // leeren Volume entweder 0 oder konstant. Wir prüfen nur, dass
+        // anschließend kein Datenverlust (records leer) eingetreten ist.
+        assert!(state.block_records.is_empty());
     }
 
     #[test]
