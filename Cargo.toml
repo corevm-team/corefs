@@ -19,7 +19,7 @@ edition = { workspace = true }
 license = { workspace = true }
 
 [dependencies]
-corefs-core = { path = "corefs-core" }
+corefs-core = { path = "corefs-core", features = ["std"] }
 bincode = { workspace = true }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "getrandom"] }
 lz4_flex = { version = "0.11", default-features = false, features = ["frame"] }

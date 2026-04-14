@@ -395,29 +395,29 @@ Ziel: CoreFS als natives Dateisystem des eigenen Betriebssystems AnyOS (`/daten1
 
 ### 5.1 Workspace-Split in CoreFS
 
-- [ ] Cargo-Workspace in `corefs/` anlegen
-- [ ] Crate `corefs-core` (no_std + alloc) — reine FS-Logik: `domain/`, `storage/`, `services/`
+- [x] Cargo-Workspace in `corefs/` anlegen (root-Manifest mit `.` und `corefs-core` als Member; `[workspace.package]` und `[workspace.dependencies]` zentralisiert)
+- [~] Crate `corefs-core` (no_std + alloc) — reine FS-Logik: `domain/`, `storage/`, `services/` (Skelett vorhanden; `platform` strikt no_std+alloc; `domain` + `config` migriert, noch hinter `std`-Feature-Gate bis SystemTime → Timestamp-Migration abgeschlossen ist; `storage` + `services` noch im main crate)
 - [ ] Crate `corefs-tools` (no_std + alloc) — Operation-APIs: mkfs, fsck, repair, scrub, dump, defrag, resize, tier, snapshot
 - [ ] Crate `corefs-std` (std) — `FileImageDevice`, `RawBlockDevice`, std-Clock-/Rng-Impls, CLI-Helpers
 - [ ] Crate `corefs-fuse-proto` (no_std) — AnyOS-natives Wire-Format (`Request`/`Reply`-Enums, Encode/Decode via bincode)
 - [ ] Crate `corefs-fuse-adapter` (no_std) — plattformneutraler CoreFs ↔ Request/Reply-Adapter
 - [ ] Crate `corefs-cli` (std) — dünner Binary-Wrapper um `corefs-tools`
-- [ ] Existierender Linux-`fuser`-Pfad ([src/platform/linux_fuse.rs](src/platform/linux_fuse.rs)) bleibt funktional (parallel zu den neuen Crates)
-- [ ] Bestehende 636 Tests unverändert grün
+- [x] Existierender Linux-`fuser`-Pfad ([src/platform/linux_fuse.rs](src/platform/linux_fuse.rs)) bleibt funktional (unverändert weitergeführt)
+- [x] Bestehende 636 Tests unverändert grün (631 main + 12 corefs-core + 1 doctest)
 
 ### 5.2 no_std-Migration `corefs-core`
 
-- [ ] `#![no_std]` + `extern crate alloc` in `corefs-core`
-- [ ] `std::collections::{BTreeMap, HashMap}` → `alloc::collections::BTreeMap` / `hashbrown::HashMap`
-- [ ] `std::time::SystemTime` entfernen → eigener `Timestamp(u64)`-Typ (ns seit Epoch)
+- [x] `#![no_std]` + `extern crate alloc` in `corefs-core` (konditional über `cfg_attr(not(feature = "std"), no_std)`, zzgl. `forbid(unsafe_code)` und `warn(missing_docs)`)
+- [~] `std::collections::{BTreeMap, HashMap}` → `alloc::collections::BTreeMap` / `hashbrown::HashMap` (snapshot.rs umgestellt; weitere Stellen folgen mit der storage/services-Migration)
+- [ ] `std::time::SystemTime` entfernen → eigener `Timestamp(u64)`-Typ (ns seit Epoch) (Typ vorhanden in `platform::Timestamp`, Umstellung der Domain-Typen noch offen)
 - [ ] `std::path::PathBuf`/`Path` aus dem Kern entfernen — Kern arbeitet mit `&str`/`PathRef`; vollständige PathBuf-Nutzung nur in `corefs-std`/`corefs-cli`
 - [ ] `std::io::{Read, Write, Error}` → eigener `io`-Trait-Satz im Kern
-- [ ] Abhängigkeiten auf `default-features = false` umstellen (serde, bincode, lz4_flex, chacha20poly1305)
-- [ ] `trait Clock` + `trait Rng` als Plattform-Abstraktionen einführen
-- [ ] Feature `std` für std-Bequemlichkeiten (Display, Error-Trait) — Default = no_std
+- [~] Abhängigkeiten auf `default-features = false` umstellen (serde mit `default-features = false, features = ["derive", "alloc"]` bereits zentral; bincode/lz4_flex/chacha20poly1305 noch im main crate)
+- [x] `trait Clock` + `trait Rng` als Plattform-Abstraktionen einführen (siehe `corefs-core::platform`)
+- [x] Feature `std` für std-Bequemlichkeiten (Display, Error-Trait) — Default = no_std (umgesetzt; `From<SystemTime> for Timestamp` unter `std`-Feature)
 - [ ] CI-Build für Custom-Target `x86_64-anyos` (no_std) grün
-- [ ] CI-Build für `x86_64-unknown-linux-gnu` grün
-- [ ] Alle Tests auf Linux weiterhin grün
+- [~] CI-Build für `x86_64-unknown-linux-gnu` grün (lokal verifiziert; CI-Hook folgt)
+- [x] Alle Tests auf Linux weiterhin grün
 
 ### 5.3 Tool-Logik extrahieren nach `corefs-tools`
 

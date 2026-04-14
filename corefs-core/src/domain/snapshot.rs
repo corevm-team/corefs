@@ -3,8 +3,10 @@
 
 use crate::domain::inode::InodeKind;
 use crate::domain::metadata::FileMetadata;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 /// Per-path metadata captured at snapshot creation time.

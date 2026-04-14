@@ -118,8 +118,19 @@
 
 pub mod app;
 pub mod cli;
-pub mod config;
-pub mod domain;
+/// Re-export of the platform-neutral configuration schema.
+///
+/// The config types live in the [`corefs-core`](corefs_core) crate so that
+/// they can be consumed by AnyOS kernel and userspace components without
+/// linking the full `corefs` crate. This re-export preserves the historical
+/// `corefs::config::…` path for existing callers.
+pub use corefs_core::config;
+/// Re-export of the platform-neutral domain layer.
+///
+/// The domain types live in the [`corefs-core`](corefs_core) crate. This
+/// re-export preserves the historical `corefs::domain::…` path for existing
+/// callers.
+pub use corefs_core::domain;
 pub mod error;
 pub mod platform;
 pub mod services;
