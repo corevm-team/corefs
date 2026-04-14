@@ -120,10 +120,12 @@ pub fn save_state_native(
     let mut block_bitmap = Bitmap::new(geom.total_blocks);
     mark_reserved_blocks(&mut block_bitmap, &geom)?;
     let mut inode_bitmap = Bitmap::new(geom.inode_count);
-    // Reserve system inode slots 0..FIRST_USER_INODE_SLOT.
-    for i in 0..FIRST_USER_INODE_SLOT {
-        inode_bitmap.set(i)?;
-    }
+    // Reserve only the slots that carry real data — slot 0 (blob legacy)
+    // and slot 1 (ancillary).  Slots 2..FIRST_USER_INODE_SLOT stay free
+    // for future system inodes so fsck doesn't see "allocated but
+    // Unused" records.
+    inode_bitmap.set(0)?;
+    inode_bitmap.set(ANCILLARY_INODE_SLOT)?;
     let mut alloc = OndiskAllocator::new(
         &geom,
         block_bitmap,

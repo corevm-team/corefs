@@ -62,6 +62,7 @@ pub mod bitmap;
 pub mod checksum;
 pub mod dir_entry;
 pub mod extent_tree;
+pub mod fsck;
 pub mod inode;
 pub mod journal;
 pub mod layout;

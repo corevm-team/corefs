@@ -129,14 +129,19 @@ pub fn format_device(
     table[..super::inode::INODE_RECORD_SIZE].copy_from_slice(&sys_enc);
     write_blocks(device, geom.inode_table_start, &table)?;
 
-    // --- Journal region — zero fill ---------------------------------------
+    // --- Journal region ---------------------------------------------------
+    // Zero the whole region first, then lay down a fresh header so that
+    // Journal::open / fsck find a decodable empty journal.
     zero_fill_region(device, geom.journal_start, geom.journal_blocks)?;
 
-    // --- Superblock(s) ----------------------------------------------------
+    // --- Superblock(s) (written first so Journal::format can read them) ---
     let sb_block = sb.encode_block();
     write_block(device, PRIMARY_SUPERBLOCK_BLOCK, &sb_block)?;
     write_block(device, geom.tertiary_superblock_block, &sb_block)?;
     write_block(device, geom.secondary_superblock_block, &sb_block)?;
+
+    // Initialize the journal header.
+    super::journal::Journal::format(device, &sb)?;
 
     device.sync()?;
 
