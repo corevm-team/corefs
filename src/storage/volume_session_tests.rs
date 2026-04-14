@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use crate::domain::inode::InodeId;
 use crate::storage::volume_wal::{VolumeWal, WalOperation};
+use corefs_core::platform::Timestamp;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -47,7 +51,7 @@ fn reopen_recovers_pending_wal_before_loading_service() {
     fs.set_pending_wal(VolumeWal {
         transaction_id: 1,
         label: "rw-writeback".to_string(),
-        created_at: SystemTime::now(),
+        created_at: Timestamp::now(),
         operations: vec![
             WalOperation::CreateDirectory {
                 path: "/data".to_string(),

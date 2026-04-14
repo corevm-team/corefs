@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use crate::app::PersistedState;
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use corefs_core::platform::Timestamp;
 

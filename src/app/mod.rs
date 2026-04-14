@@ -109,25 +109,10 @@ pub struct DataExtent {
     pub length: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PersistedState {
-    pub config: CoreFsConfig,
-    pub volume: VolumeDescriptor,
-    pub clean_unmount: bool,
-    pub pending_wal: Option<VolumeWal>,
-    pub active_inodes: Vec<Inode>,
-    pub deleted_inodes: Vec<Inode>,
-    pub allocator_policy: AllocatorPolicy,
-    pub free_extents: Vec<FreeExtentRecord>,
-    pub hot_path_records: Vec<HotPathRecord>,
-    pub block_records: Vec<crate::storage::block_store::BlockRecord>,
-    pub journal_entries: Vec<crate::services::journal::JournalEntry>,
-    pub journal_runtime: JournalRuntimeState,
-    pub versions: Vec<crate::services::versioning::FileVersion>,
-    pub sync_statuses: Vec<crate::services::sync::SyncStatus>,
-    pub snapshots: Vec<Snapshot>,
-    pub next_snapshot_id: u64,
-}
+/// Re-export des plattformneutralen `PersistedState`-Aggregats aus
+/// [`corefs_core::storage::persisted_state`]. Bestehende Konsumenten
+/// erreichen den Typ unverändert über `crate::app::PersistedState`.
+pub use corefs_core::storage::persisted_state::PersistedState;
 
 #[derive(Debug)]
 pub struct CoreFsService {

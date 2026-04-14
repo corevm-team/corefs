@@ -15,6 +15,7 @@ CoreFS ist ein natives, plattformneutrales Dateisystem, entwickelt in **Rust** (
 | [block-devices.md](block-devices.md) | Block-Device-Workflow und Fake-Stick-Schutz |
 | [fuse-integration.md](fuse-integration.md) | Linux-FUSE-Adapter, Mount-Modi |
 | [snapshots-versioning.md](snapshots-versioning.md) | Snapshots, Versionierung, Time-Travel |
+| [deduplication.md](deduplication.md) | Inline-Dedup, expliziter Dedup-Pass, Ref-Counting |
 | [integrity-recovery.md](integrity-recovery.md) | Checksummen, Journal, fsck, Recovery |
 | [security.md](security.md) | Verschlüsselung, ACL, Quotas, Secure-Delete |
 | [performance.md](performance.md) | Benchmarking-Framework und Profile |

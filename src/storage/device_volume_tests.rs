@@ -8,7 +8,7 @@ use crate::domain::inode::InodeId;
 use crate::storage::block_device::MemoryDevice;
 use crate::storage::volume_image;
 use crate::storage::volume_wal::{VolumeWal, WalOperation};
-use std::time::SystemTime;
+use corefs_core::platform::Timestamp;
 
 fn format_device(capacity: u64) -> Box<MemoryDevice> {
     let mut dev = Box::new(MemoryDevice::new(capacity, 4096).unwrap());
@@ -272,7 +272,7 @@ fn make_test_wal() -> VolumeWal {
     VolumeWal {
         transaction_id: 42,
         label: "test-wal".to_string(),
-        created_at: SystemTime::now(),
+        created_at: Timestamp::now(),
         operations: vec![
             WalOperation::CreateDirectory {
                 path: "/test".to_string(),

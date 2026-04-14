@@ -1,75 +1,30 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+//! Volume-WAL — Service-bound Replay-Pfad.
+//!
+//! Die Datentypen [`VolumeWal`] und [`WalOperation`] leben jetzt in
+//! [`corefs_core::storage::volume_wal`] (no_std + alloc) und werden hier
+//! transparent re-exportiert. In dieser Datei verbleibt nur die
+//! [`apply_operation`]-Funktion, die einen WAL-Eintrag gegen einen laufenden
+//! [`CoreFsService`] zurückspielt — sie ist std-/Service-gebunden und
+//! gehört nicht in den plattformneutralen Kern.
+
+pub use corefs_core::storage::volume_wal::{VolumeWal, WalOperation};
+
 use crate::app::CoreFsService;
-use crate::domain::inode::InodeId;
 use crate::error::CoreFsResult;
-use serde::{Deserialize, Serialize};
-use std::time::SystemTime;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WalOperation {
-    CreateFile {
-        path: String,
-        inode: InodeId,
-    },
-    CreateDirectory {
-        path: String,
-        inode: InodeId,
-    },
-    PatchExtent {
-        inode: InodeId,
-        device_block: u64,
-        block_offset: usize,
-        inode_offset: usize,
-        bytes: Vec<u8>,
-        final_len: usize,
-    },
-    TruncateInode {
-        inode: InodeId,
-        size: usize,
-    },
-    DeletePath {
-        path: String,
-    },
-    RenamePath {
-        from: String,
-        to: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VolumeWal {
-    pub transaction_id: u64,
-    pub label: String,
-    pub created_at: SystemTime,
-    pub operations: Vec<WalOperation>,
-}
-
-impl VolumeWal {
-    pub fn new(transaction_id: u64, label: impl Into<String>) -> Self {
-        Self {
-            transaction_id,
-            label: label.into(),
-            created_at: SystemTime::now(),
-            operations: Vec::new(),
-        }
-    }
-
-    pub fn push(&mut self, operation: WalOperation) {
-        self.operations.push(operation);
-    }
-}
-
+/// Spielt eine einzelne [`WalOperation`] gegen den laufenden Service zurück.
 pub fn apply_operation(service: &mut CoreFsService, operation: &WalOperation) -> CoreFsResult<()> {
     match operation {
         WalOperation::CreateFile { path, inode } => {
-            if service.get_inode(&path).is_none() {
+            if service.get_inode(path).is_none() {
                 service.create_file_with_inode(path, b"", &[], *inode)?;
             }
         }
         WalOperation::CreateDirectory { path, inode } => {
-            if service.get_inode(&path).is_none() {
+            if service.get_inode(path).is_none() {
                 service.create_directory_with_inode(path, *inode)?;
             }
         }

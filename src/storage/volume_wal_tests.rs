@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use crate::app::CoreFsService;
 use crate::config::CoreFsConfig;
+use crate::domain::inode::InodeId;
+use corefs_core::platform::Timestamp;
 
 #[test]
 fn wal_operations_apply_to_service() {
@@ -10,7 +13,7 @@ fn wal_operations_apply_to_service() {
     let wal = VolumeWal {
         transaction_id: 1,
         label: "rw-writeback".to_string(),
-        created_at: SystemTime::now(),
+        created_at: Timestamp::now(),
         operations: vec![
             WalOperation::CreateDirectory {
                 path: "/data".to_string(),
