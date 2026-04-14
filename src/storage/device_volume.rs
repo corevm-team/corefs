@@ -19,7 +19,7 @@ use std::collections::HashMap;
 // ---------------------------------------------------------------------------
 
 const MAGIC: &[u8; 8] = b"COREFS01";
-const FORMAT_VERSION: u32 = 6;
+const FORMAT_VERSION: u32 = 7;
 const HEADER_SIZE: usize = 16;
 const SEGMENT_ENTRY_SIZE: usize = 24;
 const SEGMENT_ALIGNMENT: usize = 64;

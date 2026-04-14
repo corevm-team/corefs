@@ -149,6 +149,7 @@ fn reconcile_persisted_state_normalizes_entries_and_blocks() {
             created_at: SystemTime::now(),
             paths: vec!["/".to_string()],
             file_data: std::collections::BTreeMap::new(),
+            inodes: std::collections::BTreeMap::new(),
         }],
         next_snapshot_id: 0,
     };

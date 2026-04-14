@@ -3,7 +3,7 @@ use crate::config::{CoreFsConfig, StorageTier};
 use crate::domain::acl::{AclEntry, Principal};
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::domain::metadata::{ContentClass, FileMetadata};
-use crate::domain::snapshot::Snapshot;
+use crate::domain::snapshot::{Snapshot, SnapshotInode};
 use crate::domain::volume::VolumeDescriptor;
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::services::hot_paths::HotPathRecord;
@@ -20,7 +20,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAGIC: &[u8; 8] = b"COREFS01";
-const FORMAT_VERSION: u32 = 6;
+const FORMAT_VERSION: u32 = 7;
 const SEGMENT_ALIGNMENT: usize = 64;
 const SEGMENT_ENTRY_SIZE: usize = 24;
 const HEADER_SIZE: usize = 16;
@@ -759,8 +759,57 @@ fn encode_snapshot_payload(segment: &SnapshotSegment) -> Result<Vec<u8>, String>
             push_string(&mut bytes, path)?;
             push_blob(&mut bytes, data)?;
         }
+        // inodes: per-path metadata snapshot.
+        push_u32(&mut bytes, snapshot.inodes.len() as u32);
+        for (path, snap_inode) in &snapshot.inodes {
+            push_string(&mut bytes, path)?;
+            push_snapshot_inode(&mut bytes, snap_inode)?;
+        }
     }
     Ok(bytes)
+}
+
+fn push_snapshot_inode(
+    bytes: &mut Vec<u8>,
+    snap_inode: &SnapshotInode,
+) -> Result<(), String> {
+    push_u8(bytes, encode_inode_kind(snap_inode.kind));
+    push_u64(bytes, snap_inode.size as u64);
+    push_system_time(bytes, snap_inode.created_at)?;
+    push_system_time(bytes, snap_inode.modified_at)?;
+    push_system_time(bytes, snap_inode.changed_at)?;
+    push_metadata(bytes, &snap_inode.metadata)?;
+    match &snap_inode.symlink_target {
+        Some(target) => {
+            push_u8(bytes, 1);
+            push_string(bytes, target)?;
+        }
+        None => push_u8(bytes, 0),
+    }
+    Ok(())
+}
+
+fn read_snapshot_inode(bytes: &[u8], cursor: &mut usize) -> Result<SnapshotInode, String> {
+    let kind = decode_inode_kind(read_u8(bytes, cursor)?)?;
+    let size = read_u64(bytes, cursor)? as usize;
+    let created_at = read_system_time(bytes, cursor)?;
+    let modified_at = read_system_time(bytes, cursor)?;
+    let changed_at = read_system_time(bytes, cursor)?;
+    let metadata = read_metadata(bytes, cursor)?;
+    let symlink_target = match read_u8(bytes, cursor)? {
+        0 => None,
+        1 => Some(read_string(bytes, cursor)?),
+        other => return Err(format!("invalid symlink_target tag: {other}")),
+    };
+    Ok(SnapshotInode {
+        kind,
+        size,
+        created_at,
+        modified_at,
+        changed_at,
+        metadata,
+        symlink_target,
+    })
 }
 
 fn decode_snapshot_payload(bytes: &[u8]) -> Result<SnapshotSegment, String> {
@@ -786,6 +835,14 @@ fn decode_snapshot_payload(bytes: &[u8]) -> Result<SnapshotSegment, String> {
             let value = read_blob(bytes, &mut cursor)?;
             file_data.insert(key, value);
         }
+        // inodes: per-path metadata snapshot.
+        let inodes_count = read_u32(bytes, &mut cursor)? as usize;
+        let mut inodes = std::collections::BTreeMap::new();
+        for _ in 0..inodes_count {
+            let key = read_string(bytes, &mut cursor)?;
+            let snap_inode = read_snapshot_inode(bytes, &mut cursor)?;
+            inodes.insert(key, snap_inode);
+        }
         snapshots.push(Snapshot {
             id,
             name,
@@ -793,6 +850,7 @@ fn decode_snapshot_payload(bytes: &[u8]) -> Result<SnapshotSegment, String> {
             created_at,
             paths,
             file_data,
+            inodes,
         });
     }
     ensure_consumed(bytes, cursor)?;

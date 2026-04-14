@@ -2,7 +2,7 @@ use crate::config::CoreFsConfig;
 use crate::domain::acl::{AclEntry, Principal};
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::domain::metadata::FileMetadata;
-use crate::domain::snapshot::Snapshot;
+use crate::domain::snapshot::{Snapshot, SnapshotInode};
 use crate::domain::volume::VolumeDescriptor;
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::platform::runtime::RuntimeIntegrationBlueprint;
@@ -530,16 +530,46 @@ impl CoreFsService {
                 .collect()
         };
 
-        // Capture uncompressed content for every regular file inside the scope.
+        // Capture uncompressed content for every regular file inside the scope
+        // and full per-path metadata (including symlink targets).
         let mut file_data: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut inodes: BTreeMap<String, SnapshotInode> = BTreeMap::new();
         for path in &paths {
-            let is_file = self
-                .catalog
-                .get(path)
-                .is_some_and(|i| i.kind == InodeKind::File);
-            if is_file {
-                if let Ok(bytes) = self.read_file(path) {
-                    file_data.insert(path.clone(), bytes);
+            let Some(inode) = self.catalog.get(path) else {
+                continue;
+            };
+            let kind = inode.kind;
+            let snap_inode = SnapshotInode {
+                kind,
+                size: inode.size,
+                created_at: inode.created_at,
+                modified_at: inode.modified_at,
+                changed_at: inode.changed_at,
+                metadata: inode.metadata.clone(),
+                symlink_target: None,
+            };
+            match kind {
+                InodeKind::File => {
+                    if let Ok(bytes) = self.read_file(path) {
+                        file_data.insert(path.clone(), bytes);
+                    }
+                    inodes.insert(path.clone(), snap_inode);
+                }
+                InodeKind::Symlink => {
+                    let target = self
+                        .read_file(path)
+                        .ok()
+                        .map(|b| String::from_utf8_lossy(&b).into_owned());
+                    inodes.insert(
+                        path.clone(),
+                        SnapshotInode {
+                            symlink_target: target,
+                            ..snap_inode
+                        },
+                    );
+                }
+                InodeKind::Directory => {
+                    inodes.insert(path.clone(), snap_inode);
                 }
             }
         }
@@ -551,6 +581,7 @@ impl CoreFsService {
             created_at: SystemTime::now(),
             paths,
             file_data,
+            inodes,
         };
         self.journal.record(
             "snapshot",
@@ -583,6 +614,28 @@ impl CoreFsService {
             format!("id={snapshot_id} name={}", snapshot.name),
         );
         Ok(())
+    }
+
+    /// Returns the historical metadata captured for `path` in snapshot
+    /// `snapshot_id`, if the path existed at snapshot time.
+    ///
+    /// Lets callers inspect how an entry looked in the past — mode, uid, gid,
+    /// timestamps, ACLs, tags, xattrs, symlink target — without performing a
+    /// full restore.
+    pub fn snapshot_inode(
+        &self,
+        snapshot_id: u64,
+        path: &str,
+    ) -> CoreFsResult<&SnapshotInode> {
+        let snapshot = self
+            .snapshots
+            .iter()
+            .find(|s| s.id == snapshot_id)
+            .ok_or_else(|| CoreFsError::NotFound(format!("snapshot {snapshot_id} not found")))?;
+        snapshot
+            .inodes
+            .get(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path {path} not in snapshot")))
     }
 
     /// Restores the filesystem to the state recorded in snapshot `snapshot_id`.

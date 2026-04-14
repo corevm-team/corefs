@@ -547,6 +547,40 @@ fn snapshot_captures_file_data_at_creation_time() {
 }
 
 #[test]
+fn snapshot_captures_historical_metadata() {
+    let mut fs = CoreFsService::format(CoreFsConfig::default());
+    fs.create_file("/doc.txt", b"hi", &[]).expect("file");
+    fs.set_mode("/doc.txt", 0o640).expect("chmod");
+    fs.create_directory("/dir").expect("mkdir");
+    fs.create_symlink("/link", "/doc.txt").expect("symlink");
+
+    let snap_id = fs.create_snapshot("meta").id;
+
+    // Mutate metadata after the snapshot.
+    fs.set_mode("/doc.txt", 0o600).expect("chmod");
+
+    let file_meta = fs
+        .snapshot_inode(snap_id, "/doc.txt")
+        .expect("file entry in snapshot");
+    assert_eq!(file_meta.kind, crate::domain::inode::InodeKind::File);
+    assert_eq!(
+        file_meta.metadata.mode, 0o640,
+        "historical mode must be preserved even after chmod"
+    );
+
+    let dir_meta = fs
+        .snapshot_inode(snap_id, "/dir")
+        .expect("dir entry in snapshot");
+    assert_eq!(dir_meta.kind, crate::domain::inode::InodeKind::Directory);
+
+    let link_meta = fs
+        .snapshot_inode(snap_id, "/link")
+        .expect("symlink entry in snapshot");
+    assert_eq!(link_meta.kind, crate::domain::inode::InodeKind::Symlink);
+    assert_eq!(link_meta.symlink_target.as_deref(), Some("/doc.txt"));
+}
+
+#[test]
 fn snapshot_captures_uncompressed_bytes_for_compressed_files() {
     let config = CoreFsConfig {
         performance: crate::config::PerformancePolicy {

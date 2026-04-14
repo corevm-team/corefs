@@ -42,6 +42,7 @@ fn sample_state() -> PersistedState {
             created_at: SystemTime::now(),
             paths: vec!["/".to_string()],
             file_data: std::collections::BTreeMap::new(),
+            inodes: std::collections::BTreeMap::new(),
         }],
         next_snapshot_id: 1,
     }
@@ -69,7 +70,7 @@ fn fsck_image_reports_valid_volume_image() {
 
     let report = service.fsck_image(&path).expect("fsck should succeed");
 
-    assert_eq!(report.format_version, 6);
+    assert_eq!(report.format_version, 7);
     assert_eq!(report.segment_count, 15);
     assert_eq!(report.valid_superblocks, 2);
     assert!(report.directory_checksum_valid);

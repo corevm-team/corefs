@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `322/322` Tests erfolgreich  
+**Test-Status:** `323/323` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -54,7 +54,7 @@
 - integriertes Pending-WAL im Volume-Image fuer RW-Sessions
 - extent- und device-blockadressierte WAL-Records ueber `inode + device_block + block_offset + inode_offset` fuer partielle File-Patches und Truncates
 - automatische Versionierung im Basismodell
-- Snapshot-Erzeugung
+- Snapshot-Erzeugung mit historischer Metadaten-Erfassung (Kind, Groesse, Timestamps, Mode/UID/GID, ACLs, Tags, xattrs, Symlink-Ziele) pro Pfad und Accessor `snapshot_inode`
 - Recoverable Delete und Secure Delete
 - einfache Integritätsprüfung per Checksummen
 - Scrubbing über vorhandene Datenblöcke
