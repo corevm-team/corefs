@@ -1,0 +1,15 @@
+[package]
+name = "corefs-core"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+description = "CoreFS core — plattformneutrale, no_std-fähige Domain- und Storage-Logik für das CoreFS-Dateisystem."
+
+[features]
+default = []
+# `std` aktiviert std-Bequemlichkeiten (Display, std::error::Error-Impls, From-Konvertierungen von std::time::SystemTime, …).
+# Ohne `std` ist die Crate `no_std + alloc` und kann im AnyOS-Kernel gelinkt werden.
+std = []
+
+[dependencies]
+serde = { workspace = true }
