@@ -217,7 +217,11 @@ pub fn check(device: &dyn BlockDevice) -> CoreFsResult<FsckReport> {
     // --- Walk every allocated inode slot -----------------------------------
     let mut blocks_owners: HashMap<u64, u64> = HashMap::new(); // block -> slot
     let mut kinds_seen: BTreeMap<u16, u64> = BTreeMap::new();
-    let start_slot = if sb.layout_mode == LAYOUT_MODE_NATIVE { 0u64 } else { 0u64 };
+    let start_slot = if sb.layout_mode == LAYOUT_MODE_NATIVE {
+        0u64
+    } else {
+        0u64
+    };
     for slot in start_slot..geom.inode_count {
         let set = inode_bitmap.is_set(slot)?;
         if !set {
@@ -226,19 +230,18 @@ pub fn check(device: &dyn BlockDevice) -> CoreFsResult<FsckReport> {
         report.inodes_checked += 1;
         let (block, offset) = geom.inode_record_location(slot)?;
         let raw = device.read_at(block * BLOCK_SIZE, BLOCK_SIZE)?;
-        let rec = match OnDiskInode::decode(
-            &raw[offset as usize..offset as usize + INODE_RECORD_SIZE],
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                report.issues.push(FsckIssue {
-                    severity: Severity::Error,
-                    code: "ODF.INODE.DECODE",
-                    message: format!("slot {slot} inode record undecodable: {e}"),
-                });
-                continue;
-            }
-        };
+        let rec =
+            match OnDiskInode::decode(&raw[offset as usize..offset as usize + INODE_RECORD_SIZE]) {
+                Ok(r) => r,
+                Err(e) => {
+                    report.issues.push(FsckIssue {
+                        severity: Severity::Error,
+                        code: "ODF.INODE.DECODE",
+                        message: format!("slot {slot} inode record undecodable: {e}"),
+                    });
+                    continue;
+                }
+            };
         if rec.kind == OnDiskKind::Unused {
             report.issues.push(FsckIssue {
                 severity: Severity::Error,
@@ -311,10 +314,7 @@ pub fn check(device: &dyn BlockDevice) -> CoreFsResult<FsckReport> {
                     report.issues.push(FsckIssue {
                         severity: Severity::Error,
                         code: "ODF.INODE.EXTENT_OUT_OF_RANGE",
-                        message: format!(
-                            "slot {slot} extent block {} outside data region",
-                            b
-                        ),
+                        message: format!("slot {slot} extent block {} outside data region", b),
                     });
                     continue;
                 }
@@ -368,10 +368,7 @@ pub fn check(device: &dyn BlockDevice) -> CoreFsResult<FsckReport> {
     Ok(report)
 }
 
-fn read_superblock_at(
-    device: &dyn BlockDevice,
-    block: u64,
-) -> CoreFsResult<Superblock> {
+fn read_superblock_at(device: &dyn BlockDevice, block: u64) -> CoreFsResult<Superblock> {
     let buf = device.read_at(block * BLOCK_SIZE, BLOCK_SIZE)?;
     Superblock::decode_block(&buf)
 }

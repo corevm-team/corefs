@@ -9,8 +9,11 @@ fn default_config_runs_cleanly() {
     let result = run_odf_bench(cfg).unwrap();
     assert_eq!(result.files_populated, cfg.file_count);
     // Every phase must complete (Duration::is_zero allowed but not negative).
-    let _ = result.format + result.blob_save + result.blob_load
-        + result.native_save + result.native_load;
+    let _ = result.format
+        + result.blob_save
+        + result.blob_load
+        + result.native_save
+        + result.native_load;
 }
 
 #[test]

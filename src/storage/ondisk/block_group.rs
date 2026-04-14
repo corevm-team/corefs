@@ -179,9 +179,9 @@ impl BlockGroupTable {
     /// Index of the group that owns `data_block`, or `None` if the
     /// block is outside every group's range.
     pub fn group_for_block(&self, data_block: u64) -> Option<usize> {
-        self.groups.iter().position(|g| {
-            data_block >= g.data_start && data_block < g.data_start + g.data_blocks
-        })
+        self.groups
+            .iter()
+            .position(|g| data_block >= g.data_start && data_block < g.data_start + g.data_blocks)
     }
 }
 

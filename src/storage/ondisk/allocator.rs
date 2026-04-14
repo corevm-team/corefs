@@ -164,10 +164,7 @@ impl OndiskAllocator {
 
     /// Current free-data-block count.
     pub fn free_data_blocks(&self) -> u64 {
-        let used = self
-            .block_bitmap
-            .popcount()
-            .saturating_sub(self.data_start);
+        let used = self.block_bitmap.popcount().saturating_sub(self.data_start);
         (self.total_blocks - self.data_start).saturating_sub(used)
     }
 

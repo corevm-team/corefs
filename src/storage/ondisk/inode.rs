@@ -246,10 +246,8 @@ impl OnDiskInode {
         let mut off = 88usize;
         for _ in 0..extent_count {
             let physical_block = u64::from_le_bytes(rec[off..off + 8].try_into().unwrap());
-            let logical_block =
-                u32::from_le_bytes(rec[off + 8..off + 12].try_into().unwrap());
-            let length_blocks =
-                u32::from_le_bytes(rec[off + 12..off + 16].try_into().unwrap());
+            let logical_block = u32::from_le_bytes(rec[off + 8..off + 12].try_into().unwrap());
+            let length_blocks = u32::from_le_bytes(rec[off + 12..off + 16].try_into().unwrap());
             extents.push(Extent {
                 logical_block,
                 length_blocks,

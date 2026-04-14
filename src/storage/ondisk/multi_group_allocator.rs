@@ -96,12 +96,15 @@ impl MultiGroupAllocator {
         if ext.length_blocks == 0 {
             return Ok(());
         }
-        let group = self.table.group_for_block(ext.physical_block).ok_or_else(|| {
-            CoreFsError::InvalidInput(format!(
-                "free_extent: block {} belongs to no group",
-                ext.physical_block
-            ))
-        })?;
+        let group = self
+            .table
+            .group_for_block(ext.physical_block)
+            .ok_or_else(|| {
+                CoreFsError::InvalidInput(format!(
+                    "free_extent: block {} belongs to no group",
+                    ext.physical_block
+                ))
+            })?;
         let g = &self.table.groups[group];
         let bm = &mut self.group_bitmaps[group];
         for i in 0..u64::from(ext.length_blocks) {

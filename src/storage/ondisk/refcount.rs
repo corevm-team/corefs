@@ -216,8 +216,7 @@ impl RefCountTable {
         for block_idx in 0..blocks {
             let start = block_idx * BLOCK_SIZE as usize;
             let block = &bytes[start..start + BLOCK_SIZE as usize];
-            let stored =
-                u32::from_le_bytes(block[CRC_OFFSET..CRC_OFFSET + 4].try_into().unwrap());
+            let stored = u32::from_le_bytes(block[CRC_OFFSET..CRC_OFFSET + 4].try_into().unwrap());
             let mut zeroed = block.to_vec();
             zeroed[CRC_OFFSET..CRC_OFFSET + 4].fill(0);
             let expected = Crc32c::hash(&zeroed);
@@ -311,8 +310,8 @@ impl BlockSharing {
     ///   refcounts are decremented (releasing any blocks that were
     ///   only referenced by the writer).
     pub fn cow_write(&mut self, ext: Extent) -> CoreFsResult<CowOutcome> {
-        let exclusive = (0..u64::from(ext.length_blocks))
-            .all(|i| self.table.get(ext.physical_block + i) == 1);
+        let exclusive =
+            (0..u64::from(ext.length_blocks)).all(|i| self.table.get(ext.physical_block + i) == 1);
         if exclusive {
             return Ok(CowOutcome::InPlace);
         }

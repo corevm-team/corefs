@@ -50,10 +50,7 @@ pub struct RepairReport {
 /// Apply every auto-fixable repair hinted at by `report` as a single
 /// journaled transaction against `device`.  No-op if the report is
 /// already clean.
-pub fn repair(
-    device: &mut dyn BlockDevice,
-    report: &FsckReport,
-) -> CoreFsResult<RepairReport> {
+pub fn repair(device: &mut dyn BlockDevice, report: &FsckReport) -> CoreFsResult<RepairReport> {
     // Filter issues worth acting on.
     let actionable: Vec<&FsckIssue> = report
         .issues

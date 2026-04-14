@@ -3,7 +3,13 @@
 
 use super::*;
 
-fn g(start: u64, len: u64, bitmap: u64, inode_start: u64, inode_count: u64) -> BlockGroupDescriptor {
+fn g(
+    start: u64,
+    len: u64,
+    bitmap: u64,
+    inode_start: u64,
+    inode_count: u64,
+) -> BlockGroupDescriptor {
     BlockGroupDescriptor {
         data_start: start,
         data_blocks: len,
@@ -56,7 +62,15 @@ fn overlapping_groups_rejected() {
 #[test]
 fn too_many_groups_rejected() {
     let groups: Vec<_> = (0..MAX_GROUPS_PER_TABLE + 1)
-        .map(|i| g((i as u64 + 1) * 2000, 999, (i as u64 + 1) * 2000 - 1, i as u64 * 256, 256))
+        .map(|i| {
+            g(
+                (i as u64 + 1) * 2000,
+                999,
+                (i as u64 + 1) * 2000 - 1,
+                i as u64 * 256,
+                256,
+            )
+        })
         .collect();
     assert!(BlockGroupTable::new(groups).is_err());
 }

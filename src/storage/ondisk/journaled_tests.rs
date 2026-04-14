@@ -29,13 +29,13 @@ fn sample_metadata_block() -> Vec<u8> {
 fn commit_applies_metadata_ops() {
     let mut dev = formatted_device();
     let sb_bytes = dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap();
-    let sb =
-        crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();
+    let sb = crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();
     let target_block = sb.data_start;
     let payload = sample_metadata_block();
 
     let mut sess = JournaledSaveSession::open(&mut dev).unwrap();
-    sess.stage_metadata_block(target_block, payload.clone()).unwrap();
+    sess.stage_metadata_block(target_block, payload.clone())
+        .unwrap();
     let report = sess.commit().unwrap();
     assert_eq!(report.ops_applied, 1);
     let read_back = dev.read_at(target_block * BLOCK_SIZE, BLOCK_SIZE).unwrap();
@@ -76,7 +76,8 @@ fn crash_between_commit_and_apply_is_recovered_by_replay() {
 
     // Phase A: open session, stage metadata op, commit but DO NOT apply.
     let mut sess = JournaledSaveSession::open(&mut dev).unwrap();
-    sess.stage_metadata_block(target, new_content.clone()).unwrap();
+    sess.stage_metadata_block(target, new_content.clone())
+        .unwrap();
     let txn = sess.commit_without_apply().unwrap();
     assert_eq!(txn, 1);
 
@@ -143,10 +144,8 @@ fn stage_inode_update_writes_exact_record() {
 
     let (block, offset) = geom.inode_record_location(slot).unwrap();
     let buf = dev.read_at(block * BLOCK_SIZE, BLOCK_SIZE).unwrap();
-    let read_inode = OnDiskInode::decode(
-        &buf[offset as usize..offset as usize + INODE_RECORD_SIZE],
-    )
-    .unwrap();
+    let read_inode =
+        OnDiskInode::decode(&buf[offset as usize..offset as usize + INODE_RECORD_SIZE]).unwrap();
     assert_eq!(read_inode.domain_inode_id, 9001);
     assert_eq!(read_inode.size_bytes, 42);
 }
@@ -183,11 +182,13 @@ fn multiple_sessions_each_get_their_own_txn_id() {
     let b2 = sb.data_start + 1;
 
     let mut s1 = JournaledSaveSession::open(&mut dev).unwrap();
-    s1.stage_metadata_block(b1, sample_metadata_block()).unwrap();
+    s1.stage_metadata_block(b1, sample_metadata_block())
+        .unwrap();
     let r1 = s1.commit().unwrap();
 
     let mut s2 = JournaledSaveSession::open(&mut dev).unwrap();
-    s2.stage_metadata_block(b2, sample_metadata_block()).unwrap();
+    s2.stage_metadata_block(b2, sample_metadata_block())
+        .unwrap();
     let r2 = s2.commit().unwrap();
 
     assert!(r2.txn_id > r1.txn_id);

@@ -175,7 +175,8 @@ impl DeviceVolume {
         // are small, so this is fast.  The DATA segment is only rewritten if
         // it was modified (i.e., if block data changed).
 
-        let mut all_segments: Vec<([u8; 4], Vec<u8>)> = Vec::with_capacity(self.index.segment_count);
+        let mut all_segments: Vec<([u8; 4], Vec<u8>)> =
+            Vec::with_capacity(self.index.segment_count);
 
         for loc in &self.index.segments {
             let kind = loc.kind;
@@ -237,7 +238,7 @@ impl DeviceVolume {
         // Build superblock.
         let superblock_bytes = encode_superblock(
             segment_count as u32,
-            true,  // clean_unmount
+            true, // clean_unmount
             directory_offset as u64,
             directory_length as u64,
             directory_checksum,
@@ -279,10 +280,7 @@ impl DeviceVolume {
             segments: entries,
             image_end: padded_size as u64,
         };
-        self.journal_offset = align_up_u64(
-            self.index.image_end,
-            self.device.sector_size() as u64,
-        );
+        self.journal_offset = align_up_u64(self.index.image_end, self.device.sector_size() as u64);
 
         // Repopulate cache from the written data.
         self.read_cache.clear();
@@ -399,18 +397,10 @@ impl DeviceJournal {
         }
 
         // Parse header.
-        let entry_count = u32::from_le_bytes(
-            header_sector[8..12].try_into().expect("fixed"),
-        );
-        let generation = u64::from_le_bytes(
-            header_sector[12..20].try_into().expect("fixed"),
-        );
-        let entries_checksum = u64::from_le_bytes(
-            header_sector[20..28].try_into().expect("fixed"),
-        );
-        let payload_length = u64::from_le_bytes(
-            header_sector[28..36].try_into().expect("fixed"),
-        );
+        let entry_count = u32::from_le_bytes(header_sector[8..12].try_into().expect("fixed"));
+        let generation = u64::from_le_bytes(header_sector[12..20].try_into().expect("fixed"));
+        let entries_checksum = u64::from_le_bytes(header_sector[20..28].try_into().expect("fixed"));
+        let payload_length = u64::from_le_bytes(header_sector[28..36].try_into().expect("fixed"));
 
         if entry_count == 0 || payload_length == 0 {
             return Ok(Self {
@@ -451,8 +441,7 @@ impl DeviceJournal {
 
         // Deserialize from the actual payload bytes (before padding).
         let deserialize_len = (payload_length as usize).min(payload_bytes.len());
-        let wal: Option<VolumeWal> =
-            bincode::deserialize(&payload_bytes[..deserialize_len]).ok();
+        let wal: Option<VolumeWal> = bincode::deserialize(&payload_bytes[..deserialize_len]).ok();
 
         Ok(Self {
             offset: aligned_offset,
@@ -492,11 +481,7 @@ impl DeviceJournal {
     /// The write is followed by `fdatasync()` to ensure the journal is
     /// durable before returning.  This guarantees that on crash recovery,
     /// either the full journal entry is present or none of it is.
-    pub fn commit(
-        &mut self,
-        device: &mut dyn BlockDevice,
-        wal: &VolumeWal,
-    ) -> CoreFsResult<()> {
+    pub fn commit(&mut self, device: &mut dyn BlockDevice, wal: &VolumeWal) -> CoreFsResult<()> {
         if self.size == 0 {
             return Err(CoreFsError::State(
                 "device journal region has no space".to_string(),
@@ -504,12 +489,10 @@ impl DeviceJournal {
         }
 
         let sector_size = device.sector_size() as u64;
-        let payload_bytes = bincode::serialize(wal).map_err(|e| {
-            CoreFsError::State(format!("failed to serialize journal entry: {e}"))
-        })?;
+        let payload_bytes = bincode::serialize(wal)
+            .map_err(|e| CoreFsError::State(format!("failed to serialize journal entry: {e}")))?;
 
-        let payload_offset =
-            self.offset + align_up_u64(JOURNAL_HEADER_SIZE as u64, sector_size);
+        let payload_offset = self.offset + align_up_u64(JOURNAL_HEADER_SIZE as u64, sector_size);
         let max_payload = self.size as u64 - (payload_offset - self.offset);
 
         if payload_bytes.len() as u64 > max_payload {
@@ -530,9 +513,7 @@ impl DeviceJournal {
         // Build header.
         let mut header = vec![0u8; align_up(JOURNAL_HEADER_SIZE, sector_size as usize)];
         header[..8].copy_from_slice(JOURNAL_MAGIC);
-        header[8..12].copy_from_slice(
-            &(wal.operations.len() as u32).to_le_bytes(),
-        );
+        header[8..12].copy_from_slice(&(wal.operations.len() as u32).to_le_bytes());
         self.generation += 1;
         header[12..20].copy_from_slice(&self.generation.to_le_bytes());
         header[20..28].copy_from_slice(&payload_checksum.to_le_bytes());
@@ -581,7 +562,11 @@ fn align_up(value: usize, alignment: usize) -> usize {
         return value;
     }
     let remainder = value % alignment;
-    if remainder == 0 { value } else { value + (alignment - remainder) }
+    if remainder == 0 {
+        value
+    } else {
+        value + (alignment - remainder)
+    }
 }
 
 fn align_up_u64(value: u64, alignment: u64) -> u64 {
@@ -589,7 +574,11 @@ fn align_up_u64(value: u64, alignment: u64) -> u64 {
         return value;
     }
     let remainder = value % alignment;
-    if remainder == 0 { value } else { value + (alignment - remainder) }
+    if remainder == 0 {
+        value
+    } else {
+        value + (alignment - remainder)
+    }
 }
 
 fn checksum(bytes: &[u8]) -> u64 {
@@ -637,9 +626,9 @@ fn read_segment_index(device: &dyn BlockDevice) -> CoreFsResult<SegmentIndex> {
         header_sector
     };
 
-    let directory = header_bytes.get(directory_offset..directory_end).ok_or_else(|| {
-        CoreFsError::State("truncated CoreFS directory on device".to_string())
-    })?;
+    let directory = header_bytes
+        .get(directory_offset..directory_end)
+        .ok_or_else(|| CoreFsError::State("truncated CoreFS directory on device".to_string()))?;
 
     // Parse directory entries.
     let mut segments = Vec::with_capacity(segment_count);
@@ -647,7 +636,11 @@ fn read_segment_index(device: &dyn BlockDevice) -> CoreFsResult<SegmentIndex> {
         let kind: [u8; 4] = chunk[0..4].try_into().expect("fixed");
         let offset = u64::from_le_bytes(chunk[8..16].try_into().expect("fixed"));
         let length = u64::from_le_bytes(chunk[16..24].try_into().expect("fixed"));
-        segments.push(SegmentLocation { kind, offset, length });
+        segments.push(SegmentLocation {
+            kind,
+            offset,
+            length,
+        });
     }
 
     let image_end = segments

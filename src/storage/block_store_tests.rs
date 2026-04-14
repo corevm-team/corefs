@@ -145,12 +145,8 @@ fn allocator_metadata_round_trips_with_policy_and_free_extents() {
         allocated_blocks: 2,
     }];
 
-    let store = BlockStore::from_records_with_allocator(
-        records,
-        4,
-        policy.clone(),
-        free_extents.clone(),
-    );
+    let store =
+        BlockStore::from_records_with_allocator(records, 4, policy.clone(), free_extents.clone());
 
     assert_eq!(store.allocator_policy(), &policy);
     assert_eq!(store.free_extents(), free_extents);

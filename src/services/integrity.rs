@@ -197,13 +197,14 @@ impl IntegrityService {
         for record in blocks.records() {
             if !active_ids.contains(&record.inode) {
                 // Also check deleted catalog — soft-deleted files keep their blocks.
-                if catalog.deleted_contains(&catalog
-                    .active_entries()
-                    .iter()
-                    .find(|i| i.id == record.inode)
-                    .map(|i| i.path.as_str())
-                    .unwrap_or(""))
-                {
+                if catalog.deleted_contains(
+                    &catalog
+                        .active_entries()
+                        .iter()
+                        .find(|i| i.id == record.inode)
+                        .map(|i| i.path.as_str())
+                        .unwrap_or(""),
+                ) {
                     continue;
                 }
                 orphaned_blocks.push(record.inode);
@@ -213,11 +214,8 @@ impl IntegrityService {
         orphaned_blocks.sort();
         orphaned_blocks.dedup();
         // Remove entries that belong to deleted inodes (they are expected).
-        let deleted_ids: std::collections::HashSet<InodeId> = catalog
-            .deleted_entries()
-            .iter()
-            .map(|i| i.id)
-            .collect();
+        let deleted_ids: std::collections::HashSet<InodeId> =
+            catalog.deleted_entries().iter().map(|i| i.id).collect();
         orphaned_blocks.retain(|id| !deleted_ids.contains(id));
 
         // 4. Ref-count audit via dedupe_stats.

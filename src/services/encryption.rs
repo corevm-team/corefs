@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use crate::error::{CoreFsError, CoreFsResult};
-use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
 use chacha20poly1305::ChaCha20Poly1305;
+use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
 
 /// Nonce length (12 bytes) prepended to every ciphertext.
 const NONCE_LEN: usize = 12;
@@ -46,7 +46,9 @@ impl EncryptionService {
         let mut key = [0u8; 32];
         let mut state = 0xcbf29ce484222325u64;
         for (i, &byte) in material.iter().cycle().take(256).enumerate() {
-            state = state.wrapping_mul(0x100000001b3).wrapping_add(u64::from(byte));
+            state = state
+                .wrapping_mul(0x100000001b3)
+                .wrapping_add(u64::from(byte));
             key[i % 32] ^= (state >> ((i % 8) * 8)) as u8;
         }
         self.key = Some(key);
@@ -73,8 +75,7 @@ impl EncryptionService {
             .as_ref()
             .ok_or_else(|| CoreFsError::State("encryption key not set".to_string()))?;
 
-        let cipher =
-            ChaCha20Poly1305::new_from_slice(key).expect("key length is always 32 bytes");
+        let cipher = ChaCha20Poly1305::new_from_slice(key).expect("key length is always 32 bytes");
         let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
         let ciphertext = cipher
             .encrypt(&nonce, plaintext)
@@ -103,8 +104,7 @@ impl EncryptionService {
 
         let (nonce_bytes, ciphertext) = data.split_at(NONCE_LEN);
         let nonce = chacha20poly1305::Nonce::from_slice(nonce_bytes);
-        let cipher =
-            ChaCha20Poly1305::new_from_slice(key).expect("key length is always 32 bytes");
+        let cipher = ChaCha20Poly1305::new_from_slice(key).expect("key length is always 32 bytes");
 
         cipher
             .decrypt(nonce, ciphertext)

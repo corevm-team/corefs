@@ -312,8 +312,7 @@ fn repair_volume_image_recovers_from_missing_valid_superblocks_via_header_direct
     save_volume_image(&path, &state).expect("volume image should be written");
     let mut bytes = fs::read(&path).expect("image should exist");
     let primary_offset = u64::from_le_bytes(bytes[24..32].try_into().expect("fixed")) as usize;
-    let secondary_offset =
-        u64::from_le_bytes(bytes[48..56].try_into().expect("fixed")) as usize;
+    let secondary_offset = u64::from_le_bytes(bytes[48..56].try_into().expect("fixed")) as usize;
     bytes[primary_offset] ^= 0xFF;
     bytes[secondary_offset] ^= 0xFF;
     fs::write(&path, bytes).expect("corrupted image should be written");
@@ -343,8 +342,8 @@ fn repair_volume_image_reconstructs_corrupted_directory_entries() {
     bytes[80..88].copy_from_slice(&u64::MAX.to_le_bytes());
     fs::write(&path, bytes).expect("corrupted directory should be written");
 
-    let repaired = repair_volume_image_superblocks(&path)
-        .expect("repair should reconstruct the directory");
+    let repaired =
+        repair_volume_image_superblocks(&path).expect("repair should reconstruct the directory");
 
     assert!(repaired.reconstructed_segment_directory);
     assert!(repaired.reconstructed_block_descriptors);
@@ -449,15 +448,13 @@ fn save_and_load_from_device_round_trip() {
 fn save_to_device_rejects_insufficient_capacity() {
     // Build a state with enough data to exceed a very small device.
     let mut state = sample_state();
-    state.block_records = vec![
-        crate::storage::block_store::BlockRecord {
-            inode: InodeId(1),
-            bytes: vec![0xAA; 8192],
-            checksum: 999,
-            device_block: 0,
-            allocated_blocks: 2,
-        },
-    ];
+    state.block_records = vec![crate::storage::block_store::BlockRecord {
+        inode: InodeId(1),
+        bytes: vec![0xAA; 8192],
+        checksum: 999,
+        device_block: 0,
+        allocated_blocks: 2,
+    }];
     // 4 KiB device cannot fit the header + segments + 8 KiB data.
     let mut dev = memory_device(4096);
 
@@ -475,22 +472,23 @@ fn load_from_device_rejects_unformatted() {
 #[test]
 fn save_and_load_device_preserves_block_data() {
     let mut state = sample_state();
-    state.block_records = vec![
-        crate::storage::block_store::BlockRecord {
-            inode: InodeId(1),
-            bytes: b"device-test-payload".to_vec(),
-            checksum: 12345,
-            device_block: 0,
-            allocated_blocks: 1,
-        },
-    ];
+    state.block_records = vec![crate::storage::block_store::BlockRecord {
+        inode: InodeId(1),
+        bytes: b"device-test-payload".to_vec(),
+        checksum: 12345,
+        device_block: 0,
+        allocated_blocks: 1,
+    }];
     let mut dev = memory_device(2 * 1024 * 1024);
 
     save_to_device(&mut dev, &state).unwrap();
     let loaded = load_from_device(&dev).unwrap();
 
     assert_eq!(loaded.block_records.len(), 1);
-    assert_eq!(loaded.block_records[0].bytes, b"device-test-payload".to_vec());
+    assert_eq!(
+        loaded.block_records[0].bytes,
+        b"device-test-payload".to_vec()
+    );
     assert_eq!(loaded.block_records[0].inode, InodeId(1));
 }
 
@@ -564,11 +562,21 @@ fn device_round_trip_matches_file_round_trip() {
 
     // Both should produce identical state
     assert_eq!(file_loaded.config, device_loaded.config);
-    assert_eq!(file_loaded.active_inodes.len(), device_loaded.active_inodes.len());
-    assert_eq!(file_loaded.block_records.len(), device_loaded.block_records.len());
+    assert_eq!(
+        file_loaded.active_inodes.len(),
+        device_loaded.active_inodes.len()
+    );
+    assert_eq!(
+        file_loaded.block_records.len(),
+        device_loaded.block_records.len()
+    );
     assert_eq!(file_loaded.snapshots.len(), device_loaded.snapshots.len());
     assert_eq!(file_loaded.next_snapshot_id, device_loaded.next_snapshot_id);
-    for (f, d) in file_loaded.block_records.iter().zip(device_loaded.block_records.iter()) {
+    for (f, d) in file_loaded
+        .block_records
+        .iter()
+        .zip(device_loaded.block_records.iter())
+    {
         assert_eq!(f.inode, d.inode);
         assert_eq!(f.bytes, d.bytes);
     }
@@ -619,8 +627,7 @@ fn first_incremental_persist_does_full_write_and_populates_cache() {
     let mut dev = memory_device(2 * 1024 * 1024);
     let mut cache: Option<DeviceImageCache> = None;
 
-    let report =
-        persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
+    let report = persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
     assert!(!report.incremental, "first call should be full write");
     assert!(cache.is_some(), "cache should be populated");
 
@@ -644,7 +651,10 @@ fn incremental_persist_skips_unchanged_segments() {
     // the bytes actually changed between builds — which they do, since
     // `current_generation()` returns nanosecond timestamps).
     let second = persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
-    assert!(second.incremental, "second call should use incremental path");
+    assert!(
+        second.incremental,
+        "second call should use incremental path"
+    );
     // At most 2 segments change (SUPR + SUP2 with new generation).
     assert!(
         second.segments_written <= 2,
@@ -745,15 +755,13 @@ fn incremental_persist_bytes_written_is_much_less_than_full() {
         changed_at: std::time::SystemTime::now().into(),
         metadata: crate::domain::metadata::FileMetadata::default(),
     });
-    state.block_records = vec![
-        crate::storage::block_store::BlockRecord {
-            inode: InodeId(1),
-            bytes: vec![0xAA; 64 * 1024], // 64 KiB data blob
-            checksum: 1,
-            device_block: 0,
-            allocated_blocks: 16,
-        },
-    ];
+    state.block_records = vec![crate::storage::block_store::BlockRecord {
+        inode: InodeId(1),
+        bytes: vec![0xAA; 64 * 1024], // 64 KiB data blob
+        checksum: 1,
+        device_block: 0,
+        allocated_blocks: 16,
+    }];
 
     let mut dev = memory_device(2 * 1024 * 1024);
     let mut cache: Option<DeviceImageCache> = None;

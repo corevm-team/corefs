@@ -93,7 +93,11 @@ fn scrub_auto_repairs_stale_tertiary_superblock() {
         .residual_issues
         .iter()
         .any(|i| i.code == "ODF.SB.TERTIARY_UNREADABLE" || i.code == "ODF.SB.TERTIARY_STALE");
-    assert!(!has_tertiary_issue, "residual: {:?}", report.residual_issues);
+    assert!(
+        !has_tertiary_issue,
+        "residual: {:?}",
+        report.residual_issues
+    );
 }
 
 #[test]
@@ -129,9 +133,12 @@ fn read_only_plan_performs_no_writes() {
         &dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap(),
     )
     .unwrap();
-    let mut buf = dev.read_at(sb.tertiary_superblock_block * BLOCK_SIZE, BLOCK_SIZE).unwrap();
+    let mut buf = dev
+        .read_at(sb.tertiary_superblock_block * BLOCK_SIZE, BLOCK_SIZE)
+        .unwrap();
     buf[0] ^= 0xFF;
-    dev.write_at(sb.tertiary_superblock_block * BLOCK_SIZE, &buf).unwrap();
+    dev.write_at(sb.tertiary_superblock_block * BLOCK_SIZE, &buf)
+        .unwrap();
 
     let snapshot_after_corruption = dev.read_at(0, dev.capacity()).unwrap();
     let report = run(dev.as_mut(), &ScrubPlan::read_only()).unwrap();
@@ -166,19 +173,23 @@ fn is_clean_reports_true_only_when_both_structural_and_data_clean() {
     assert!(!with_data_corruption.is_clean());
 
     let mut with_residual_error = report.clone();
-    with_residual_error.residual_issues.push(crate::storage::ondisk::fsck::FsckIssue {
-        severity: crate::storage::ondisk::fsck::Severity::Error,
-        code: "ODF.TEST",
-        message: "e".into(),
-    });
+    with_residual_error
+        .residual_issues
+        .push(crate::storage::ondisk::fsck::FsckIssue {
+            severity: crate::storage::ondisk::fsck::Severity::Error,
+            code: "ODF.TEST",
+            message: "e".into(),
+        });
     assert!(!with_residual_error.is_clean());
 
     let mut with_only_warning = report.clone();
-    with_only_warning.residual_issues.push(crate::storage::ondisk::fsck::FsckIssue {
-        severity: crate::storage::ondisk::fsck::Severity::Warning,
-        code: "ODF.TEST.WARN",
-        message: "w".into(),
-    });
+    with_only_warning
+        .residual_issues
+        .push(crate::storage::ondisk::fsck::FsckIssue {
+            severity: crate::storage::ondisk::fsck::Severity::Warning,
+            code: "ODF.TEST.WARN",
+            message: "w".into(),
+        });
     assert!(with_only_warning.is_clean()); // warnings alone don't flip clean→dirty
 }
 

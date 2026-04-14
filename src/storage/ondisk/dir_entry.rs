@@ -127,10 +127,7 @@ impl DirEntry {
         let name = std::str::from_utf8(&buf[16..16 + name_len])
             .map_err(|e| CoreFsError::State(format!("dir entry: invalid utf-8 name: {e}")))?
             .to_string();
-        Ok((
-            Self { inode, kind, name },
-            rec_len,
-        ))
+        Ok((Self { inode, kind, name }, rec_len))
     }
 }
 
@@ -241,10 +238,7 @@ impl DirBlock {
     /// Split a list of entries into sequential [`DirBlock`]s linked via
     /// `next_dir_block` pointers drawn from `reserve`.  The first block's
     /// physical address is `reserve[0]`.
-    pub fn pack(
-        entries: &[DirEntry],
-        reserve: &[u64],
-    ) -> CoreFsResult<Vec<DirBlock>> {
+    pub fn pack(entries: &[DirEntry], reserve: &[u64]) -> CoreFsResult<Vec<DirBlock>> {
         if reserve.is_empty() {
             return Err(CoreFsError::InvalidInput(
                 "dir pack: reserve must contain at least one block".into(),

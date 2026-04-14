@@ -85,10 +85,15 @@ fn file_session_open_or_format_opens_when_present() {
     let path = temp_path("oof-existing");
     {
         let mut sess = OdfFileSession::format_new(&path, &small_options()).unwrap();
-        sess.mutate(|fs| fs.create_file("/seen.txt", b"hi", &[])).unwrap();
+        sess.mutate(|fs| fs.create_file("/seen.txt", b"hi", &[]))
+            .unwrap();
     }
     let sess = OdfFileSession::open_or_format(&path, &small_options()).unwrap();
-    assert!(sess.service().list_paths().contains(&"/seen.txt".to_string()));
+    assert!(
+        sess.service()
+            .list_paths()
+            .contains(&"/seen.txt".to_string())
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -120,8 +125,7 @@ fn incremental_flush_only_rewrites_changed_inodes() {
         .unwrap();
     // Delete + create → at most 2 inodes written, not 5.
     assert!(
-        report.incremental.updated + report.incremental.created + report.incremental.removed
-            <= 3,
+        report.incremental.updated + report.incremental.created + report.incremental.removed <= 3,
         "too many inodes touched: {:?}",
         report.incremental
     );
@@ -133,10 +137,7 @@ fn incremental_flush_only_rewrites_changed_inodes() {
 fn file_session_uuid_zero_gets_time_seeded_uuid() {
     let path = temp_path("uuid");
     let sess = OdfFileSession::format_new(&path, &small_options()).unwrap();
-    let sb_bytes = sess
-        .device()
-        .read_at(BLOCK_SIZE, BLOCK_SIZE)
-        .unwrap();
+    let sb_bytes = sess.device().read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap();
     let sb = crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();
     assert_ne!(sb.uuid, [0u8; 16], "time-seeded uuid should not be zero");
     let _ = std::fs::remove_file(&path);
@@ -154,7 +155,8 @@ fn memory_device(blocks: u64) -> Box<dyn crate::storage::block_device::BlockDevi
 fn device_session_format_and_flush_roundtrip() {
     let device = memory_device(4096);
     let mut sess = OdfDeviceSession::format_new(device, &small_options()).unwrap();
-    sess.mutate(|fs| fs.create_file("/dev-a.txt", b"hello", &[])).unwrap();
+    sess.mutate(|fs| fs.create_file("/dev-a.txt", b"hello", &[]))
+        .unwrap();
 
     // Flush must leave the device readable via load_state_native.
     let dev_ref = sess.device();
@@ -168,10 +170,16 @@ fn device_session_open_reloads_state() {
     let device = memory_device(4096);
     let sess = OdfDeviceSession::format_new(device, &small_options()).unwrap();
     let mut sess = sess;
-    sess.mutate(|fs| fs.create_file("/keep", b"x", &[])).unwrap();
+    sess.mutate(|fs| fs.create_file("/keep", b"x", &[]))
+        .unwrap();
     let dev = sess.into_device();
     let reopened = OdfDeviceSession::open(dev).unwrap();
-    assert!(reopened.service().list_paths().contains(&"/keep".to_string()));
+    assert!(
+        reopened
+            .service()
+            .list_paths()
+            .contains(&"/keep".to_string())
+    );
 }
 
 #[test]
@@ -182,7 +190,10 @@ fn device_session_open_recovers_pending_journal_transactions() {
     // a pending (committed-but-not-applied) journal txn behind.
     {
         let sess = OdfDeviceSession::format_new(
-            std::mem::replace(&mut device, Box::new(MemoryDevice::new(BLOCK_SIZE, 4096).unwrap())),
+            std::mem::replace(
+                &mut device,
+                Box::new(MemoryDevice::new(BLOCK_SIZE, 4096).unwrap()),
+            ),
             &small_options(),
         )
         .unwrap();
@@ -206,14 +217,14 @@ fn device_session_open_recovers_pending_journal_transactions() {
     }
 
     // Target block is NOT yet updated.
-    assert!(
-        device.read_at(target * BLOCK_SIZE, BLOCK_SIZE).unwrap()
-            != payload
-    );
+    assert!(device.read_at(target * BLOCK_SIZE, BLOCK_SIZE).unwrap() != payload);
 
     // Now OdfDeviceSession::open should replay the pending txn.
     let sess = OdfDeviceSession::open(device).unwrap();
-    let read = sess.device().read_at(target * BLOCK_SIZE, BLOCK_SIZE).unwrap();
+    let read = sess
+        .device()
+        .read_at(target * BLOCK_SIZE, BLOCK_SIZE)
+        .unwrap();
     assert_eq!(read, payload);
 }
 

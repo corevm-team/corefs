@@ -13,6 +13,8 @@ use crate::platform::linux_fuse::LinuxMountOptions;
 use crate::platform::performance::{
     BenchmarkConfig, BenchmarkProfile, append_benchmark_markdown, run_benchmark,
 };
+#[cfg(target_os = "windows")]
+use crate::platform::windows;
 use crate::services::integrity::IntegrityService;
 
 pub fn run<I>(args: I) -> CoreFsResult<()>
@@ -144,17 +146,12 @@ where
                 CoreFsError::InvalidCommand("missing path for mkfs-image".to_string())
             })?;
             let include_demo = args.iter().any(|arg| arg == "--demo");
-            #[cfg(target_os = "linux")]
-            {
-                linux_fuse::create_image(path, include_demo)?;
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = include_demo;
-                return Err(CoreFsError::InvalidCommand(
-                    "mkfs-image is only available on Linux builds".to_string(),
-                ));
-            }
+            let fs = if include_demo {
+                bootstrap_demo_fs()?
+            } else {
+                CoreFsService::format(CoreFsConfig::default())
+            };
+            fs.save_image_to_path(path)?;
             println!("created CoreFS image at {path}");
         }
         "load-image" => {
@@ -265,10 +262,24 @@ where
             {
                 linux_fuse::mount_image(image_path, mount_point)?;
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "windows")]
+            {
+                let report = windows::mount_image_as_drive(
+                    image_path,
+                    mount_point,
+                    false,
+                    windows_staging_from_args(&args[4..]),
+                )?;
+                println!(
+                    "mounted CoreFS image on {}: via {}",
+                    report.drive_letter,
+                    report.staging_dir.display()
+                );
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             {
                 return Err(CoreFsError::InvalidCommand(
-                    "mount-image is only available on Linux builds".to_string(),
+                    "mount-image is only available on Linux and Windows builds".to_string(),
                 ));
             }
         }
@@ -283,10 +294,49 @@ where
             {
                 linux_fuse::mount_image_rw(image_path, mount_point)?;
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "windows")]
+            {
+                let report = windows::mount_image_as_drive(
+                    image_path,
+                    mount_point,
+                    true,
+                    windows_staging_from_args(&args[4..]),
+                )?;
+                println!(
+                    "mounted CoreFS image read-write on {}: via {}",
+                    report.drive_letter,
+                    report.staging_dir.display()
+                );
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             {
                 return Err(CoreFsError::InvalidCommand(
-                    "mount-image-rw is only available on Linux builds".to_string(),
+                    "mount-image-rw is only available on Linux and Windows builds".to_string(),
+                ));
+            }
+        }
+        "unmount-image-win" => {
+            let drive_letter = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand(
+                    "missing drive letter for unmount-image-win".to_string(),
+                )
+            })?;
+            let commit = !args.iter().any(|arg| arg == "--discard");
+            #[cfg(target_os = "windows")]
+            {
+                let report = windows::unmount_image_drive(drive_letter, commit)?;
+                println!(
+                    "unmounted {}: committed={} image={}",
+                    report.drive_letter,
+                    report.committed,
+                    report.image_path.display()
+                );
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = (drive_letter, commit);
+                return Err(CoreFsError::InvalidCommand(
+                    "unmount-image-win is only available on Windows builds".to_string(),
                 ));
             }
         }
@@ -367,10 +417,7 @@ where
                             report.failed_offsets.len(),
                             report.probed_offsets.len()
                         );
-                        eprintln!(
-                            "  advertised capacity: {} bytes",
-                            report.advertised_bytes
-                        );
+                        eprintln!("  advertised capacity: {} bytes", report.advertised_bytes);
                         eprintln!(
                             "  estimated usable:    {} bytes ({}% appears fake)",
                             report.estimated_usable_bytes,
@@ -397,14 +444,10 @@ where
         }
         "mount-device-rw" => {
             let device_path = args.get(2).ok_or_else(|| {
-                CoreFsError::InvalidCommand(
-                    "missing device path for mount-device-rw".to_string(),
-                )
+                CoreFsError::InvalidCommand("missing device path for mount-device-rw".to_string())
             })?;
             let mount_point = args.get(3).ok_or_else(|| {
-                CoreFsError::InvalidCommand(
-                    "missing mount point for mount-device-rw".to_string(),
-                )
+                CoreFsError::InvalidCommand("missing mount point for mount-device-rw".to_string())
             })?;
             #[cfg(target_os = "linux")]
             {
@@ -423,9 +466,7 @@ where
         }
         "verify-device" => {
             let device_path = args.get(2).ok_or_else(|| {
-                CoreFsError::InvalidCommand(
-                    "missing device path for verify-device".to_string(),
-                )
+                CoreFsError::InvalidCommand("missing device path for verify-device".to_string())
             })?;
             #[cfg(target_os = "linux")]
             {
@@ -437,8 +478,7 @@ where
                     ));
                 }
                 let chunk_count: u64 = parse_flag_u64(&args, "--chunks").unwrap_or(200);
-                let chunk_size: u64 =
-                    parse_flag_u64(&args, "--chunk-size").unwrap_or(64 * 1024);
+                let chunk_size: u64 = parse_flag_u64(&args, "--chunk-size").unwrap_or(64 * 1024);
                 let info = crate::storage::block_device::raw::probe_device(device_path)?;
                 if info.is_mounted {
                     return Err(CoreFsError::PolicyViolation(format!(
@@ -463,14 +503,8 @@ where
                     report.probed_offsets.len()
                 );
                 println!("failed_probes:    {}", report.failed_offsets.len());
-                println!(
-                    "highest_verified: {} bytes",
-                    report.highest_verified_offset
-                );
-                println!(
-                    "estimated_usable: {} bytes",
-                    report.estimated_usable_bytes
-                );
+                println!("highest_verified: {} bytes", report.highest_verified_offset);
+                println!("estimated_usable: {} bytes", report.estimated_usable_bytes);
                 if report.is_honest() {
                     println!("verdict: ok — device appears to be honest");
                 } else {
@@ -584,8 +618,7 @@ where
             let path = args.get(2).ok_or_else(|| {
                 CoreFsError::InvalidCommand("missing image path for mkfs-odf".to_string())
             })?;
-            let capacity_bytes = parse_flag_u64(&args[3..], "--size")
-                .unwrap_or(64 * 1024 * 1024);
+            let capacity_bytes = parse_flag_u64(&args[3..], "--size").unwrap_or(64 * 1024 * 1024);
             odf_mkfs_image(path, capacity_bytes)?;
             println!("odf volume formatted at {path} ({capacity_bytes} bytes)");
         }
@@ -617,7 +650,10 @@ where
             println!("label: {}", info.label);
             println!(
                 "uuid: {}",
-                info.uuid.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                info.uuid
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
             );
             println!("total_blocks: {}", info.total_blocks);
             println!("free_blocks: {}", info.free_blocks);
@@ -634,14 +670,10 @@ where
             #[cfg(target_os = "linux")]
             {
                 let image_path = args.get(2).ok_or_else(|| {
-                    CoreFsError::InvalidCommand(
-                        "mount-odf <image-path> <mount-point>".to_string(),
-                    )
+                    CoreFsError::InvalidCommand("mount-odf <image-path> <mount-point>".to_string())
                 })?;
                 let mount_point = args.get(3).ok_or_else(|| {
-                    CoreFsError::InvalidCommand(
-                        "mount-odf <image-path> <mount-point>".to_string(),
-                    )
+                    CoreFsError::InvalidCommand("mount-odf <image-path> <mount-point>".to_string())
                 })?;
                 linux_fuse::mount_odf_image(image_path, mount_point)?;
             }
@@ -690,8 +722,7 @@ where
             let dst = args.get(3).ok_or_else(|| {
                 CoreFsError::InvalidCommand("migrate-to-odf <src.img> <dst.odf> [--size N]".into())
             })?;
-            let capacity_bytes = parse_flag_u64(&args[4..], "--size")
-                .unwrap_or(64 * 1024 * 1024);
+            let capacity_bytes = parse_flag_u64(&args[4..], "--size").unwrap_or(64 * 1024 * 1024);
             let report = odf_migrate_from_volume_image(src, dst, capacity_bytes)?;
             println!(
                 "migrated {} → {}: {} inode(s), generation {}",
@@ -752,9 +783,7 @@ fn odf_fsck_image(path: &str) -> CoreFsResult<crate::storage::ondisk::fsck::Fsck
     fsck::check(&dev)
 }
 
-fn odf_inspect_image(
-    path: &str,
-) -> CoreFsResult<crate::storage::ondisk::volume::VolumeInfo> {
+fn odf_inspect_image(path: &str) -> CoreFsResult<crate::storage::ondisk::volume::VolumeInfo> {
     use crate::storage::block_device::FileImageDevice;
     use crate::storage::ondisk::volume::inspect;
     let dev = FileImageDevice::open(path, false)?;
@@ -795,11 +824,7 @@ fn odf_session_demo(image_path: &str, capacity: u64) -> CoreFsResult<()> {
     for summary in reader.list_inodes()? {
         println!(
             "  slot={} id={} kind={:?} size={} flags=0x{:X}",
-            summary.slot,
-            summary.domain_id,
-            summary.kind,
-            summary.size_bytes,
-            summary.flags
+            summary.slot, summary.domain_id, summary.kind, summary.size_bytes, summary.flags
         );
     }
     Ok(())
@@ -866,6 +891,7 @@ fn print_usage() {
     println!("  optimize-image <path>");
     println!("  mount-image <image-path> <mount-point>");
     println!("  mount-image-rw <image-path> <mount-point>");
+    println!("  unmount-image-win <drive-letter> [--discard]  (Windows only)");
     println!("  probe-device <device-path>");
     println!("  mkfs-device <device-path> [--skip-check]");
     println!("  fsck-device <device-path>");
@@ -946,6 +972,12 @@ fn linux_mount_options_from_args(args: &[String]) -> LinuxMountOptions {
     }
 
     options
+}
+
+#[cfg(target_os = "windows")]
+fn windows_staging_from_args(args: &[String]) -> Option<String> {
+    let idx = args.iter().position(|arg| arg == "--staging")?;
+    args.get(idx + 1).cloned()
 }
 
 fn parse_usize_flag(args: &[String], index: usize, flag: &str) -> CoreFsResult<usize> {

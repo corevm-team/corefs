@@ -111,7 +111,10 @@ fn s3_single_large_file_uses_contiguous_extent() {
     let dev = sess.into_device();
     let reader = OdfReader::open(dev.as_ref()).unwrap();
     let summaries = reader.list_inodes().unwrap();
-    let big = summaries.iter().find(|s| s.size_bytes == content.len() as u64).unwrap();
+    let big = summaries
+        .iter()
+        .find(|s| s.size_bytes == content.len() as u64)
+        .unwrap();
     // Expect exactly one extent (contiguous).
     assert_eq!(big.extent_count, 1, "expected contiguous allocation");
 
@@ -185,7 +188,8 @@ fn s5_delete_recreate_cycles_reuse_data_blocks() {
     let mut sess = OdfDeviceSession::format_new(device(8), &opts).unwrap();
 
     // Warm-up file to stabilise the bitmap cursor.
-    sess.mutate(|fs| fs.create_file("/anchor", b"a", &[])).unwrap();
+    sess.mutate(|fs| fs.create_file("/anchor", b"a", &[]))
+        .unwrap();
 
     let mut max_free_blocks: u64 = 0;
     let mut min_free_blocks: u64 = u64::MAX;

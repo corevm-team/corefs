@@ -660,7 +660,10 @@ fn snapshot_restore_reverts_file_to_captured_state() {
 
     // Modify the file after the snapshot.
     fs.write_file("/doc.txt", b"modified").expect("write");
-    assert_eq!(fs.read_file("/doc.txt").expect("read"), b"modified".to_vec());
+    assert_eq!(
+        fs.read_file("/doc.txt").expect("read"),
+        b"modified".to_vec()
+    );
 
     // Restore the snapshot — file must revert.
     let report = fs
@@ -718,7 +721,8 @@ fn restore_snapshot_returns_error_for_unknown_id() {
 #[test]
 fn clone_file_shares_blob_and_allows_independent_divergence() {
     let mut fs = CoreFsService::format(CoreFsConfig::default());
-    fs.create_file("/src.txt", b"shared data", &[]).expect("file");
+    fs.create_file("/src.txt", b"shared data", &[])
+        .expect("file");
 
     fs.clone_file("/src.txt", "/dst.txt").expect("clone");
 
@@ -759,7 +763,8 @@ fn clone_file_fails_when_target_already_exists() {
 #[test]
 fn expunge_file_permanently_removes_soft_deleted_file() {
     let mut fs = CoreFsService::format(CoreFsConfig::default());
-    fs.create_file("/temp.txt", b"temporary", &[]).expect("file");
+    fs.create_file("/temp.txt", b"temporary", &[])
+        .expect("file");
     fs.delete_file("/temp.txt", false).expect("soft delete");
 
     // File is in deleted catalog, not active.
@@ -842,10 +847,7 @@ fn clone_file_with_cow_disabled_creates_independent_copy() {
 
     // With CoW disabled there should be no shared blobs (eager full copy).
     let report = fs.cow_report();
-    assert!(
-        !report.copy_on_write_enabled,
-        "CoW flag should be off"
-    );
+    assert!(!report.copy_on_write_enabled, "CoW flag should be off");
 }
 
 // ── Recursive directory cloning ─────────────────────────────────────────────
@@ -856,7 +858,8 @@ fn clone_tree_copies_directory_recursively() {
     fs.create_directory("/src").expect("dir");
     fs.create_directory("/src/sub").expect("sub");
     fs.create_file("/src/a.txt", b"alpha", &[]).expect("file");
-    fs.create_file("/src/sub/b.txt", b"beta", &[]).expect("file");
+    fs.create_file("/src/sub/b.txt", b"beta", &[])
+        .expect("file");
 
     let report = fs.clone_tree("/src", "/dst").expect("clone_tree");
 
@@ -872,7 +875,8 @@ fn clone_tree_copies_directory_recursively() {
 fn clone_tree_diverges_independently() {
     let mut fs = CoreFsService::format(CoreFsConfig::default());
     fs.create_directory("/orig").expect("dir");
-    fs.create_file("/orig/data.bin", b"shared", &[]).expect("file");
+    fs.create_file("/orig/data.bin", b"shared", &[])
+        .expect("file");
     fs.clone_tree("/orig", "/copy").expect("clone_tree");
 
     // Modify the copy — original must not change.
@@ -900,7 +904,8 @@ fn clone_tree_rejects_existing_target() {
 fn clone_tree_handles_symlinks() {
     let mut fs = CoreFsService::format(CoreFsConfig::default());
     fs.create_directory("/src").expect("dir");
-    fs.create_symlink("/src/link", "/some/target").expect("symlink");
+    fs.create_symlink("/src/link", "/some/target")
+        .expect("symlink");
 
     let report = fs.clone_tree("/src", "/dst").expect("clone_tree");
 
@@ -915,7 +920,8 @@ fn clone_tree_handles_symlinks() {
 fn scoped_snapshot_captures_only_subtree() {
     let mut fs = CoreFsService::format(CoreFsConfig::default());
     fs.create_directory("/docs").expect("dir");
-    fs.create_file("/docs/readme.md", b"hello", &[]).expect("file");
+    fs.create_file("/docs/readme.md", b"hello", &[])
+        .expect("file");
     fs.create_file("/root.txt", b"root", &[]).expect("file");
 
     let snap = fs.create_snapshot_scoped("docs-only", "/docs");
@@ -935,13 +941,17 @@ fn scoped_snapshot_captures_only_subtree() {
 fn scoped_snapshot_restore_only_restores_scoped_files() {
     let mut fs = CoreFsService::format(CoreFsConfig::default());
     fs.create_directory("/proj").expect("dir");
-    fs.create_file("/proj/code.rs", b"fn main() {}", &[]).expect("file");
-    fs.create_file("/unrelated.txt", b"keep", &[]).expect("file");
+    fs.create_file("/proj/code.rs", b"fn main() {}", &[])
+        .expect("file");
+    fs.create_file("/unrelated.txt", b"keep", &[])
+        .expect("file");
     let snap = fs.create_snapshot_scoped("proj-snap", "/proj");
 
     // Modify both files.
-    fs.write_file("/proj/code.rs", b"fn changed() {}").expect("write");
-    fs.write_file("/unrelated.txt", b"also changed").expect("write");
+    fs.write_file("/proj/code.rs", b"fn changed() {}")
+        .expect("write");
+    fs.write_file("/unrelated.txt", b"also changed")
+        .expect("write");
 
     let report = fs.restore_snapshot(snap.id).expect("restore");
 
@@ -1031,10 +1041,7 @@ fn encrypted_file_write_updates_and_reads_back() {
     fs.create_file("/doc.txt", b"v1", &[]).expect("create");
     fs.write_file("/doc.txt", b"v2-encrypted").expect("write");
 
-    assert_eq!(
-        fs.read_file("/doc.txt").unwrap(),
-        b"v2-encrypted".to_vec()
-    );
+    assert_eq!(fs.read_file("/doc.txt").unwrap(), b"v2-encrypted".to_vec());
 }
 
 #[test]
@@ -1080,7 +1087,10 @@ fn encryption_disabled_stores_and_reads_plaintext() {
 
     let inode = fs.get_inode("/plain.txt").expect("inode");
     assert!(!inode.metadata.encrypted);
-    assert_eq!(fs.read_file("/plain.txt").unwrap(), b"no encryption".to_vec());
+    assert_eq!(
+        fs.read_file("/plain.txt").unwrap(),
+        b"no encryption".to_vec()
+    );
 }
 
 // ── Dedup pass ──────────────────────────────────────────────────────────────
@@ -1121,8 +1131,10 @@ fn run_dedup_reports_clean_state() {
 fn fsck_clean_filesystem_reports_no_errors() {
     let mut fs = CoreFsService::format(CoreFsConfig::default());
     fs.create_directory("/docs").expect("dir");
-    fs.create_file("/docs/readme.md", b"hello", &[]).expect("file");
-    fs.create_file("/data.bin", b"binary payload", &[]).expect("file");
+    fs.create_file("/docs/readme.md", b"hello", &[])
+        .expect("file");
+    fs.create_file("/data.bin", b"binary payload", &[])
+        .expect("file");
 
     let report = fs.fsck();
 
@@ -1132,7 +1144,10 @@ fn fsck_clean_filesystem_reports_no_errors() {
     assert_eq!(report.compression_errors, Vec::<String>::new());
     assert_eq!(report.encryption_errors, Vec::<String>::new());
     assert_eq!(report.size_mismatches, Vec::<(String, usize, usize)>::new());
-    assert_eq!(report.orphaned_blocks, Vec::<crate::domain::inode::InodeId>::new());
+    assert_eq!(
+        report.orphaned_blocks,
+        Vec::<crate::domain::inode::InodeId>::new()
+    );
 }
 
 #[test]
@@ -1176,7 +1191,8 @@ fn set_owner_updates_uid_and_gid_independently() {
     fs.create_file("/a.txt", b"x", &[]).expect("file");
 
     // Set both
-    fs.set_owner("/a.txt", Some(1000), Some(1000)).expect("chown");
+    fs.set_owner("/a.txt", Some(1000), Some(1000))
+        .expect("chown");
     let inode = fs.get_inode("/a.txt").expect("inode");
     assert_eq!(inode.metadata.uid, 1000);
     assert_eq!(inode.metadata.gid, 1000);
@@ -1197,7 +1213,9 @@ fn set_owner_updates_uid_and_gid_independently() {
 #[test]
 fn set_owner_rejects_missing_path() {
     let mut fs = test_fs();
-    let err = fs.set_owner("/missing", Some(1000), Some(1000)).unwrap_err();
+    let err = fs
+        .set_owner("/missing", Some(1000), Some(1000))
+        .unwrap_err();
     assert!(matches!(err, CoreFsError::NotFound(_)));
 }
 
@@ -1231,7 +1249,8 @@ fn chown_and_chmod_do_not_create_new_versions() {
     );
 
     // chown/chmod should NOT create versions.
-    fs.set_owner("/v.txt", Some(1000), Some(1000)).expect("chown");
+    fs.set_owner("/v.txt", Some(1000), Some(1000))
+        .expect("chown");
     fs.set_mode("/v.txt", 0o600).expect("chmod");
     fs.set_owner("/v.txt", None, Some(2000)).expect("chgrp");
 
@@ -1251,7 +1270,8 @@ fn chown_preserves_modified_at() {
     // Pause briefly to ensure SystemTime::now() would differ.
     std::thread::sleep(std::time::Duration::from_millis(10));
 
-    fs.set_owner("/t.txt", Some(1000), Some(1000)).expect("chown");
+    fs.set_owner("/t.txt", Some(1000), Some(1000))
+        .expect("chown");
     fs.set_mode("/t.txt", 0o600).expect("chmod");
 
     let after = fs.get_inode("/t.txt").expect("inode").modified_at;
@@ -1315,7 +1335,8 @@ fn chown_bumps_ctime_only_not_mtime() {
     };
 
     sleep_ms(10);
-    fs.set_owner("/c.txt", Some(1000), Some(1000)).expect("chown");
+    fs.set_owner("/c.txt", Some(1000), Some(1000))
+        .expect("chown");
 
     let after = {
         let i = fs.get_inode("/c.txt").expect("inode");
@@ -1501,7 +1522,8 @@ fn chmod_masks_upper_bits() {
 fn chown_uid_only_preserves_gid() {
     let mut fs = test_fs();
     fs.create_file("/u.txt", b"x", &[]).expect("create");
-    fs.set_owner("/u.txt", Some(100), Some(200)).expect("chown both");
+    fs.set_owner("/u.txt", Some(100), Some(200))
+        .expect("chown both");
 
     fs.set_owner("/u.txt", Some(999), None).expect("chown uid");
     let inode = fs.get_inode("/u.txt").expect("inode");
@@ -1513,7 +1535,8 @@ fn chown_uid_only_preserves_gid() {
 fn chown_gid_only_preserves_uid() {
     let mut fs = test_fs();
     fs.create_file("/g.txt", b"x", &[]).expect("create");
-    fs.set_owner("/g.txt", Some(100), Some(200)).expect("chown both");
+    fs.set_owner("/g.txt", Some(100), Some(200))
+        .expect("chown both");
 
     fs.set_owner("/g.txt", None, Some(888)).expect("chgrp");
     let inode = fs.get_inode("/g.txt").expect("inode");

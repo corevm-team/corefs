@@ -139,7 +139,10 @@ fn encode_decode_populated_table() {
     }
     let enc = t.encode();
     // Multi-block region: 2500 / 2044 = 2 blocks.
-    assert_eq!(enc.len() as u64, 2 * crate::storage::ondisk::layout::BLOCK_SIZE);
+    assert_eq!(
+        enc.len() as u64,
+        2 * crate::storage::ondisk::layout::BLOCK_SIZE
+    );
     let dec = RefCountTable::decode(&enc, 2500).unwrap();
     assert_eq!(dec, t);
     assert_eq!(dec.get(100), 42);
@@ -166,10 +169,7 @@ fn blocks_needed_matches_expected_capacity() {
     assert_eq!(RefCountTable::blocks_needed(0), 0);
     assert_eq!(RefCountTable::blocks_needed(1), 1);
     assert_eq!(RefCountTable::blocks_needed(COUNTS_PER_BLOCK as u64), 1);
-    assert_eq!(
-        RefCountTable::blocks_needed(COUNTS_PER_BLOCK as u64 + 1),
-        2
-    );
+    assert_eq!(RefCountTable::blocks_needed(COUNTS_PER_BLOCK as u64 + 1), 2);
 }
 
 // ---------------------------------------------------------------------------

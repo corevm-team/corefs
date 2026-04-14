@@ -79,7 +79,9 @@ impl RecordKind {
             1 => Ok(Self::Op),
             2 => Ok(Self::Commit),
             3 => Ok(Self::Abort),
-            x => Err(CoreFsError::State(format!("unknown journal record kind {x}"))),
+            x => Err(CoreFsError::State(format!(
+                "unknown journal record kind {x}"
+            ))),
         }
     }
 }
@@ -139,7 +141,9 @@ impl JournalHeader {
 
     fn decode_block(block: &[u8]) -> CoreFsResult<Self> {
         if block.len() != BLOCK_SIZE as usize {
-            return Err(CoreFsError::InvalidInput("journal header: wrong length".into()));
+            return Err(CoreFsError::InvalidInput(
+                "journal header: wrong length".into(),
+            ));
         }
         let stored = u32::from_le_bytes(
             block[HEADER_CHECKSUM_OFFSET..HEADER_CHECKSUM_OFFSET + 4]
@@ -150,9 +154,7 @@ impl JournalHeader {
         zeroed[HEADER_CHECKSUM_OFFSET..HEADER_CHECKSUM_OFFSET + 4].fill(0);
         let expected = Crc32c::hash(&zeroed);
         if stored != expected {
-            return Err(CoreFsError::State(
-                "journal header CRC mismatch".into(),
-            ));
+            return Err(CoreFsError::State("journal header CRC mismatch".into()));
         }
         let mut p = 0usize;
         fn take<const N: usize>(buf: &[u8], p: &mut usize) -> [u8; N] {
@@ -224,12 +226,16 @@ impl Op {
         match tag {
             1 => {
                 if payload.len() < 1 + 8 + 4 {
-                    return Err(CoreFsError::State("journal op: truncated BlockWrite".into()));
+                    return Err(CoreFsError::State(
+                        "journal op: truncated BlockWrite".into(),
+                    ));
                 }
                 let block = u64::from_le_bytes(payload[1..9].try_into().unwrap());
                 let len = u32::from_le_bytes(payload[9..13].try_into().unwrap()) as usize;
                 if payload.len() != 13 + len {
-                    return Err(CoreFsError::State("journal op: bad BlockWrite length".into()));
+                    return Err(CoreFsError::State(
+                        "journal op: bad BlockWrite length".into(),
+                    ));
                 }
                 Ok(Op::BlockWrite {
                     block,
@@ -238,12 +244,16 @@ impl Op {
             }
             2 => {
                 if payload.len() < 1 + 8 + 4 {
-                    return Err(CoreFsError::State("journal op: truncated InodeUpdate".into()));
+                    return Err(CoreFsError::State(
+                        "journal op: truncated InodeUpdate".into(),
+                    ));
                 }
                 let index = u64::from_le_bytes(payload[1..9].try_into().unwrap());
                 let len = u32::from_le_bytes(payload[9..13].try_into().unwrap()) as usize;
                 if payload.len() != 13 + len {
-                    return Err(CoreFsError::State("journal op: bad InodeUpdate length".into()));
+                    return Err(CoreFsError::State(
+                        "journal op: bad InodeUpdate length".into(),
+                    ));
                 }
                 Ok(Op::InodeUpdate {
                     index,
@@ -414,9 +424,10 @@ impl<'d> Journal<'d> {
                 // Read-modify-write of the containing block.
                 // We need geometry for the inode location — pull from
                 // the superblock that is always at PRIMARY_SUPERBLOCK_BLOCK.
-                let sb_bytes = self
-                    .device
-                    .read_at(super::layout::PRIMARY_SUPERBLOCK_BLOCK * BLOCK_SIZE, BLOCK_SIZE)?;
+                let sb_bytes = self.device.read_at(
+                    super::layout::PRIMARY_SUPERBLOCK_BLOCK * BLOCK_SIZE,
+                    BLOCK_SIZE,
+                )?;
                 let sb = Superblock::decode_block(&sb_bytes)?;
                 let geom = sb.geometry();
                 let (block, offset_in_block) = geom.inode_record_location(*index)?;
@@ -452,8 +463,7 @@ impl<'d> Journal<'d> {
         if expected_hdr_crc != header_crc {
             return Ok(None);
         }
-        let payload =
-            self.read_bytes(offset + RECORD_HEADER_BYTES as u64, payload_len)?;
+        let payload = self.read_bytes(offset + RECORD_HEADER_BYTES as u64, payload_len)?;
         let trailer = self.read_bytes(
             offset + RECORD_HEADER_BYTES as u64 + payload_len,
             RECORD_TRAILER_BYTES as u64,
@@ -486,7 +496,9 @@ impl<'d> Journal<'d> {
         let aligned_start = (device_offset / sector) * sector;
         let end = device_offset + length;
         let aligned_end = end.div_ceil(sector) * sector;
-        let raw = self.device.read_at(aligned_start, aligned_end - aligned_start)?;
+        let raw = self
+            .device
+            .read_at(aligned_start, aligned_end - aligned_start)?;
         let start_in = (device_offset - aligned_start) as usize;
         Ok(raw[start_in..start_in + length as usize].to_vec())
     }
@@ -500,18 +512,15 @@ impl<'d> Journal<'d> {
         let aligned_start = (device_offset / sector) * sector;
         let end = device_offset + data.len() as u64;
         let aligned_end = end.div_ceil(sector) * sector;
-        let mut buf = self.device.read_at(aligned_start, aligned_end - aligned_start)?;
+        let mut buf = self
+            .device
+            .read_at(aligned_start, aligned_end - aligned_start)?;
         let start_in = (device_offset - aligned_start) as usize;
         buf[start_in..start_in + data.len()].copy_from_slice(data);
         self.device.write_at(aligned_start, &buf)
     }
 
-    fn append_record(
-        &mut self,
-        kind: RecordKind,
-        txn_id: u64,
-        payload: &[u8],
-    ) -> CoreFsResult<()> {
+    fn append_record(&mut self, kind: RecordKind, txn_id: u64, payload: &[u8]) -> CoreFsResult<()> {
         let total = (RECORD_HEADER_BYTES + payload.len() + RECORD_TRAILER_BYTES) as u64;
         if self.header.tail_offset + total > self.header.record_area_bytes {
             return Err(CoreFsError::State(

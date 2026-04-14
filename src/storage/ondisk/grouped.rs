@@ -46,9 +46,7 @@ use super::attr_block::AttrBlock;
 use super::bitmap::Bitmap;
 use super::block_group::{BlockGroupDescriptor, BlockGroupTable};
 use super::checksum::Crc32c;
-use super::inode::{
-    Extent, FLAG_HAS_EXTENT_INDEX, INODE_RECORD_SIZE, OnDiskInode, OnDiskKind,
-};
+use super::inode::{Extent, FLAG_HAS_EXTENT_INDEX, INODE_RECORD_SIZE, OnDiskInode, OnDiskKind};
 use super::layout::{
     BITS_PER_BITMAP_BLOCK, BLOCK_SIZE, INODES_PER_BLOCK, LayoutGeometry, ODF_MAGIC,
     ODF_VERSION_MAJOR, ODF_VERSION_MINOR, PRIMARY_SUPERBLOCK_BLOCK, RESERVED_BLOCK,
@@ -401,8 +399,8 @@ pub fn save_state_native_grouped(
 
     // --- Persist per-group bitmaps + descriptor table --------------------
     alloc.refresh_descriptors();
-    let data_blocks_used = table.groups.iter().map(|g| g.data_blocks).sum::<u64>()
-        - alloc.total_free_data_blocks();
+    let data_blocks_used =
+        table.groups.iter().map(|g| g.data_blocks).sum::<u64>() - alloc.total_free_data_blocks();
     let (refreshed_table, group_bitmaps, final_inode_bitmap) = alloc.into_parts();
     table = refreshed_table;
     for (g, bm) in table.groups.iter().zip(group_bitmaps.iter()) {
@@ -478,7 +476,9 @@ pub fn load_state_native_grouped(device: &dyn BlockDevice) -> CoreFsResult<Persi
     let (payload, crc_bytes) = anc_bytes.split_at(anc_bytes.len() - 4);
     let stored_crc = u32::from_le_bytes(crc_bytes.try_into().unwrap());
     if stored_crc != Crc32c::hash(payload) {
-        return Err(CoreFsError::State("grouped load: ancillary CRC mismatch".into()));
+        return Err(CoreFsError::State(
+            "grouped load: ancillary CRC mismatch".into(),
+        ));
     }
     let ancillary = super::native::decode_ancillary(payload)?;
 
@@ -574,9 +574,8 @@ fn write_user_inode(
         (vec![ext], 0u64, false)
     };
 
-    let attr_bytes = bincode::serialize(inode).map_err(|e| {
-        CoreFsError::State(format!("grouped: inode serialize failed: {e}"))
-    })?;
+    let attr_bytes = bincode::serialize(inode)
+        .map_err(|e| CoreFsError::State(format!("grouped: inode serialize failed: {e}")))?;
     if attr_bytes.len() > super::attr_block::ATTR_BLOCK_CAPACITY {
         return Err(CoreFsError::State(format!(
             "grouped: serialized inode {} exceeds attr block capacity",

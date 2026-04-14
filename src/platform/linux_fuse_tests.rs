@@ -246,8 +246,14 @@ fn odf_rw_persist_is_incremental() {
     // Change exactly ONE file; next incremental should classify 10 - 1
     // files as unchanged (the changed one is removed + re-created via
     // the service, so it counts as 1 removed + 1 created).
-    mount.service.delete_file("/odf-rw/inc5", false).expect("delete");
-    mount.service.create_file("/odf-rw/inc5", b"v2", &[]).expect("recreate");
+    mount
+        .service
+        .delete_file("/odf-rw/inc5", false)
+        .expect("delete");
+    mount
+        .service
+        .create_file("/odf-rw/inc5", b"v2", &[])
+        .expect("recreate");
 
     // Reach into the underlying device to read the incremental report.
     let state = mount.service.persisted_state();
@@ -311,9 +317,7 @@ fn odf_rw_crash_before_clean_persist_is_recovered_by_journal() {
             device,
             &crate::storage::ondisk::superblock::Superblock::decode_block(
                 &<FileImageDevice as crate::storage::block_device::BlockDevice>::read_at(
-                    device,
-                    BLOCK_SIZE,
-                    BLOCK_SIZE,
+                    device, BLOCK_SIZE, BLOCK_SIZE,
                 )
                 .unwrap(),
             )
@@ -544,7 +548,10 @@ fn rw_mount_new_file_can_be_opened_and_written_immediately() {
         .service
         .create_file("/docs/new.bin", b"", &[])
         .expect("create file");
-    let inode_id = mount.service.inode_for_path("/docs/new.bin").expect("inode");
+    let inode_id = mount
+        .service
+        .inode_for_path("/docs/new.bin")
+        .expect("inode");
     let ino = inode_id.0 + 1;
     let node = FuseNode {
         path: "/docs/new.bin".to_string(),
@@ -662,7 +669,8 @@ fn statfs_reports_capacity_and_decreases_free_blocks_with_data() {
     let mut fs = CoreFsService::format(CoreFsConfig::default());
     fs.create_file("/big.bin", &vec![0u8; 8192], &[])
         .expect("file");
-    let mount = CoreFsFuseMountRw::from_service(fs, FuseBacking::File(PathBuf::from("/tmp/test.img")));
+    let mount =
+        CoreFsFuseMountRw::from_service(fs, FuseBacking::File(PathBuf::from("/tmp/test.img")));
     let free_with_data = fuse_free_blocks(&mount.nodes_by_ino);
     assert!(
         free_with_data < total,
@@ -709,7 +717,8 @@ fn rw_mount_rename_directory_cascades_in_indexes() {
     fs.create_directory("/src/utils").expect("subdir");
     fs.create_file("/src/utils/helper.rs", b"//h", &[])
         .expect("file");
-    let mut mount = CoreFsFuseMountRw::from_service(fs, FuseBacking::File(PathBuf::from("/tmp/test.img")));
+    let mut mount =
+        CoreFsFuseMountRw::from_service(fs, FuseBacking::File(PathBuf::from("/tmp/test.img")));
 
     mount
         .service
@@ -861,7 +870,8 @@ fn rw_mount_with_snapshot() -> CoreFsFuseMountRw {
     // Take a snapshot capturing v1 (captures all live paths automatically).
     fs.create_snapshot("snap1");
     // Now write v2 so the live file differs from the snapshot.
-    fs.write_file("/data/hello.txt", b"v2 content").expect("write v2");
+    fs.write_file("/data/hello.txt", b"v2 content")
+        .expect("write v2");
     CoreFsFuseMountRw::from_service(fs, FuseBacking::File(path))
 }
 
@@ -925,11 +935,17 @@ fn virt_file_ino_is_created_and_deduplicated() {
     };
     let ino1 = mount.get_or_create_virt_file(
         key.clone(),
-        VirtFile { bytes: b"v1 content".to_vec(), modified_at: snap.created_at },
+        VirtFile {
+            bytes: b"v1 content".to_vec(),
+            modified_at: snap.created_at,
+        },
     );
     let ino2 = mount.get_or_create_virt_file(
         key,
-        VirtFile { bytes: b"should not replace".to_vec(), modified_at: snap.created_at },
+        VirtFile {
+            bytes: b"should not replace".to_vec(),
+            modified_at: snap.created_at,
+        },
     );
     // Second call with the same key must return the same INO (deduplication).
     assert_eq!(ino1, ino2, "same VirtKey must always yield the same INO");
@@ -968,7 +984,10 @@ fn virt_file_read_serves_snapshot_content() {
         "virtual file must hold the snapshot-time bytes"
     );
     // Confirm the live file now has v2 content.
-    let live = mount.service.read_file("/data/hello.txt").expect("live read");
+    let live = mount
+        .service
+        .read_file("/data/hello.txt")
+        .expect("live read");
     assert_ne!(live, snap_bytes, "live file should differ from snapshot");
 }
 
@@ -1039,7 +1058,9 @@ fn snapshot_children_lists_direct_children_only() {
     let children = mount.snapshot_children(&snap.paths, "/");
     // "/data/hello.txt" was captured; root children should include "data" (as dir).
     assert!(
-        children.iter().any(|(name, _, is_dir)| name == "data" && *is_dir),
+        children
+            .iter()
+            .any(|(name, _, is_dir)| name == "data" && *is_dir),
         "should list 'data' as a directory under root"
     );
     // "hello.txt" itself should not appear at root level.
@@ -1056,7 +1077,9 @@ fn snapshot_children_at_subdir_lists_files() {
     let snap = &snaps[0];
     let children = mount.snapshot_children(&snap.paths, "/data");
     assert!(
-        children.iter().any(|(name, _, is_dir)| name == "hello.txt" && !*is_dir),
+        children
+            .iter()
+            .any(|(name, _, is_dir)| name == "hello.txt" && !*is_dir),
         "should list hello.txt as a file under /data"
     );
 }
