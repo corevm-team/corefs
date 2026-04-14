@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
 **Build-Status:** stabil  
-**Test-Status:** `451/451` Tests erfolgreich  
+**Test-Status:** `476/476` Tests erfolgreich  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -244,9 +244,11 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
   - **fsck-Walker** (`fsck.rs`): vollständiger Read-Only-Konsistenz-Check mit Issue-Codes (ODF.SB.*, ODF.BBM.CRC, ODF.IBM.CRC, ODF.INODE.*, ODF.BLOCK.DOUBLE_ALLOCATED, ODF.JOURNAL.*), prüft Superblock-Redundanz+Generation, Bitmap-CRCs, free_blocks/free_inodes-Konsistenz, Inode-Record-Decode, Extent-Grenzen, Double-Allocation-Detection, Attr-Block-Pointer, Journal-Header
   - **Benchmark** (`benchmark.rs`): Micro-Benchmark `run_odf_bench()` misst format+save+load-Pipeline für Blob- und Native-Modus mit synthetischem State
   - **TRIM-Propagation**: freigegebene Payload-Extents werden beim `save_state` per `BlockDevice::trim` an das Gerät gemeldet
+  - **Inkrementelle Native-Saves** (`native::save_state_native_incremental`): liest die aktuelle Inode-Bitmap und jedes belegte Slot (Domain-ID, data_crc, FLAG_DELETED, Extents, Attr-Block); klassifiziert jedes Inode als Created/Updated/Removed/Unchanged; freigegebene Extents+Attr-Blöcke der entfernten Inodes gehen zuerst zurück in den Allocator (Pass 1), Updates rewritten am gleichen Slot, Creates greifen auf die freie Slack zu, Unchanged bleiben unangetastet; Ancillary-Slot wird immer rewritten, Generation und Bitmap-CRCs werden gebumpt; Erstaufruf fällt automatisch auf vollen `save_state_native` zurück
+  - **Block-Groups** (`block_group.rs`, `multi_group_allocator.rs`): On-Disk-`BlockGroupDescriptor` (data_start, data_blocks, bitmap_block, inode_range_start/count, free_blocks, bitmap_crc — 48 Bytes), CRC-geschützter `BlockGroupTable`-Block mit bis zu 84 Descriptors, Overlap-Detection beim Konstruieren; `MultiGroupAllocator` mit `allocate_near(count, inode_slot)` der das Home-Group des Inode-Slots bevorzugt und nur bei vollem Home auf Round-Robin durch die anderen Groups ausweicht, Free-Extent geht zurück in die korrekte Group, `refresh_descriptors()` aktualisiert Free-Counter und Bitmap-CRCs für persistente Tabelle; vorbereitet für `FEATURE_INCOMPAT_BLOCK_GROUPS`-Aktivierung in einer ODF-v2-Layout-Variante (single-group-Modus von ODF v1 bleibt Default)
   - **CLI-Integration**: `mkfs-odf`, `fsck-odf`, `inspect-odf`, `migrate-to-odf` (liest legacy `volume_image` und schreibt Native-ODF)
   - Top-Level-APIs `format_device`/`save_state`/`load_state`/`inspect` (Blob-Modus) + `save_state_native`/`load_state_native` (Native-Modus) auf beliebigen `BlockDevice`-Implementierungen
-  - Getestet mit **143 Unit-Tests** (Layout-Planer, CRC32C-Testvektoren, Superblock-Roundtrip+Korruptionsprüfung, Bitmap-Allokation, Inode-Record-Roundtrip, Extent-Chain-Roundtrip+Loop-Detection, Dir-Block-Roundtrip+Pack, Attr-Block-Roundtrip, Xattr-Block-Roundtrip+Principal-Reject, Allocator-First/Best-Fit+Inode-Slots, Journal-Commit/Replay/Abort/Partial-Discard/Multi-Txn-Ordering, Format+Save+Load-Roundtrip, redundanter Superblock-Fallback, Native-Roundtrip-Scenarios, Encryption-Flag-Propagation, fsck-Clean/Corrupt/Read-Only, Micro-Benchmark, CLI-End-to-End) plus 2 neue CLI-Integrations-Tests
+  - Getestet mit **149 Unit-Tests** (Layout-Planer, CRC32C-Testvektoren, Superblock-Roundtrip+Korruptionsprüfung, Bitmap-Allokation, Inode-Record-Roundtrip, Extent-Chain-Roundtrip+Loop-Detection, Dir-Block-Roundtrip+Pack, Attr-Block-Roundtrip, Xattr-Block-Roundtrip+Principal-Reject, Allocator-First/Best-Fit+Inode-Slots, Journal-Commit/Replay/Abort/Partial-Discard/Multi-Txn-Ordering, Format+Save+Load-Roundtrip, redundanter Superblock-Fallback, Native-Roundtrip-Scenarios, Encryption-Flag-Propagation, fsck-Clean/Corrupt/Read-Only, Micro-Benchmark, CLI-End-to-End) plus 2 neue CLI-Integrations-Tests
 
 ### `src/services`
 
