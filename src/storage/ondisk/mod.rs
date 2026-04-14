@@ -95,7 +95,6 @@
 
 pub mod benchmark;
 pub mod concurrency;
-pub mod fsck;
 pub mod fsck_repair;
 pub mod grouped;
 pub mod journaled;
@@ -110,8 +109,16 @@ pub mod volume;
 
 pub use corefs_core::storage::ondisk::{
     allocator, attr_block, bitmap, block_group, checksum, dir_entry, extent_tree, fault_injection,
-    inode, journal, layout, multi_group_allocator, refcount, superblock, tiering, xattr,
+    fsck, inode, journal, layout, multi_group_allocator, refcount, superblock, tiering, xattr,
 };
+
+// Tests for `fsck` live in this main crate because they depend on
+// crate::app::PersistedState + the native/blob volume helpers that are
+// still main-crate-only. The module file is in src/storage/ondisk/
+// alongside where fsck.rs used to live.
+#[cfg(test)]
+#[path = "fsck_tests.rs"]
+mod fsck_tests;
 
 pub use volume::{
     FormatOptions, FormatReport, SaveReport, VolumeInfo, format_device, inspect, load_state,

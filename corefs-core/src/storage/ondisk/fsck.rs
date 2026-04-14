@@ -22,7 +22,12 @@
 //! * No two inodes share a data block (double-allocation detection).
 //! * Journal header is decodable (if journal region is populated).
 
-use std::collections::{BTreeMap, HashMap};
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use hashbrown::HashMap;
 
 use crate::error::CoreFsResult;
 use crate::storage::block_device::BlockDevice;
@@ -383,6 +388,8 @@ impl CloneableErr for crate::error::CoreFsError {
     }
 }
 
-#[cfg(test)]
-#[path = "fsck_tests.rs"]
-mod tests;
+// Tests live in the main `corefs` crate (src/storage/ondisk/fsck_tests.rs)
+// because they depend on crate::app::PersistedState and the blob-/native-
+// mode volume helpers that have not been migrated to corefs-core yet.
+// The main crate's src/storage/ondisk/mod.rs includes them via
+// `#[path = "fsck_tests.rs"] mod fsck_tests_in_main;` under `#[cfg(test)]`.

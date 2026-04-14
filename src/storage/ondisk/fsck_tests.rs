@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use crate::storage::block_device::BlockDevice;
+use crate::storage::ondisk::fsck::*;
 use crate::app::PersistedState;
 use crate::config::CoreFsConfig;
 use crate::domain::inode::{Inode, InodeId, InodeKind};

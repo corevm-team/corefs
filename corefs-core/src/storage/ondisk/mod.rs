@@ -17,6 +17,7 @@ pub mod checksum;
 pub mod dir_entry;
 pub mod extent_tree;
 pub mod fault_injection;
+pub mod fsck;
 pub mod inode;
 pub mod journal;
 pub mod layout;
