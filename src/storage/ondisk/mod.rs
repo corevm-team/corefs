@@ -104,6 +104,7 @@ pub mod extent_tree;
 pub mod fsck;
 pub mod inode;
 pub mod journal;
+pub mod journaled;
 pub mod layout;
 pub mod multi_group_allocator;
 pub mod native;
