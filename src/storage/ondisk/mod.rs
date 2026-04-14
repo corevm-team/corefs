@@ -113,6 +113,7 @@ pub mod layout;
 pub mod multi_group_allocator;
 pub mod native;
 pub mod reader;
+pub mod refcount;
 pub mod resilience;
 pub mod session;
 pub mod stress;

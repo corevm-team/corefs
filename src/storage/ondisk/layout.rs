@@ -70,9 +70,14 @@ pub const FEATURE_COMPAT_REDUNDANT_SUPERBLOCKS: u64 = 1 << 1;
 /// the activation flag for [`super::grouped`].
 pub const FEATURE_INCOMPAT_BLOCK_GROUPS: u64 = 1 << 1;
 
+/// Feature flag — physical copy-on-write: the volume carries a
+/// per-data-block refcount table (see [`super::refcount`]).
+pub const FEATURE_INCOMPAT_PHYSICAL_COW: u64 = 1 << 2;
+
 /// Bit-wise union of all incompatible features this build understands.
-pub const SUPPORTED_INCOMPAT: u64 =
-    FEATURE_INCOMPAT_PAYLOAD_INODE | FEATURE_INCOMPAT_BLOCK_GROUPS;
+pub const SUPPORTED_INCOMPAT: u64 = FEATURE_INCOMPAT_PAYLOAD_INODE
+    | FEATURE_INCOMPAT_BLOCK_GROUPS
+    | FEATURE_INCOMPAT_PHYSICAL_COW;
 /// Bit-wise union of all read-only-compat features this build understands.
 pub const SUPPORTED_RO_COMPAT: u64 = 0;
 
