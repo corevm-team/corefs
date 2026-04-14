@@ -42,6 +42,7 @@
 
 extern crate alloc;
 
+pub mod bincode_compat;
 pub mod platform;
 pub mod config;
 pub mod domain;

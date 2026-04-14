@@ -7,18 +7,20 @@ description = "CoreFS core — plattformneutrale, no_std-fähige Domain- und Sto
 
 [features]
 default = []
-# `std` aktiviert std-Bequemlichkeiten (Display, std::error::Error-Impls, From-Konvertierungen von std::time::SystemTime, …)
-# sowie die std-gebundenen ondisk-Module (volume, native, grouped, journaled, fsck_repair, reader, scrub),
-# die auf `bincode` angewiesen sind.  Ohne `std` ist die Crate `no_std + alloc` und kann im AnyOS-Kernel
-# gelinkt werden.
-std = ["dep:bincode"]
+# `std` aktiviert std-Bequemlichkeiten (Display, std::error::Error-Impls,
+# From-Konvertierungen von std::time::SystemTime, …). `bincode` ist seit der
+# Wave-5-Migration unconditional verfügbar (no_std-fähige Variante 2.x,
+# gespiegelt über `crate::bincode_compat` auf das klassische 1.x-API). Damit
+# kompilieren auch die ehemals std-gebundenen ondisk-Treiber (volume, native,
+# grouped, journaled, fsck_repair, reader, scrub) im strikten
+# `no_std + alloc`-Modus und können im AnyOS-Kernel gelinkt werden.
+std = []
 
 [dependencies]
 serde = { workspace = true }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more", "serde"] }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "getrandom"] }
-bincode = { version = "1", optional = true }
+bincode = { workspace = true }
 
 [dev-dependencies]
-bincode = "1"
 serde_json = "1"

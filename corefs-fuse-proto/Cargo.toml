@@ -7,11 +7,11 @@ description = "AnyOS-natives Wire-Format für das CoreFS-FUSE-Subsystem (Request
 
 [features]
 default = []
-# Aktiviert std-seitige Bequemlichkeiten und die bincode-basierten
-# Encode/Decode-Helfer. Ohne `std` ist die Crate strikt no_std + alloc;
-# AnyOS-Kernel-Konsumenten liefern ihren eigenen Wire-Codec.
-std = ["dep:bincode"]
+# Aktiviert std-seitige Bequemlichkeiten. `bincode` ist seit der
+# Wave-5-Migration unconditional verfügbar (no_std-fähige Variante 2.x);
+# die `wire`-Encode/Decode-Helfer sind damit stets verfügbar.
+std = []
 
 [dependencies]
 serde = { workspace = true }
-bincode = { version = "1", optional = true }
+bincode = { workspace = true }
