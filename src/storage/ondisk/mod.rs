@@ -56,6 +56,7 @@
 //! [`PersistedState`]: crate::app::PersistedState
 //! [mem]: crate::storage::block_device::MemoryDevice
 
+pub mod allocator;
 pub mod bitmap;
 pub mod checksum;
 pub mod inode;

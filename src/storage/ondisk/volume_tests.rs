@@ -212,6 +212,37 @@ fn reports_error_when_unformatted_device_is_loaded() {
 }
 
 #[test]
+fn bitmap_crc_detects_tampered_block_bitmap() {
+    let mut dev = fresh_device(4096);
+    format_device(&mut dev, &default_options()).unwrap();
+    save_state(&mut dev, &empty_state()).unwrap();
+
+    // Flip a single bit in the persisted block bitmap.
+    let sb_bytes = dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap();
+    let sb = crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();
+    let mut bmp = dev
+        .read_at(sb.block_bitmap_start * BLOCK_SIZE, BLOCK_SIZE)
+        .unwrap();
+    bmp[50] ^= 0x10;
+    dev.write_at(sb.block_bitmap_start * BLOCK_SIZE, &bmp).unwrap();
+
+    let err = load_state(&dev).unwrap_err();
+    assert!(format!("{err}").contains("block bitmap CRC"));
+}
+
+#[test]
+fn bitmap_crc_is_recorded_in_superblock() {
+    let mut dev = fresh_device(4096);
+    format_device(&mut dev, &default_options()).unwrap();
+    save_state(&mut dev, &empty_state()).unwrap();
+    let sb_bytes = dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap();
+    let sb = crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();
+    assert_ne!(sb.block_bitmap_crc, 0);
+    assert_ne!(sb.inode_bitmap_crc, 0);
+    assert_eq!(sb.layout_mode, crate::storage::ondisk::superblock::LAYOUT_MODE_BLOB);
+}
+
+#[test]
 fn state_with_snapshot_roundtrips() {
     use crate::domain::snapshot::Snapshot;
     use std::collections::BTreeMap;

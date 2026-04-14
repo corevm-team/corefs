@@ -28,6 +28,13 @@ pub const SUPERBLOCK_CHECKSUM_OFFSET: usize = SUPERBLOCK_STRUCT_BYTES - 4;
 pub const STATE_CLEAN: u32 = 0;
 /// Volume states — dirty means a session was open when the volume was last seen.
 pub const STATE_DIRTY: u32 = 1;
+/// Layout mode — the whole `PersistedState` is inlined as a bincode blob
+/// into the system payload inode.  Compact, single-inode format.
+pub const LAYOUT_MODE_BLOB: u32 = 0;
+/// Layout mode — every domain inode gets its own on-disk inode slot and
+/// directories live as dir-entry blocks.  Supports per-inode `fsck`,
+/// xattrs and encryption flags, and per-data-block checksums.
+pub const LAYOUT_MODE_NATIVE: u32 = 1;
 
 /// Memory representation of the on-disk superblock.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +70,14 @@ pub struct Superblock {
     pub generation: u64,
     pub state: u32,
     pub payload_inode: u64,
+    /// CRC32C of the full block-allocation bitmap buffer.
+    pub block_bitmap_crc: u32,
+    /// CRC32C of the full inode-allocation bitmap buffer.
+    pub inode_bitmap_crc: u32,
+    /// ODF layout mode — 0 = blob payload, 1 = native per-inode layout.
+    pub layout_mode: u32,
+    /// ODF inode number of the root directory (0 if not populated).
+    pub root_inode: u64,
 }
 
 impl Superblock {
@@ -109,6 +124,10 @@ impl Superblock {
             generation: 1,
             state: STATE_CLEAN,
             payload_inode: 0,
+            block_bitmap_crc: 0,
+            inode_bitmap_crc: 0,
+            layout_mode: 0,
+            root_inode: 0,
         }
     }
 
@@ -172,6 +191,10 @@ impl Superblock {
         w.write_all(&self.generation.to_le_bytes()).unwrap();
         w.write_all(&self.state.to_le_bytes()).unwrap();
         w.write_all(&self.payload_inode.to_le_bytes()).unwrap();
+        w.write_all(&self.block_bitmap_crc.to_le_bytes()).unwrap();
+        w.write_all(&self.inode_bitmap_crc.to_le_bytes()).unwrap();
+        w.write_all(&self.layout_mode.to_le_bytes()).unwrap();
+        w.write_all(&self.root_inode.to_le_bytes()).unwrap();
         // Remaining bytes up to SUPERBLOCK_CHECKSUM_OFFSET are padding (zero).
         let checksum = Crc32c::hash(&block);
         block[SUPERBLOCK_CHECKSUM_OFFSET..SUPERBLOCK_CHECKSUM_OFFSET + 4]
@@ -253,6 +276,10 @@ impl Superblock {
         let generation = u64::from_le_bytes(take::<8>(block, &mut p));
         let state = u32::from_le_bytes(take::<4>(block, &mut p));
         let payload_inode = u64::from_le_bytes(take::<8>(block, &mut p));
+        let block_bitmap_crc = u32::from_le_bytes(take::<4>(block, &mut p));
+        let inode_bitmap_crc = u32::from_le_bytes(take::<4>(block, &mut p));
+        let layout_mode = u32::from_le_bytes(take::<4>(block, &mut p));
+        let root_inode = u64::from_le_bytes(take::<8>(block, &mut p));
 
         let unknown_incompat = feature_incompat & !SUPPORTED_INCOMPAT;
         if unknown_incompat != 0 {
@@ -299,6 +326,10 @@ impl Superblock {
             generation,
             state,
             payload_inode,
+            block_bitmap_crc,
+            inode_bitmap_crc,
+            layout_mode,
+            root_inode,
         })
     }
 }

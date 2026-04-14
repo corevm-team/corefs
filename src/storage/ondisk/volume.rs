@@ -153,6 +153,15 @@ pub fn save_state(
     let mut sb = read_primary_superblock_with_fallbacks(device)?;
     let geom = sb.geometry();
 
+    // --- TRIM old payload extents before we overwrite them ----------------
+    // Read the current system inode so we know which data blocks the
+    // previous generation was occupying and discard them on the device.
+    if let Ok(old_inode) = read_inode_record(device, &geom, sb.payload_inode) {
+        if old_inode.kind == OnDiskKind::SystemPayload && !old_inode.extents.is_empty() {
+            trim_extents(device, &old_inode.extents)?;
+        }
+    }
+
     // --- Serialise payload + CRC trailer ---------------------------------
     let mut payload = bincode::serialize(state).map_err(|e| {
         CoreFsError::State(format!("ODF: failed to serialize PersistedState: {e}"))
@@ -169,7 +178,7 @@ pub fn save_state(
         )));
     }
 
-    // --- Reset block bitmap: only control blocks + new payload extent stay set.
+    // --- Reset bitmaps: only control blocks + new payload extent stay set.
     let mut block_bitmap = Bitmap::new(geom.total_blocks);
     mark_reserved_blocks(&mut block_bitmap, &geom)?;
     let payload_start = geom.data_start;
@@ -180,6 +189,14 @@ pub fn save_state(
         device,
         geom.block_bitmap_start,
         block_bitmap.as_bytes(),
+    )?;
+
+    let mut inode_bitmap = Bitmap::new(geom.inode_count);
+    inode_bitmap.set(0)?;
+    write_blocks(
+        device,
+        geom.inode_bitmap_start,
+        inode_bitmap.as_bytes(),
     )?;
 
     // --- Write payload blocks --------------------------------------------
@@ -212,13 +229,17 @@ pub fn save_state(
     };
     write_inode_record(device, &geom, 0, &system_inode)?;
 
-    // --- Bump + rewrite superblock(s) ------------------------------------
+    // --- Bump + rewrite superblock(s) with bitmap CRCs --------------------
     sb.generation += 1;
     sb.last_write_at = now;
     sb.state = STATE_CLEAN;
     sb.payload_inode = 0;
     sb.free_blocks = geom.data_blocks - payload_blocks_needed;
     sb.free_inodes = geom.inode_count - 1;
+    sb.block_bitmap_crc = Crc32c::hash(block_bitmap.as_bytes());
+    sb.inode_bitmap_crc = Crc32c::hash(inode_bitmap.as_bytes());
+    sb.layout_mode = super::superblock::LAYOUT_MODE_BLOB;
+    sb.root_inode = 0;
     let sb_block = sb.encode_block();
     write_block(device, PRIMARY_SUPERBLOCK_BLOCK, &sb_block)?;
     write_block(device, geom.tertiary_superblock_block, &sb_block)?;
@@ -243,6 +264,7 @@ pub struct SaveReport {
 /// Load a `PersistedState` payload from a previously saved volume.
 pub fn load_state(device: &dyn BlockDevice) -> CoreFsResult<PersistedState> {
     let sb = read_primary_superblock_with_fallbacks(device)?;
+    verify_bitmap_integrity(device, &sb)?;
     let geom = sb.geometry();
     let system_inode = read_inode_record(device, &geom, sb.payload_inode)?;
     if system_inode.kind != OnDiskKind::SystemPayload {
@@ -405,6 +427,62 @@ fn zero_fill_region(
 fn read_superblock_at(device: &dyn BlockDevice, block: u64) -> CoreFsResult<Superblock> {
     let buf = device.read_at(block * BLOCK_SIZE, BLOCK_SIZE)?;
     Superblock::decode_block(&buf)
+}
+
+fn trim_extents(
+    device: &mut dyn BlockDevice,
+    extents: &[Extent],
+) -> CoreFsResult<()> {
+    if !device.supports_trim() {
+        return Ok(());
+    }
+    for ext in extents {
+        if ext.length_blocks == 0 {
+            continue;
+        }
+        let offset = ext.physical_block * BLOCK_SIZE;
+        let length = u64::from(ext.length_blocks) * BLOCK_SIZE;
+        // TRIM is advisory — ignore errors so a single failing discard
+        // does not make a successful save look like a failure.
+        let _ = device.trim(offset, length);
+    }
+    Ok(())
+}
+
+/// Verify that the persisted bitmap bytes still match the CRC32C values
+/// recorded in the superblock.  Returns an error if either bitmap is
+/// corrupted or has been tampered with since the last save.
+pub fn verify_bitmap_integrity(
+    device: &dyn BlockDevice,
+    sb: &Superblock,
+) -> CoreFsResult<()> {
+    if sb.block_bitmap_crc != 0 {
+        let bytes = device.read_at(
+            sb.block_bitmap_start * BLOCK_SIZE,
+            sb.block_bitmap_blocks * BLOCK_SIZE,
+        )?;
+        let actual = Crc32c::hash(&bytes);
+        if actual != sb.block_bitmap_crc {
+            return Err(CoreFsError::State(format!(
+                "ODF: block bitmap CRC mismatch (stored=0x{:08X}, actual=0x{:08X})",
+                sb.block_bitmap_crc, actual
+            )));
+        }
+    }
+    if sb.inode_bitmap_crc != 0 {
+        let bytes = device.read_at(
+            sb.inode_bitmap_start * BLOCK_SIZE,
+            sb.inode_bitmap_blocks * BLOCK_SIZE,
+        )?;
+        let actual = Crc32c::hash(&bytes);
+        if actual != sb.inode_bitmap_crc {
+            return Err(CoreFsError::State(format!(
+                "ODF: inode bitmap CRC mismatch (stored=0x{:08X}, actual=0x{:08X})",
+                sb.inode_bitmap_crc, actual
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn read_primary_superblock_with_fallbacks(device: &dyn BlockDevice) -> CoreFsResult<Superblock> {
