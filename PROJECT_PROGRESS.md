@@ -486,17 +486,18 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 
 ### 5.8 AnyOS — Tool-Apps
 
-- [ ] `anyos/apps/mkfs.corefs/`
-- [ ] `anyos/apps/fsck.corefs/` (inkl. Repair-Policies)
-- [ ] `anyos/apps/corefs-dump/` (Superblock/Inode-Inspection)
-- [ ] `anyos/apps/corefs-scrub/`
-- [ ] `anyos/apps/corefs-defrag/`
-- [ ] `anyos/apps/corefs-snapshot/` (create/list/delete/restore)
-- [ ] `anyos/apps/corefs-resize/`
-- [ ] `anyos/apps/corefs-tier/`
-- [ ] Gemeinsames Arg-Parsing-Hilfsmodul (Clap ist std-only → leichtgewichtiger Ersatz oder portable Teilmenge)
-- [ ] Einheitliche Report-Rendering-Routinen (Text + JSON)
-- [ ] Build-Integration in das CMake/Ninja-Setup von AnyOS
+- [x] `anyos/bin/mkfs.corefs/` — wrappt `corefs_core::storage::ondisk::volume::format_device`; `--device --capacity [--label --inodes --journal-blocks --json]`
+- [x] `anyos/bin/fsck.corefs/` — wrappt `fsck::check` + optional `fsck_repair::repair`; strukturierte Severity-Berichte in Text + JSON; Exit-Code reflektiert clean/dirty
+- [x] `anyos/bin/corefs-dump/` — Subcommands `superblock` (via `volume::inspect`) und `inode <slot>` (via `OdfReader`); Text + JSON
+- [x] `anyos/bin/corefs-scrub/` — wrappt `scrub::run`; `--mode full|structural|read-only`; Data-Corruption- und Residual-Issues-Listen
+- [x] `anyos/bin/corefs-defrag/` — **Stub** (`ExitCode::Unsupported`): Defragmentierung hängt an `OdfDeviceSession` im std-gebundenen main `corefs` crate; CLI parst Args und prüft Device-Handle
+- [x] `anyos/bin/corefs-snapshot/` — **Stub** (`ExitCode::Unsupported`): list/create/delete/restore Subcommand-Dispatch vorhanden, blockiert auf `OdfDeviceSession`
+- [x] `anyos/bin/corefs-resize/` — **Stub** (`ExitCode::Unsupported`): grow/shrink Pfad noch nicht in `corefs-core`
+- [x] `anyos/bin/corefs-tier/` — **Stub** (`ExitCode::Unsupported`): promote/demote/status, blockiert auf `OdfDeviceSession`
+- [x] Gemeinsames Arg-Parsing-Hilfsmodul: `anyos/libs/libcorefs-tools/args.rs` — GNU-style long-option Parser (`--device 0`, `--capacity 16M`, `--json`) mit `_`-Digit-Separator und k/M/G/T-Multiplikatoren
+- [x] Einheitliche Report-Rendering-Routinen: `anyos/libs/libcorefs-tools/report.rs` — `Report`-Trait + handrolliger `JsonBuilder` (kein `serde_json`, `no_std+alloc`-fähig)
+- [x] Build-Integration: `anyos/cmake/UserPrograms.cmake` — Cargo-Package-Namen mit `_` (Cargo verbietet `.`), Sysroot-ELFs werden via `anyelf` nach `/System/sbin/mkfs.corefs`, `/System/sbin/fsck.corefs`, `/System/sbin/corefs-*` umbenannt
+- [x] Shared-Library `anyos/libs/libcorefs-tools/` — `AnyOsBlockDevice` (implementiert `BlockDevice`-Trait über `sys::disk_read`/`disk_write`, mit Partition-LBA-Offset und `MockBackend` für Host-Tests), `CoreFsError → ExitCode`-Mapping; 27 Host-Tests (22 Unit + 5 Integration) in `anyos/libs/libcorefs-tools_tests/` mit entkoppeltem Cargo-Workspace
 
 ### 5.9 Online-Tools (spätere Ausbaustufe)
 
