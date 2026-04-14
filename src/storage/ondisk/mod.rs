@@ -119,6 +119,7 @@ pub mod scrub;
 pub mod session;
 pub mod stress;
 pub mod superblock;
+pub mod tiering;
 pub mod volume;
 pub mod xattr;
 
