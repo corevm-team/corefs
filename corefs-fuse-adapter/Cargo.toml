@@ -1,0 +1,17 @@
+[package]
+name = "corefs-fuse-adapter"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+description = "Plattformneutraler Adapter zwischen CoreFS-Operationen und dem corefs-fuse-proto-Wire-Format."
+
+[features]
+default = []
+# Reicht das `std`-Feature an `corefs-fuse-proto` weiter, sodass die
+# bincode-Encode/Decode-Helfer verfügbar werden.
+std = ["corefs-fuse-proto/std"]
+
+[dependencies]
+corefs-core = { path = "../corefs-core" }
+corefs-fuse-proto = { path = "../corefs-fuse-proto" }
+serde = { workspace = true }

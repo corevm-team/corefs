@@ -395,15 +395,15 @@ Ziel: CoreFS als natives Dateisystem des eigenen Betriebssystems AnyOS (`/daten1
 
 ### 5.1 Workspace-Split in CoreFS
 
-- [x] Cargo-Workspace in `corefs/` anlegen (root-Manifest mit `.` und `corefs-core` als Member; `[workspace.package]` und `[workspace.dependencies]` zentralisiert)
-- [~] Crate `corefs-core` (no_std + alloc) — reine FS-Logik: `domain/`, `storage/`, `services/` (Skelett vorhanden; `platform` strikt no_std+alloc; `domain` + `config` migriert, noch hinter `std`-Feature-Gate bis SystemTime → Timestamp-Migration abgeschlossen ist; `storage` + `services` noch im main crate)
-- [ ] Crate `corefs-tools` (no_std + alloc) — Operation-APIs: mkfs, fsck, repair, scrub, dump, defrag, resize, tier, snapshot
-- [ ] Crate `corefs-std` (std) — `FileImageDevice`, `RawBlockDevice`, std-Clock-/Rng-Impls, CLI-Helpers
-- [ ] Crate `corefs-fuse-proto` (no_std) — AnyOS-natives Wire-Format (`Request`/`Reply`-Enums, Encode/Decode via bincode)
-- [ ] Crate `corefs-fuse-adapter` (no_std) — plattformneutraler CoreFs ↔ Request/Reply-Adapter
-- [ ] Crate `corefs-cli` (std) — dünner Binary-Wrapper um `corefs-tools`
+- [x] Cargo-Workspace in `corefs/` anlegen (root-Manifest mit `.`, `corefs-core`, `corefs-tools`, `corefs-std`, `corefs-fuse-proto`, `corefs-fuse-adapter` als Member; `[workspace.package]` und `[workspace.dependencies]` zentralisiert)
+- [~] Crate `corefs-core` (no_std + alloc) — `domain/` + `config` + `platform` strikt no_std+alloc und vollständig migriert; `storage` + `services` weiter im main crate (späterer Migrationsschritt)
+- [x] Crate `corefs-tools` (std, später no_std) — Operation-APIs: mkfs, fsck, repair, scrub, dump, defrag, snapshot (8/10 implementiert; resize+tier als planned dokumentiert; siehe 5.3)
+- [x] Crate `corefs-std` (std) — `Clock`-/`Rng`-Re-Exports + `StdRng`-Implementierung; langfristiger Sammelpunkt für `FileImageDevice`/`RawBlockDevice` (Migration mit storage)
+- [x] Crate `corefs-fuse-proto` (no_std + alloc) — AnyOS-natives Wire-Format: `Request`/`Reply`/`ReplyPayload`-Enums, `FrameHeader`, `Attr`, `DirEntry`, `StatFs`; `wire`-Modul mit bincode-Encode/Decode hinter `std`-Feature; `PROTOCOL_VERSION` (1.0)
+- [x] Crate `corefs-fuse-adapter` (no_std + alloc) — `Transport`- und `FuseHandler`-Traits, `SessionLoop` mit Destroy-Termination und Reply-Mirroring; bindet `corefs-core` + `corefs-fuse-proto`
+- [ ] Crate `corefs-cli` (std) — dünner Binary-Wrapper um `corefs-tools` (offen — `corefs::main` nutzt heute noch direkt die Service-APIs; chirurgischer Refactor in eigenem Commit)
 - [x] Existierender Linux-`fuser`-Pfad ([src/platform/linux_fuse.rs](src/platform/linux_fuse.rs)) bleibt funktional (unverändert weitergeführt)
-- [x] Bestehende 636 Tests unverändert grün (631 main + 12 corefs-core + 1 doctest)
+- [x] Workspace-Tests grün (631 main + 21 corefs-core + 65 corefs-tools + 7 corefs-std + 7 corefs-fuse-proto + 6 corefs-fuse-adapter + Doctests)
 
 ### 5.2 no_std-Migration `corefs-core`
 

@@ -1,0 +1,9 @@
+[package]
+name = "corefs-std"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+description = "CoreFS standard-library bindings — std-Backends, Clock-/Rng-Implementierungen und Konvenienz-Helfer für hostseitige Konsumenten."
+
+[dependencies]
+corefs-core = { path = "../corefs-core", features = ["std"] }

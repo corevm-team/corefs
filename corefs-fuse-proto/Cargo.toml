@@ -1,0 +1,17 @@
+[package]
+name = "corefs-fuse-proto"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+description = "AnyOS-natives Wire-Format für das CoreFS-FUSE-Subsystem (Request/Reply-Enums, optional bincode-Kodierung)."
+
+[features]
+default = []
+# Aktiviert std-seitige Bequemlichkeiten und die bincode-basierten
+# Encode/Decode-Helfer. Ohne `std` ist die Crate strikt no_std + alloc;
+# AnyOS-Kernel-Konsumenten liefern ihren eigenen Wire-Codec.
+std = ["dep:bincode"]
+
+[dependencies]
+serde = { workspace = true }
+bincode = { version = "1", optional = true }

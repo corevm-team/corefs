@@ -1,5 +1,12 @@
 [workspace]
-members = [".", "corefs-core", "corefs-tools"]
+members = [
+    ".",
+    "corefs-core",
+    "corefs-tools",
+    "corefs-std",
+    "corefs-fuse-proto",
+    "corefs-fuse-adapter",
+]
 resolver = "2"
 
 [workspace.package]
