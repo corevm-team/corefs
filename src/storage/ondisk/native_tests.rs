@@ -251,6 +251,164 @@ fn encryption_flag_propagates_to_on_disk_inode() {
 }
 
 #[test]
+fn incremental_first_call_falls_back_to_full_save() {
+    let mut dev = fresh_device(4096);
+    format_device(&mut dev, &default_options()).unwrap();
+    let state = empty_state();
+    let report = save_state_native_incremental(&mut dev, &state).unwrap();
+    assert!(report.fell_back_to_full_save);
+    assert_eq!(report.generation, 2);
+}
+
+#[test]
+fn incremental_skips_unchanged_inodes() {
+    let mut dev = fresh_device(4096);
+    format_device(&mut dev, &default_options()).unwrap();
+    let mut state = empty_state();
+    for i in 1..=5 {
+        let payload = format!("v1-{i}");
+        let inode = sample_inode(i as u64, &format!("/f{i}"), InodeKind::File, payload.len());
+        state.active_inodes.push(inode.clone());
+        state.block_records.push(BlockRecord {
+            inode: inode.id,
+            bytes: payload.into_bytes(),
+            checksum: 0,
+            device_block: 0,
+            allocated_blocks: 0,
+        });
+    }
+    save_state_native(&mut dev, &state).unwrap();
+
+    // Re-save the same state — every inode should be reported unchanged.
+    let report = save_state_native_incremental(&mut dev, &state).unwrap();
+    assert!(!report.fell_back_to_full_save);
+    assert_eq!(report.unchanged, 5);
+    assert_eq!(report.created, 0);
+    assert_eq!(report.updated, 0);
+    assert_eq!(report.removed, 0);
+
+    let loaded = load_state_native(&dev).unwrap();
+    assert_eq!(loaded.active_inodes.len(), 5);
+    assert_eq!(loaded.block_records.len(), 5);
+}
+
+#[test]
+fn incremental_classifies_create_update_remove() {
+    let mut dev = fresh_device(4096);
+    format_device(&mut dev, &default_options()).unwrap();
+    let mut s1 = empty_state();
+    let push = |state: &mut PersistedState, id: u64, content: &str| {
+        let inode = sample_inode(id, &format!("/f{id}"), InodeKind::File, content.len());
+        state.active_inodes.push(inode.clone());
+        state.block_records.push(BlockRecord {
+            inode: inode.id,
+            bytes: content.as_bytes().to_vec(),
+            checksum: 0,
+            device_block: 0,
+            allocated_blocks: 0,
+        });
+    };
+    push(&mut s1, 1, "alpha");
+    push(&mut s1, 2, "beta");
+    push(&mut s1, 3, "gamma");
+    save_state_native(&mut dev, &s1).unwrap();
+
+    // s2 = s1 minus inode 3, plus inode 4, with inode 2's content updated.
+    let mut s2 = empty_state();
+    push(&mut s2, 1, "alpha");          // unchanged
+    push(&mut s2, 2, "beta-CHANGED");   // updated
+    push(&mut s2, 4, "delta");          // created (3 is removed implicitly)
+
+    let report = save_state_native_incremental(&mut dev, &s2).unwrap();
+    assert!(!report.fell_back_to_full_save);
+    assert_eq!(report.unchanged, 1, "inode 1");
+    assert_eq!(report.updated, 1, "inode 2");
+    assert_eq!(report.removed, 1, "inode 3");
+    assert_eq!(report.created, 1, "inode 4");
+
+    // Roundtrip: reloading must reflect the new state precisely.
+    let loaded = load_state_native(&dev).unwrap();
+    let by_id: std::collections::HashMap<u64, &Inode> =
+        loaded.active_inodes.iter().map(|i| (i.id.0, i)).collect();
+    assert_eq!(by_id.len(), 3);
+    assert!(by_id.contains_key(&1));
+    assert!(by_id.contains_key(&2));
+    assert!(!by_id.contains_key(&3));
+    assert!(by_id.contains_key(&4));
+    let new_content: std::collections::HashMap<u64, &[u8]> = loaded
+        .block_records
+        .iter()
+        .map(|r| (r.inode.0, r.bytes.as_slice()))
+        .collect();
+    assert_eq!(new_content[&2], b"beta-CHANGED");
+    assert_eq!(new_content[&4], b"delta");
+}
+
+#[test]
+fn incremental_save_reuses_freed_blocks() {
+    let mut dev = fresh_device(4096);
+    format_device(&mut dev, &default_options()).unwrap();
+    let mut s1 = empty_state();
+    let big = vec![0xAA; 16 * 1024]; // 4 blocks
+    let big_inode = sample_inode(7, "/big", InodeKind::File, big.len());
+    s1.active_inodes.push(big_inode.clone());
+    s1.block_records.push(BlockRecord {
+        inode: big_inode.id,
+        bytes: big,
+        checksum: 0,
+        device_block: 0,
+        allocated_blocks: 0,
+    });
+    save_state_native(&mut dev, &s1).unwrap();
+    let sb1 = crate::storage::ondisk::superblock::Superblock::decode_block(
+        &dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap(),
+    )
+    .unwrap();
+    let used_after_first = sb1.total_blocks - sb1.free_blocks - sb1.data_start;
+
+    // Remove the big inode entirely.
+    let s2 = empty_state();
+    let report = save_state_native_incremental(&mut dev, &s2).unwrap();
+    assert_eq!(report.removed, 1);
+
+    let sb2 = crate::storage::ondisk::superblock::Superblock::decode_block(
+        &dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap(),
+    )
+    .unwrap();
+    let used_after_remove = sb2.total_blocks - sb2.free_blocks - sb2.data_start;
+    assert!(
+        used_after_remove < used_after_first,
+        "expected fewer used blocks after remove (was {used_after_first}, now {used_after_remove})"
+    );
+}
+
+#[test]
+fn incremental_passes_fsck() {
+    let mut dev = fresh_device(4096);
+    format_device(&mut dev, &default_options()).unwrap();
+    let mut state = empty_state();
+    for i in 1..=4 {
+        let inode = sample_inode(i as u64, &format!("/f{i}"), InodeKind::File, 32);
+        state.active_inodes.push(inode.clone());
+        state.block_records.push(BlockRecord {
+            inode: inode.id,
+            bytes: vec![i as u8; 32],
+            checksum: 0,
+            device_block: 0,
+            allocated_blocks: 0,
+        });
+    }
+    save_state_native(&mut dev, &state).unwrap();
+    // Mutate one inode's content.
+    state.block_records[1].bytes = b"new content for inode 2".to_vec();
+    state.active_inodes[1].size = state.block_records[1].bytes.len();
+    save_state_native_incremental(&mut dev, &state).unwrap();
+
+    let fsck = crate::storage::ondisk::fsck::check(&dev).unwrap();
+    assert!(fsck.is_clean(), "issues after incremental: {:?}", fsck.issues);
+}
+
+#[test]
 fn root_inode_pointer_records_directory() {
     let mut dev = fresh_device(4096);
     format_device(&mut dev, &default_options()).unwrap();

@@ -343,6 +343,377 @@ pub fn load_state_native(device: &dyn BlockDevice) -> CoreFsResult<PersistedStat
 }
 
 // ---------------------------------------------------------------------------
+// Incremental save (P2.10)
+// ---------------------------------------------------------------------------
+
+/// Per-inode change classification produced by [`save_state_native_incremental`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IncrementalSaveReport {
+    pub generation: u64,
+    pub created: usize,
+    pub updated: usize,
+    pub removed: usize,
+    pub unchanged: usize,
+    pub fell_back_to_full_save: bool,
+}
+
+/// Persist `state` by rewriting only the inode slots whose content or
+/// deletion status has changed since the last save.
+///
+/// Falls back to a full [`save_state_native`] when the volume isn't yet
+/// in native layout.  In native mode the incremental path:
+///
+/// 1. Reads the existing inode bitmap and walks each allocated user slot
+///    to capture (`domain_inode_id`, `data_crc`, `FLAG_DELETED`,
+///    extents, attr block).
+/// 2. Compares against the desired set built from `state.active_inodes`
+///    + `state.deleted_inodes`.
+/// 3. For every inode classified as **created**, allocates a slot and
+///    writes content extents + attr block.  For **updated** inodes, the
+///    old extents and attr block are returned to the allocator and a
+///    fresh allocation is performed (in-place at the same slot).  For
+///    **removed** inodes the extents, attr block and slot are freed.
+///    **Unchanged** inodes are not touched at all.
+/// 4. Always rewrites the ancillary slot (#1) and bumps the superblock
+///    generation + bitmap CRCs.
+pub fn save_state_native_incremental(
+    device: &mut dyn BlockDevice,
+    state: &PersistedState,
+) -> CoreFsResult<IncrementalSaveReport> {
+    let sb = super::volume::read_sb_with_fallbacks(device)?;
+    if sb.layout_mode != LAYOUT_MODE_NATIVE {
+        let r = save_state_native(device, state)?;
+        return Ok(IncrementalSaveReport {
+            generation: r.generation,
+            created: r.active_slots + r.deleted_slots,
+            updated: 0,
+            removed: 0,
+            unchanged: 0,
+            fell_back_to_full_save: true,
+        });
+    }
+    let geom = sb.geometry();
+
+    // Capture the on-disk state per allocated slot.
+    let ibm_bytes = device.read_at(
+        geom.inode_bitmap_start * BLOCK_SIZE,
+        geom.inode_bitmap_blocks * BLOCK_SIZE,
+    )?;
+    let ibm = Bitmap::from_bytes(ibm_bytes, geom.inode_count)?;
+    let bbm_bytes = device.read_at(
+        geom.block_bitmap_start * BLOCK_SIZE,
+        geom.block_bitmap_blocks * BLOCK_SIZE,
+    )?;
+    let bbm = Bitmap::from_bytes(bbm_bytes, geom.total_blocks)?;
+
+    #[derive(Debug, Clone)]
+    struct ExistingSlot {
+        slot: u64,
+        on_disk: OnDiskInode,
+    }
+    let mut existing: std::collections::HashMap<u64, ExistingSlot> =
+        std::collections::HashMap::new();
+    for slot in FIRST_USER_INODE_SLOT..geom.inode_count {
+        if !ibm.is_set(slot)? {
+            continue;
+        }
+        let on_disk = read_inode_at_slot(device, &geom, slot)?;
+        if on_disk.kind == OnDiskKind::Unused {
+            continue;
+        }
+        existing.insert(on_disk.domain_inode_id, ExistingSlot { slot, on_disk });
+    }
+
+    // Build a bytes-per-inode map.
+    let mut bytes_by_inode: std::collections::HashMap<InodeId, &[u8]> =
+        std::collections::HashMap::new();
+    for rec in &state.block_records {
+        bytes_by_inode.insert(rec.inode, rec.bytes.as_slice());
+    }
+
+    // Build the desired set with computed CRCs.
+    #[derive(Clone)]
+    struct DesiredSlot<'a> {
+        inode: &'a Inode,
+        bytes: &'a [u8],
+        deleted: bool,
+        crc: u64,
+    }
+    let mut desired: std::collections::HashMap<u64, DesiredSlot<'_>> =
+        std::collections::HashMap::new();
+    fn build_desired<'a>(
+        inode: &'a Inode,
+        deleted: bool,
+        bytes_by_inode: &std::collections::HashMap<InodeId, &'a [u8]>,
+    ) -> DesiredSlot<'a> {
+        let bytes = bytes_by_inode
+            .get(&inode.id)
+            .copied()
+            .unwrap_or(&[]);
+        let crc = if !bytes.is_empty() {
+            u64::from(Crc32c::hash(bytes))
+        } else {
+            0
+        };
+        DesiredSlot {
+            inode,
+            bytes,
+            deleted,
+            crc,
+        }
+    }
+    for inode in &state.active_inodes {
+        desired.insert(inode.id.0, build_desired(inode, false, &bytes_by_inode));
+    }
+    for inode in &state.deleted_inodes {
+        desired.insert(inode.id.0, build_desired(inode, true, &bytes_by_inode));
+    }
+
+    let mut alloc = OndiskAllocator::new(
+        &geom,
+        bbm,
+        ibm,
+        AllocationStrategy::FirstFit,
+        FIRST_USER_INODE_SLOT,
+    );
+
+    let mut report = IncrementalSaveReport::default();
+
+    // Pass 1: removals.  Frees blocks first so updates / creates can reuse.
+    for (id, slot) in &existing {
+        if !desired.contains_key(id) {
+            release_slot(device, &mut alloc, &geom, slot.slot, &slot.on_disk)?;
+            report.removed += 1;
+        }
+    }
+
+    // Pass 2: updates + creates.
+    for (id, want) in &desired {
+        if let Some(cur) = existing.get(id) {
+            let same_crc = cur.on_disk.data_crc == want.crc;
+            let same_deleted = (cur.on_disk.flags & FLAG_DELETED != 0) == want.deleted;
+            if same_crc && same_deleted {
+                report.unchanged += 1;
+                continue;
+            }
+            // UPDATE: free old extents + attr block, rewrite at the same slot.
+            free_inode_payload(&mut alloc, &cur.on_disk)?;
+            write_inode_record_at(
+                device,
+                &mut alloc,
+                &geom,
+                cur.slot,
+                want.inode,
+                want.bytes,
+                want.deleted,
+            )?;
+            report.updated += 1;
+        } else {
+            // CREATE: take a fresh slot.
+            write_inode(device, &mut alloc, &geom, want.inode, want.bytes, want.deleted)?;
+            report.created += 1;
+        }
+    }
+
+    // Always rewrite ancillary slot (it's tiny relative to data).
+    rewrite_ancillary(device, &mut alloc, &geom, state, sb.created_at)?;
+
+    // Flush bitmaps + superblock.
+    let used_data = geom.data_blocks - alloc.free_data_blocks();
+    let (final_bbm, final_ibm) = alloc.into_bitmaps();
+    write_blocks(device, geom.block_bitmap_start, final_bbm.as_bytes())?;
+    write_blocks(device, geom.inode_bitmap_start, final_ibm.as_bytes())?;
+
+    let mut sb = sb;
+    sb.generation += 1;
+    sb.last_write_at = now_secs();
+    sb.state = STATE_CLEAN;
+    sb.layout_mode = LAYOUT_MODE_NATIVE;
+    sb.payload_inode = ANCILLARY_INODE_SLOT;
+    sb.free_blocks = geom.data_blocks - used_data;
+    sb.free_inodes = geom.inode_count - final_ibm.popcount();
+    sb.block_bitmap_crc = Crc32c::hash(final_bbm.as_bytes());
+    sb.inode_bitmap_crc = Crc32c::hash(final_ibm.as_bytes());
+    sb.root_inode = state
+        .active_inodes
+        .iter()
+        .find(|i| i.path == "/" && matches!(i.kind, InodeKind::Directory))
+        .map(|i| i.id.0)
+        .unwrap_or(0);
+    let sb_block = sb.encode_block();
+    device.write_at(PRIMARY_SUPERBLOCK_BLOCK * BLOCK_SIZE, &sb_block)?;
+    device.write_at(geom.tertiary_superblock_block * BLOCK_SIZE, &sb_block)?;
+    device.write_at(geom.secondary_superblock_block * BLOCK_SIZE, &sb_block)?;
+    device.sync()?;
+
+    report.generation = sb.generation;
+    Ok(report)
+}
+
+fn free_inode_payload(
+    alloc: &mut OndiskAllocator,
+    on_disk: &OnDiskInode,
+) -> CoreFsResult<()> {
+    for ext in &on_disk.extents {
+        if ext.length_blocks > 0 {
+            alloc.free_extent(*ext)?;
+        }
+    }
+    if on_disk.xattr_block_addr != 0 {
+        alloc.free_extent(Extent {
+            logical_block: 0,
+            length_blocks: 1,
+            physical_block: on_disk.xattr_block_addr,
+        })?;
+    }
+    Ok(())
+}
+
+fn release_slot(
+    _device: &mut dyn BlockDevice,
+    alloc: &mut OndiskAllocator,
+    _geom: &LayoutGeometry,
+    slot: u64,
+    on_disk: &OnDiskInode,
+) -> CoreFsResult<()> {
+    free_inode_payload(alloc, on_disk)?;
+    alloc.free_inode(slot)?;
+    // Note: we deliberately don't zero the inode record on disk — the
+    // bitmap is the source of truth, and a future allocate will overwrite
+    // the slot.
+    Ok(())
+}
+
+fn rewrite_ancillary(
+    device: &mut dyn BlockDevice,
+    alloc: &mut OndiskAllocator,
+    geom: &LayoutGeometry,
+    state: &PersistedState,
+    created_at: i64,
+) -> CoreFsResult<()> {
+    // Free the previous ancillary's extents (read it first).
+    if let Ok(prev) = read_inode_at_slot(device, geom, ANCILLARY_INODE_SLOT) {
+        if prev.kind == OnDiskKind::SystemPayload {
+            for ext in &prev.extents {
+                if ext.length_blocks > 0 {
+                    let _ = alloc.free_extent(*ext);
+                }
+            }
+        }
+    }
+    let ancillary = AncillaryState::from(state);
+    let anc_bytes = bincode::serialize(&ancillary).map_err(|e| {
+        CoreFsError::State(format!("native: ancillary serialize failed: {e}"))
+    })?;
+    let anc_crc = Crc32c::hash(&anc_bytes);
+    let mut payload = anc_bytes;
+    payload.extend_from_slice(&anc_crc.to_le_bytes());
+    let blocks = (payload.len() as u64).div_ceil(BLOCK_SIZE);
+    let extent = alloc.allocate_contiguous(blocks)?;
+    let mut buf = vec![0u8; (blocks * BLOCK_SIZE) as usize];
+    buf[..payload.len()].copy_from_slice(&payload);
+    device.write_at(extent.physical_block * BLOCK_SIZE, &buf)?;
+    let now = now_secs();
+    let inode = OnDiskInode {
+        version: 1,
+        kind: OnDiskKind::SystemPayload,
+        mode: 0o600,
+        uid: 0,
+        gid: 0,
+        link_count: 1,
+        flags: 0,
+        size_bytes: payload.len() as u64,
+        blocks_allocated: blocks,
+        created_at,
+        modified_at: now,
+        changed_at: now,
+        accessed_at: now,
+        generation: 1,
+        extents: vec![extent],
+        index_block_addr: 0,
+        xattr_block_addr: 0,
+        domain_inode_id: 0,
+        data_crc: u64::from(anc_crc),
+    };
+    write_inode_at_slot(device, geom, ANCILLARY_INODE_SLOT, &inode)
+}
+
+/// Variant of [`write_inode`] that targets a pre-determined slot
+/// (used by the incremental updater to keep the slot-id stable).
+fn write_inode_record_at(
+    device: &mut dyn BlockDevice,
+    alloc: &mut OndiskAllocator,
+    geom: &LayoutGeometry,
+    slot: u64,
+    inode: &Inode,
+    content: &[u8],
+    deleted: bool,
+) -> CoreFsResult<()> {
+    let (extents, index_block_addr, flags_has_index) =
+        allocate_and_write_content(device, alloc, content)?;
+    let attr_bytes = bincode::serialize(inode).map_err(|e| {
+        CoreFsError::State(format!("native: inode serialize failed: {e}"))
+    })?;
+    if attr_bytes.len() > super::attr_block::ATTR_BLOCK_CAPACITY {
+        return Err(CoreFsError::State(format!(
+            "native: serialized inode {} exceeds attr block capacity {}",
+            attr_bytes.len(),
+            super::attr_block::ATTR_BLOCK_CAPACITY
+        )));
+    }
+    let attr_ext = alloc.allocate_contiguous(1)?;
+    let attr_block_addr = attr_ext.physical_block;
+    let attr_block = AttrBlock::new(attr_bytes).encode()?;
+    device.write_at(attr_block_addr * BLOCK_SIZE, &attr_block)?;
+
+    let kind = match inode.kind {
+        InodeKind::File => OnDiskKind::File,
+        InodeKind::Directory => OnDiskKind::Directory,
+        InodeKind::Symlink => OnDiskKind::Symlink,
+    };
+    let mut flags = super::inode::FLAG_HAS_XATTRS;
+    if flags_has_index {
+        flags |= FLAG_HAS_EXTENT_INDEX;
+    }
+    if deleted {
+        flags |= FLAG_DELETED;
+    }
+    if inode.metadata.encrypted {
+        flags |= super::inode::FLAG_ENCRYPTED;
+    }
+    if inode.metadata.compressed {
+        flags |= super::inode::FLAG_COMPRESSED;
+    }
+    let data_crc = if !content.is_empty() {
+        u64::from(Crc32c::hash(content))
+    } else {
+        0
+    };
+    let on_disk = OnDiskInode {
+        version: 1,
+        kind,
+        mode: inode.metadata.mode,
+        uid: inode.metadata.uid,
+        gid: inode.metadata.gid,
+        link_count: 1,
+        flags,
+        size_bytes: inode.size as u64,
+        blocks_allocated: extents.iter().map(|e| u64::from(e.length_blocks)).sum(),
+        created_at: systime_to_secs(inode.created_at),
+        modified_at: systime_to_secs(inode.modified_at),
+        changed_at: systime_to_secs(inode.changed_at),
+        accessed_at: systime_to_secs(inode.modified_at),
+        generation: 1,
+        extents: if flags_has_index { Vec::new() } else { extents },
+        index_block_addr,
+        xattr_block_addr: attr_block_addr,
+        domain_inode_id: inode.id.0,
+        data_crc,
+    };
+    write_inode_at_slot(device, geom, slot, &on_disk)
+}
+
+// ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
 
