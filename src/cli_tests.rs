@@ -296,6 +296,27 @@ fn cli_odf_mkfs_inspect_and_fsck_roundtrip() {
 }
 
 #[test]
+fn cli_odf_session_demo_runs_end_to_end() {
+    let image = temp_path("session-demo", "odf");
+    run(vec![
+        "corefs".to_string(),
+        "odf-session-demo".to_string(),
+        image.clone(),
+        "--size".to_string(),
+        (16 * 1024 * 1024).to_string(),
+    ])
+    .expect("odf-session-demo should succeed");
+    // Follow-up: fsck-odf should report the result as clean.
+    run(vec![
+        "corefs".to_string(),
+        "fsck-odf".to_string(),
+        image.clone(),
+    ])
+    .expect("fsck-odf should be clean after session demo");
+    let _ = std::fs::remove_file(&image);
+}
+
+#[test]
 fn cli_migrate_to_odf_produces_fsck_clean_volume() {
     let src_img = temp_path("src", "img");
     let dst_odf = temp_path("dst", "odf");

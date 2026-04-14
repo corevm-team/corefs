@@ -630,6 +630,37 @@ where
                 info.primary_ok, info.tertiary_ok, info.secondary_ok
             );
         }
+        "mount-odf" => {
+            #[cfg(target_os = "linux")]
+            {
+                let image_path = args.get(2).ok_or_else(|| {
+                    CoreFsError::InvalidCommand(
+                        "mount-odf <image-path> <mount-point>".to_string(),
+                    )
+                })?;
+                let mount_point = args.get(3).ok_or_else(|| {
+                    CoreFsError::InvalidCommand(
+                        "mount-odf <image-path> <mount-point>".to_string(),
+                    )
+                })?;
+                linux_fuse::mount_odf_image(image_path, mount_point)?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(CoreFsError::InvalidCommand(
+                    "mount-odf is only available on Linux".to_string(),
+                ));
+            }
+        }
+        "odf-session-demo" => {
+            // End-to-end CLI demo: format a fresh ODF image, populate it
+            // via OdfFileSession, list inodes via OdfReader, print results.
+            let image_path = args.get(2).ok_or_else(|| {
+                CoreFsError::InvalidCommand("odf-session-demo <image-path>".to_string())
+            })?;
+            let capacity = parse_flag_u64(&args[3..], "--size").unwrap_or(16 * 1024 * 1024);
+            odf_session_demo(image_path, capacity)?;
+        }
         "migrate-to-odf" => {
             let src = args.get(2).ok_or_else(|| {
                 CoreFsError::InvalidCommand("migrate-to-odf <src.img> <dst.odf> [--size N]".into())
@@ -706,6 +737,50 @@ fn odf_inspect_image(
     use crate::storage::ondisk::volume::inspect;
     let dev = FileImageDevice::open(path, false)?;
     inspect(&dev)
+}
+
+fn odf_session_demo(image_path: &str, capacity: u64) -> CoreFsResult<()> {
+    use crate::storage::ondisk::reader::OdfReader;
+    use crate::storage::ondisk::session::{OdfFileSession, OdfSessionOptions};
+    let mut opts = OdfSessionOptions::with_defaults();
+    opts.capacity_bytes = capacity;
+    opts.inode_count = 512;
+    opts.journal_blocks = 32;
+    opts.config.performance.compression_enabled = false;
+    opts.config.security.encryption_at_rest = false;
+    let image = std::path::Path::new(image_path);
+    let _ = std::fs::remove_file(image);
+    let mut sess = OdfFileSession::format_new(image, &opts)?;
+    let (_, report) = sess.mutate(|fs| {
+        fs.create_directory("/demo")?;
+        fs.create_file("/demo/readme.txt", b"hello from odf", &[])?;
+        fs.create_file("/demo/data.bin", &vec![0x42u8; 512], &[])?;
+        fs.create_symlink("/demo/link", "/demo/readme.txt")?;
+        Ok(())
+    })?;
+    println!(
+        "flush: created={} updated={} removed={} unchanged={}",
+        report.incremental.created,
+        report.incremental.updated,
+        report.incremental.removed,
+        report.incremental.unchanged
+    );
+    drop(sess);
+
+    let device = crate::storage::block_device::FileImageDevice::open(image, true)?;
+    let reader = OdfReader::open(&device)?;
+    println!("allocated user inodes: {}", reader.allocated_user_inodes());
+    for summary in reader.list_inodes()? {
+        println!(
+            "  slot={} id={} kind={:?} size={} flags=0x{:X}",
+            summary.slot,
+            summary.domain_id,
+            summary.kind,
+            summary.size_bytes,
+            summary.flags
+        );
+    }
+    Ok(())
 }
 
 fn odf_migrate_from_volume_image(
@@ -788,6 +863,8 @@ fn print_usage() {
     println!("  fsck-odf <path>");
     println!("  inspect-odf <path>");
     println!("  migrate-to-odf <src.img> <dst.odf> [--size <bytes>]");
+    println!("  mount-odf <image-path> <mount-point>  (Linux only)");
+    println!("  odf-session-demo <image-path> [--size <bytes>]");
 }
 
 fn parse_flag_u64(args: &[String], flag: &str) -> Option<u64> {

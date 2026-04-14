@@ -221,6 +221,19 @@ impl CoreFsFuseView {
         Ok(Self::from_state(fs.export_state()))
     }
 
+    /// Load a `CoreFsFuseView` from an ODF-native volume image.  The
+    /// file is opened read-only via [`FileImageDevice`] and the state
+    /// is reconstructed through [`crate::storage::ondisk::native::load_state_native`].
+    /// Pending journal transactions (if any) are **not** replayed by
+    /// this path — read-only mounts treat the on-disk state as-is.
+    fn load_odf_image(path: impl AsRef<Path>) -> CoreFsResult<Self> {
+        use crate::storage::block_device::FileImageDevice;
+        use crate::storage::ondisk::native::load_state_native;
+        let device = FileImageDevice::open(path.as_ref(), true)?;
+        let state = load_state_native(&device)?;
+        Ok(Self::from_state(state))
+    }
+
     fn node(&self, ino: u64) -> Option<&FuseNode> {
         self.nodes_by_ino.get(&ino)
     }
@@ -282,6 +295,41 @@ pub fn create_image(path: impl AsRef<Path>, include_demo: bool) -> CoreFsResult<
         CoreFsService::format(crate::config::CoreFsConfig::default())
     };
     fs.save_image_to_path(path)
+}
+
+/// Read-only FUSE mount of an ODF-native image.
+///
+/// The image file is opened through [`FileImageDevice`] in read-only
+/// mode; the filesystem view is reconstructed via
+/// [`crate::storage::ondisk::native::load_state_native`].  No writes
+/// are accepted — analogous to [`mount_image`] for the legacy
+/// volume_image format.
+pub fn mount_odf_image(
+    image_path: impl AsRef<Path>,
+    mount_point: impl AsRef<Path>,
+) -> CoreFsResult<()> {
+    let image_path = image_path.as_ref();
+    let mount_point = mount_point.as_ref();
+    let view = CoreFsFuseView::load_odf_image(image_path)?;
+    let mount = CoreFsFuseMount { view };
+    let fs_name = format!("corefs-odf:{}", mount.view.volume_name);
+
+    fuser::mount2(
+        mount,
+        mount_point,
+        &[
+            MountOption::RO,
+            MountOption::FSName(fs_name),
+            MountOption::DefaultPermissions,
+        ],
+    )
+    .map_err(|error| {
+        CoreFsError::State(format!(
+            "failed to mount ODF image {} on {}: {error}",
+            image_path.display(),
+            mount_point.display()
+        ))
+    })
 }
 
 pub fn mount_image(

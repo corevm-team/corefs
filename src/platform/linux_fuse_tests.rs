@@ -31,6 +31,75 @@ fn fuse_view_builds_lookup_and_directory_mappings() {
 }
 
 #[test]
+fn load_odf_image_reconstructs_mount_view() {
+    use crate::config::CoreFsConfig;
+    use crate::storage::ondisk::session::{OdfFileSession, OdfSessionOptions};
+
+    let path = std::env::temp_dir().join(format!(
+        "corefs-odf-mount-{}-{}.odf",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    let opts = OdfSessionOptions {
+        capacity_bytes: 16 * 1024 * 1024,
+        label: "mnt".into(),
+        uuid: [0u8; 16],
+        inode_count: 256,
+        journal_blocks: 32,
+        config: CoreFsConfig::default(),
+    };
+    {
+        let mut sess = OdfFileSession::format_new(&path, &opts).expect("format");
+        sess.mutate(|fs| {
+            fs.create_directory("/odf")?;
+            fs.create_file("/odf/hello.txt", b"odf hello", &[])?;
+            fs.create_symlink("/odf/link", "/odf/hello.txt")?;
+            Ok(())
+        })
+        .expect("mutate");
+    }
+
+    let view = CoreFsFuseView::load_odf_image(&path).expect("odf image should load");
+    assert!(view.lookup_child(ROOT_INO, OsStr::new("odf")).is_some());
+    let odf_dir = view
+        .lookup_child(ROOT_INO, OsStr::new("odf"))
+        .expect("odf dir");
+    let entries = view.directory_entries(odf_dir.ino());
+    assert!(entries.iter().any(|(_, _, n)| n == "hello.txt"));
+    assert!(entries.iter().any(|(_, _, n)| n == "link"));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn load_odf_image_rejects_legacy_volume_image() {
+    use crate::config::CoreFsConfig;
+    let path = std::env::temp_dir().join(format!(
+        "corefs-legacy-reject-{}-{}.img",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    // Write a legacy volume_image file (magic != ODF_MAGIC).
+    let fs = CoreFsService::format(CoreFsConfig::default());
+    fs.save_image_to_path(&path).expect("legacy image");
+    let err = CoreFsFuseView::load_odf_image(&path).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("superblock")
+            || msg.contains("magic")
+            || msg.contains("NATIVE")
+            || msg.contains("too small"),
+        "unexpected error: {msg}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn image_creation_writes_mountable_image() {
     let path = std::env::temp_dir().join(format!(
         "corefs-linux-fuse-{}-{}.img",

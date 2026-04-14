@@ -514,8 +514,16 @@ fn read_primary_superblock_with_fallbacks(device: &dyn BlockDevice) -> CoreFsRes
     if let Ok(sb) = read_superblock_at(device, PRIMARY_SUPERBLOCK_BLOCK) {
         return Ok(sb);
     }
-    // Fallbacks: superblock copies at N/2 and N-1.
+    // Fallbacks: superblock copies at N/2 and N-1.  Guard against
+    // devices that are too small to hold even a single superblock —
+    // those are by definition not ODF volumes.
     let total_blocks = device.capacity() / BLOCK_SIZE;
+    if total_blocks < 2 {
+        return Err(CoreFsError::State(format!(
+            "device capacity {} is too small to be an ODF volume",
+            device.capacity()
+        )));
+    }
     if let Ok(sb) = read_superblock_at(device, total_blocks / 2) {
         return Ok(sb);
     }
