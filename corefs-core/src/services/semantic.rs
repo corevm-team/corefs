@@ -1,8 +1,13 @@
 // Copyright (c) 2026 Christian Möller
 // SPDX-License-Identifier: MIT
 
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::domain::metadata::ContentClass;
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticAttributes {

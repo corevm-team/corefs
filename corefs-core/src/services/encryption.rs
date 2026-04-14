@@ -1,9 +1,13 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
-use crate::error::{CoreFsError, CoreFsResult};
+use alloc::format;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 use chacha20poly1305::ChaCha20Poly1305;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
+
+use crate::error::{CoreFsError, CoreFsResult};
 
 /// Nonce length (12 bytes) prepended to every ciphertext.
 const NONCE_LEN: usize = 12;

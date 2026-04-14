@@ -2,81 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-
-#[test]
-fn record_appends_journal_entries() {
-    let mut journal = JournalService::default();
-    journal.record("create", "/tmp/file", "bytes=4");
-
-    assert_eq!(journal.entries().len(), 1);
-    assert_eq!(journal.entries()[0].operation, "create");
-    assert_eq!(journal.entries()[0].target, "/tmp/file");
-    assert_eq!(journal.entries()[0].details, "bytes=4");
-}
-
-#[test]
-fn transactions_stage_entries_until_commit() {
-    let mut journal = JournalService::default();
-    let tx_id = journal.begin_transaction("rw-writeback");
-    journal.record("write_file", "/a", "bytes=3");
-
-    assert!(journal.entries().is_empty());
-    assert!(journal.has_pending_transaction());
-
-    let committed = journal.commit_transaction();
-    assert_eq!(committed, Some(tx_id));
-    assert!(!journal.has_pending_transaction());
-    assert_eq!(journal.entries().len(), 3);
-    assert_eq!(journal.entries()[0].operation, "tx_begin");
-    assert_eq!(journal.entries()[1].operation, "write_file");
-    assert_eq!(journal.entries()[2].operation, "tx_commit");
-}
-
-#[test]
-fn recover_on_load_aborts_pending_transaction_and_clears_dirty_marker() {
-    let mut journal = JournalService::default();
-    journal.mark_unclean_shutdown();
-    let tx_id = journal.begin_transaction("rw-writeback");
-    journal.record("write_file", "/a", "bytes=3");
-
-    let summary = journal.recover_on_load();
-
-    assert!(summary.aborted_pending_transaction);
-    assert!(summary.cleared_unclean_shutdown);
-    assert!(summary.replay_recorded);
-    assert_eq!(
-        journal.runtime_state().last_replayed_transaction_id,
-        Some(tx_id)
-    );
-    assert!(!journal.runtime_state().unclean_shutdown);
-    assert!(
-        journal
-            .entries()
-            .iter()
-            .any(|entry| entry.operation == "tx_abort")
-    );
-    assert!(
-        journal
-            .entries()
-            .iter()
-            .any(|entry| entry.operation == "recovery_replay")
-    );
-}
-
-#[test]
-fn replay_tracks_active_deleted_and_snapshots() {
-    let mut journal = JournalService::default();
-    journal.record("create_file", "/a", "");
-    journal.record("delete", "/a", "");
-    journal.record("restore", "/a", "");
-    journal.record("snapshot", "/", "name=one");
-    journal.record("secure_delete", "/a", "");
-
-    let replay = journal.replay();
-    assert!(!replay.active_paths.contains("/a"));
-    assert!(!replay.deleted_paths.contains("/a"));
-    assert_eq!(replay.snapshot_count, 1);
-}
+use crate::domain::inode::{Inode, InodeId, InodeKind};
+use corefs_core::platform::Timestamp;
 
 #[test]
 fn reconcile_persisted_state_normalizes_entries_and_blocks() {
@@ -170,4 +97,10 @@ fn reconcile_persisted_state_normalizes_entries_and_blocks() {
     assert_eq!(state.deleted_inodes[0].path, "/a");
     assert_eq!(state.block_records.len(), 1);
     assert_eq!(state.next_snapshot_id, 1);
+}
+
+// Silence unused-import warning if InodeId is not referenced directly.
+#[allow(dead_code)]
+fn _type_refs() -> (InodeId, InodeKind) {
+    (InodeId(0), InodeKind::File)
 }

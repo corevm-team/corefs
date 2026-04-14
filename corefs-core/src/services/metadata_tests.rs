@@ -2,17 +2,22 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use alloc::string::ToString;
+use alloc::vec;
+
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::domain::metadata::FileMetadata;
 use crate::error::CoreFsError;
+use crate::platform::Timestamp;
 
 #[test]
 fn metadata_service_updates_tags_and_attributes() {
-    let mut inode = Inode::new(
+    let mut inode = Inode::new_at(
         InodeId(1),
         InodeKind::File,
         "/doc.txt".to_string(),
         FileMetadata::default(),
+        Timestamp::EPOCH,
     );
 
     MetadataService::add_tag(&mut inode, "docs");
@@ -32,11 +37,12 @@ fn metadata_service_updates_tags_and_attributes() {
 
 #[test]
 fn pointer_attributes_resolve_dynamically() {
-    let mut inode = Inode::new(
+    let mut inode = Inode::new_at(
         InodeId(2),
         InodeKind::File,
         "/meta.txt".to_string(),
         FileMetadata::default(),
+        Timestamp::EPOCH,
     );
 
     MetadataService::set_content_pointer(&mut inode, "summary", "/doc.txt", "summary-4");
@@ -56,3 +62,4 @@ fn pointer_attributes_resolve_dynamically() {
         &inode.metadata.attributes[0].1
     ));
 }
+

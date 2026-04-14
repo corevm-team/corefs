@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::config::StorageTier;
-use crate::domain::metadata::{ContentClass, FileMetadata};
-use std::time::SystemTime;
+use alloc::string::ToString;
+
+use crate::domain::metadata::FileMetadata;
+use crate::platform::Timestamp;
 
 fn inode(id: u64, kind: InodeKind, path: &str, size: usize) -> Inode {
-    let now: corefs_core::platform::Timestamp = SystemTime::now().into();
+    let now = Timestamp::EPOCH;
     Inode {
         id: crate::domain::inode::InodeId(id),
         kind,

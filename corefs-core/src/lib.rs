@@ -46,6 +46,7 @@ pub mod platform;
 pub mod config;
 pub mod domain;
 pub mod error;
+pub mod services;
 pub mod storage;
 
 /// Versions-String der `corefs-core`-Crate (aus `Cargo.toml`).

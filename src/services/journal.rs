@@ -1,228 +1,26 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+//! `PersistedState`-spezifische Journal-Reparaturen.
+//!
+//! Der Kern des Journal-Services liegt in [`corefs_core::services::journal`]
+//! und ist plattformneutral (`no_std + alloc`). Diese Datei ergänzt
+//! main-Crate-spezifische Funktionen, die den `PersistedState` aus `crate::app`
+//! kennen.
+
+pub use corefs_core::services::journal::{
+    JournalEntry, JournalRecoverySummary, JournalReplayState, JournalRepairSummary,
+    JournalRuntimeState, JournalService, JournalTransaction,
+};
+
 use crate::app::PersistedState;
 use crate::domain::inode::{Inode, InodeKind};
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use corefs_core::platform::Timestamp;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct JournalEntry {
-    pub timestamp: Timestamp,
-    pub operation: String,
-    pub target: String,
-    pub details: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct JournalTransaction {
-    pub id: u64,
-    pub label: String,
-    pub started_at: Timestamp,
-    pub operations: Vec<JournalEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct JournalRuntimeState {
-    pub next_transaction_id: u64,
-    pub last_committed_transaction_id: Option<u64>,
-    pub last_aborted_transaction_id: Option<u64>,
-    pub last_replayed_transaction_id: Option<u64>,
-    pub unclean_shutdown: bool,
-    pub pending_transaction: Option<JournalTransaction>,
-}
-
-#[derive(Debug, Default)]
-pub struct JournalService {
-    entries: Vec<JournalEntry>,
-    runtime: JournalRuntimeState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct JournalReplayState {
-    pub active_paths: BTreeSet<String>,
-    pub deleted_paths: BTreeSet<String>,
-    pub snapshot_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct JournalRepairSummary {
-    pub moved_to_deleted: usize,
-    pub restored_to_active: usize,
-    pub purged_deleted: usize,
-    pub removed_orphan_blocks: usize,
-    pub resized_inodes: usize,
-    pub snapshot_id_adjusted: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct JournalRecoverySummary {
-    pub aborted_pending_transaction: bool,
-    pub cleared_unclean_shutdown: bool,
-    pub replay_recorded: bool,
-}
-
-impl JournalService {
-    pub fn record(&mut self, operation: &str, target: &str, details: impl Into<String>) {
-        let entry = JournalEntry {
-            timestamp: Timestamp::now(),
-            operation: operation.to_string(),
-            target: target.to_string(),
-            details: details.into(),
-        };
-
-        if let Some(transaction) = self.runtime.pending_transaction.as_mut() {
-            transaction.operations.push(entry);
-        } else {
-            self.entries.push(entry);
-        }
-    }
-
-    pub fn entries(&self) -> &[JournalEntry] {
-        &self.entries
-    }
-
-    pub fn runtime_state(&self) -> &JournalRuntimeState {
-        &self.runtime
-    }
-
-    pub fn has_pending_transaction(&self) -> bool {
-        self.runtime.pending_transaction.is_some()
-    }
-
-    pub fn begin_transaction(&mut self, label: impl Into<String>) -> u64 {
-        if let Some(transaction) = self.runtime.pending_transaction.as_ref() {
-            return transaction.id;
-        }
-
-        self.runtime.next_transaction_id += 1;
-        let id = self.runtime.next_transaction_id;
-        self.runtime.pending_transaction = Some(JournalTransaction {
-            id,
-            label: label.into(),
-            started_at: Timestamp::now(),
-            operations: Vec::new(),
-        });
-        id
-    }
-
-    pub fn commit_transaction(&mut self) -> Option<u64> {
-        let transaction = self.runtime.pending_transaction.take()?;
-        let id = transaction.id;
-        let operation_count = transaction.operations.len();
-        self.entries.push(JournalEntry {
-            timestamp: Timestamp::now(),
-            operation: "tx_begin".to_string(),
-            target: transaction.label.clone(),
-            details: format!("id={id} ops={operation_count}"),
-        });
-        self.entries.extend(transaction.operations);
-        self.entries.push(JournalEntry {
-            timestamp: Timestamp::now(),
-            operation: "tx_commit".to_string(),
-            target: transaction.label,
-            details: format!("id={id} ops={operation_count}"),
-        });
-        self.runtime.last_committed_transaction_id = Some(id);
-        Some(id)
-    }
-
-    pub fn abort_transaction(&mut self, reason: &str) -> Option<u64> {
-        let transaction = self.runtime.pending_transaction.take()?;
-        let id = transaction.id;
-        self.entries.push(JournalEntry {
-            timestamp: Timestamp::now(),
-            operation: "tx_abort".to_string(),
-            target: transaction.label,
-            details: format!("id={id} reason={reason}"),
-        });
-        self.runtime.last_aborted_transaction_id = Some(id);
-        Some(id)
-    }
-
-    pub fn mark_unclean_shutdown(&mut self) {
-        self.runtime.unclean_shutdown = true;
-    }
-
-    pub fn mark_clean_shutdown(&mut self) {
-        self.runtime.unclean_shutdown = false;
-    }
-
-    pub fn recover_on_load(&mut self) -> JournalRecoverySummary {
-        let mut summary = JournalRecoverySummary::default();
-
-        if let Some(transaction_id) = self.abort_transaction("recovery_replay") {
-            self.runtime.last_replayed_transaction_id = Some(transaction_id);
-            summary.aborted_pending_transaction = true;
-        }
-
-        if self.runtime.unclean_shutdown {
-            self.runtime.unclean_shutdown = false;
-            summary.cleared_unclean_shutdown = true;
-        }
-
-        if summary.aborted_pending_transaction || summary.cleared_unclean_shutdown {
-            self.entries.push(JournalEntry {
-                timestamp: Timestamp::now(),
-                operation: "recovery_replay".to_string(),
-                target: "/".to_string(),
-                details: format!(
-                    "aborted_pending={} cleared_unclean={}",
-                    summary.aborted_pending_transaction, summary.cleared_unclean_shutdown
-                ),
-            });
-            summary.replay_recorded = true;
-        }
-
-        summary
-    }
-
-    pub fn from_entries(entries: Vec<JournalEntry>) -> Self {
-        Self {
-            entries,
-            runtime: JournalRuntimeState::default(),
-        }
-    }
-
-    pub fn from_entries_with_runtime(
-        entries: Vec<JournalEntry>,
-        runtime: JournalRuntimeState,
-    ) -> Self {
-        Self { entries, runtime }
-    }
-
-    pub fn replay(&self) -> JournalReplayState {
-        let mut state = JournalReplayState::default();
-
-        for entry in &self.entries {
-            match entry.operation.as_str() {
-                "create_file" | "create_directory" | "create_symlink" | "write_file"
-                | "restore" => {
-                    state.active_paths.insert(entry.target.clone());
-                    state.deleted_paths.remove(&entry.target);
-                }
-                "delete" => {
-                    state.active_paths.remove(&entry.target);
-                    state.deleted_paths.insert(entry.target.clone());
-                }
-                "secure_delete" => {
-                    state.active_paths.remove(&entry.target);
-                    state.deleted_paths.remove(&entry.target);
-                }
-                "snapshot" => {
-                    state.snapshot_count += 1;
-                }
-                "format" | "sync" | "rename" | "tx_begin" | "tx_commit" | "tx_abort"
-                | "recovery_replay" => {}
-                _ => {}
-            }
-        }
-
-        state
-    }
-}
-
+/// Reconziliert einen [`PersistedState`] gegen sein eigenes Journal:
+/// aktive/gelöschte Inode-Listen werden mit den Journal-Effekten abgeglichen,
+/// Waisen-Block-Records entfernt, Inode-Größen korrigiert und der
+/// Snapshot-Counter nachgeführt.
 pub fn reconcile_persisted_state(state: &mut PersistedState) -> JournalRepairSummary {
     let replay = JournalService::from_entries(state.journal_entries.clone()).replay();
     let mut summary = JournalRepairSummary::default();

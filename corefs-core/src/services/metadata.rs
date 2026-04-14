@@ -1,6 +1,10 @@
 // Copyright (c) 2026 Christian Möller
 // SPDX-License-Identifier: MIT
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use crate::config::StorageTier;
 use crate::domain::inode::Inode;
 use crate::error::CoreFsResult;

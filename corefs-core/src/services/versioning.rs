@@ -1,9 +1,13 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use corefs_core::platform::Timestamp;
+
+use crate::platform::Timestamp;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileVersion {
@@ -20,12 +24,13 @@ pub struct VersioningService {
 }
 
 impl VersioningService {
-    pub fn store_version(&mut self, path: &str, bytes: Vec<u8>) -> u64 {
+    /// Speichert eine neue Version mit explizitem Zeitstempel.
+    pub fn store_version_at(&mut self, path: &str, bytes: Vec<u8>, now: Timestamp) -> u64 {
         self.next_version += 1;
         let version = FileVersion {
             version_id: self.next_version,
             path: path.to_string(),
-            created_at: Timestamp::now(),
+            created_at: now,
             bytes,
         };
         self.versions
@@ -33,6 +38,12 @@ impl VersioningService {
             .or_default()
             .push(version);
         self.next_version
+    }
+
+    /// std-Komfortvariante von [`Self::store_version_at`].
+    #[cfg(feature = "std")]
+    pub fn store_version(&mut self, path: &str, bytes: Vec<u8>) -> u64 {
+        self.store_version_at(path, bytes, Timestamp::now())
     }
 
     pub fn list_versions(&self, path: &str) -> &[FileVersion] {

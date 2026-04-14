@@ -1,8 +1,10 @@
 // Copyright (c) 2026 Christian Möller
 // SPDX-License-Identifier: MIT
 
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotPathRecord {

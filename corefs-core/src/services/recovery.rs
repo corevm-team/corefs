@@ -1,8 +1,11 @@
 // Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::domain::inode::Inode;
-use std::collections::BTreeMap;
 
 #[derive(Debug, Default)]
 pub struct RecoveryService {

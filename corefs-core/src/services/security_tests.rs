@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use alloc::vec;
 
 #[test]
 fn mark_encrypted_returns_requested_state() {
