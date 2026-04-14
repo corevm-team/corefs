@@ -105,18 +105,5 @@ fn score(record: &HotPathRecord) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hot_paths_rank_busy_paths_first() {
-        let mut service = HotPathService::default();
-        service.record_read("/a", 8192);
-        service.record_write("/b", 4096);
-        service.record_write("/b", 4096);
-
-        let hot = service.hottest_paths(2);
-        assert_eq!(hot[0].path, "/b");
-        assert_eq!(hot[1].path, "/a");
-    }
-}
+#[path = "hot_paths_tests.rs"]
+mod tests;
