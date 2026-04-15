@@ -461,7 +461,9 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [x] Write-Path funktional (create, write, unlink, mkdir) — VFS-Dispatch für **`open` (inkl. `O_CREAT`/`O_SYNC`/`O_APPEND`/`O_TRUNC`), `read`, `write`, `close`/`decref`, `delete`, `mkdir`** in `fs::vfs::mod` mit `FsType::CoreFs`-Match-Armen (fs_id=8). Driver: `create(Regular|Directory)`, byte-genaues `write` mit automatischem Resize des `BlockRecord`, `delete` verschiebt nach `deleted_inodes`.
 - [x] **`rename`, `truncate`, `chmod`, `chown`, `symlink`** — CoreFsDriver exponiert `truncate_file`, `rename_entry` (incl. Descendants), `set_mode`, `set_owner`, `create_symlink` (Target als UTF-8 im BlockRecord). VFS-Dispatch leitet die entsprechenden CoreFS-Mount-Operationen sauber an den Treiber. Cross-mount rename bleibt bis zur allgemeinen Cross-FS-Rename-Infrastruktur abgelehnt.
 - [x] Unclean-Mount-Recovery über WAL bei Boot — `PersistedState::replay_pending_wal(now)` im `corefs-core` spielt strukturelle Ops (CreateFile/Directory, DeletePath, RenamePath, TruncateInode-size) direkt auf dem `PersistedState` zurück; AnyOS-`CoreFsDriver::mount_writable` hängt das automatisch ein und loggt `structural`/`skipped_data`/`txn` im Serial. Block-Level-Replay (PatchExtent) bleibt App-Schicht-Aufgabe.
-- [ ] Kernel-Integration-Tests mit vorbereitetem CoreFS-Image (AnyOS-seitige Test-Infrastruktur noch nicht vorhanden)
+- [~] Kernel-Integration-Tests mit vorbereitetem CoreFS-Image — `kernel/src/fs/corefs/integration_tests.rs` als Grundgerüst (Host-Smoke-Test für `format_new_at` auf `MemoryDevice` + `feature = "kunit"`-Placeholder). Echter kernel-image-E2E-Harness bleibt offen.
+- [x] KernelClock an RTC angebunden — `clock_state`-Cache mit einmaligem CMOS-Read + PIT/TSC-Delta; `Timestamp::from_secs(unix_base + delta/1000)`. Non-x86_64 fällt auf `Timestamp::EPOCH` zurück.
+- [x] KernelRng über Hardware-Entropie — `from_hardware_entropy()` mischt 4× RDRAND mit TSC (CPUID-Feature-Gate), Fallback auf TSC + `current_tid` + Code-Adresse via SplitMix64; `Default` nutzt das jetzt.
 
 ### 5.6 AnyOS — Generisches FUSE-Subsystem (native Variante)
 
@@ -473,8 +475,8 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [x] Blocking Request/Reply im Kernel — `FuseSession::enqueue_and_wait` mit `waiters: BTreeMap<Unique, tid>`, wake via `scheduler::wake_thread`; `deliver_reply` / `close` wecken wartende Threads; 3 neue Unit-Tests
 - [x] `fuse_call`-Helper (Kernel) — serialisiert `corefs_fuse_proto::Request` via bincode-legacy, ruft `enqueue_and_wait`, dekodiert `ReplyPayload`; `FuseCallError` + POSIX-errno→`FsError`-Mapping; 2 neue Unit-Tests gegen Mock-Session
 - [x] FUSE-Filesystem als `FsType::Fuse` im VFS — `fs_id=9` an allen Dispatch-Sites (open/read/write/close/decref/read_dir/stat_inner/delete/mkdir); FUSE `u64` ↔ VFS `u32` via per-Mount `kernel::fs::fuse::inode_map::InodeMap`; FileHandle wird in `OpenFile.parent_cluster`/`seek_cache_offset` geparkt. `statfs` bleibt TODO.
-- [ ] Crash-Handling: Daemon-Absturz → sauberer Unmount / EIO für offene Handles
-- [ ] Hello-World-Test-FS-Daemon zur Validierung (unabhängig von CoreFS)
+- [~] Crash-Handling: Daemon-Absturz → sauberer Unmount / EIO für offene Handles — `FuseSession::close` weckt wartende Threads mit `SessionClosed`; `devfs_write` auf geschlossener Session liefert jetzt `None` (→ EIO upward) statt silent drop; `DevFuseTransport` schließt `/dev/fuse`-fd im Drop. SIGTERM/SIGINT-Handler bleiben offen (kein POSIX-Signal-API in `anyos_std`).
+- [x] Hello-World-Test-FS-Daemon zur Validierung (unabhängig von CoreFS) — `bin/fusedemo/` bietet einen readonly `/hello.txt` FUSE-Daemon ohne `corefs-core`-Dep.
 - [x] Protokoll-Abstraktion so gewählt, dass späterer Linux-FUSE-Wire parallel einhängbar ist — der `/dev/fuse`-Transport ist bytestrom-agnostisch, der Wire-Decoder lebt im Daemon
 
 ### 5.7 AnyOS — `corefsd` Userspace-Daemon
@@ -485,8 +487,8 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [x] Event-Loop: Request → `corefs-core` → Reply — IPC-Pfad vollständig (bincode-legacy über `/dev/fuse`); `bin/corefsd/src/handler.rs::CoreFsHandler` besitzt eine `OdfDeviceSession` und übersetzt Init/Destroy/Getattr/Lookup/Readdir/Open/Release/Read/Write/Create/Mkdir/Unlink/Statfs in `PersistedState`-Zugriffe; `--device` + `--capacity` wählen das Block-Device (fallback: Stub-Handler, der nur Init/Destroy beantwortet).
 - [x] Block-Device-Zugriff via AnyOS-Syscalls → `BlockDevice`-Impl (im Daemon; via `libcorefs-tools::block_device::AnyOsBlockDevice` wiederverwendet, `OdfDeviceSession::open` + `format_new_at` mit Fallback)
 - [x] Proto erweitert um `Unlink`/`Mkdir`/`Create` (Request+Reply) — additiv, 3 neue Round-Trip-Tests; `corefs-fuse-proto/Cargo.toml` pinnt serde+bincode inline, damit die Crate als Path-Dep aus dem AnyOS-Workspace konsumierbar ist
-- [ ] Sauberes Shutdown bei Unmount-Signal
-- [ ] End-to-End-Test: Userspace-Mount, Datei schreiben/lesen, Unmount
+- [~] Sauberes Shutdown bei Unmount-Signal — `Drop` auf `DevFuseTransport` schließt `/dev/fuse`, Startup-Failure-Pfade exitieren mit Code 1. Echte Signal-Handler offen (kein API in `anyos_std`).
+- [~] End-to-End-Test: Userspace-Mount, Datei schreiben/lesen, Unmount — Host-E2E `corefs-tools/tests/e2e_corefs.rs` deckt mkfs/fsck/scrub-Roundtrip ab; kernel-level Userspace-Mount-Test bleibt offen (fehlt QEMU-Harness).
 
 ### 5.8 AnyOS — Tool-Apps
 
@@ -508,7 +510,8 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [ ] Online-Scrub gegen gemountetes FS (via Kernel-Ioctl oder Daemon-RPC)
 - [ ] Online-Snapshot gegen gemountetes FS
 - [ ] Online-Defrag gegen gemountetes FS
-- [~] Tool-Dispatcher erkennt gemountetes vs. offline-Device und wählt Pfad — `corefs-tools::mount_check::probe_device(path)` parst `/proc/mounts` und liefert `MountStatus::{NotMounted, Mounted{paths}, Unknown}`. Die Tool-Frontends können das konsultieren, bevor sie destruktive Operationen ausführen; der Ioctl-/Daemon-RPC-Pfad für tatsächliche Online-Operationen bleibt offen.
+- [x] Tool-Dispatcher erkennt gemountetes vs. offline-Device und wählt Pfad — `corefs-cli` ruft vor jedem mutierenden Subcommand (`scrub`/`defrag`/`repair`/`snapshot {create,delete,restore}`) `mount_check::probe_device(path)` auf. Default-Modus `--offline` lehnt gemountete Devices mit klarem Hinweis ab (Exit 3); `--online` akzeptiert die Flag, scheitert aber weiterhin mit Unsupported, da der Ioctl/RPC-Pfad noch nicht steht.
+- [~] Tool-Dispatcher erkennt gemountetes vs. offline-Device und wählt Pfad (legacy Eintrag) — `corefs-tools::mount_check::probe_device(path)` parst `/proc/mounts` und liefert `MountStatus::{NotMounted, Mounted{paths}, Unknown}`. Die Tool-Frontends können das konsultieren, bevor sie destruktive Operationen ausführen; der Ioctl-/Daemon-RPC-Pfad für tatsächliche Online-Operationen bleibt offen.
 
 ### 5.10 Optional: Linux-FUSE-Wire-Kompatibilität (Variante a)
 
