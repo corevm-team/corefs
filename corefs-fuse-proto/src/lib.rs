@@ -178,6 +178,33 @@ pub enum Request {
     },
     /// Filesystem-Metriken abfragen.
     Statfs,
+    /// Eintrag (Datei oder leeres Verzeichnis) entfernen.
+    Unlink {
+        /// Inode-Nummer des Eltern-Verzeichnisses.
+        parent: InodeNo,
+        /// Komponentenname (UTF-8, ohne `/`).
+        name: String,
+    },
+    /// Neues Verzeichnis anlegen.
+    Mkdir {
+        /// Inode-Nummer des Eltern-Verzeichnisses.
+        parent: InodeNo,
+        /// Komponentenname (UTF-8, ohne `/`).
+        name: String,
+        /// POSIX-Mode-Bits.
+        mode: u32,
+    },
+    /// Datei anlegen und öffnen (atomar, entspricht POSIX `open(O_CREAT)`).
+    Create {
+        /// Inode-Nummer des Eltern-Verzeichnisses.
+        parent: InodeNo,
+        /// Komponentenname (UTF-8, ohne `/`).
+        name: String,
+        /// POSIX-Mode-Bits.
+        mode: u32,
+        /// Open-Flags (POSIX, z. B. `O_RDWR`).
+        flags: u32,
+    },
 }
 
 /// Operation-spezifischer Antwort-Body.
@@ -217,6 +244,19 @@ pub enum Reply {
     Readdir(Vec<DirEntry>),
     /// Antwort auf [`Request::Statfs`].
     Statfs(StatFs),
+    /// Antwort auf [`Request::Unlink`].
+    Unlink,
+    /// Antwort auf [`Request::Mkdir`].
+    Mkdir(Attr),
+    /// Antwort auf [`Request::Create`].
+    Create {
+        /// Attribute des frisch angelegten Inodes.
+        attr: Attr,
+        /// Vom Daemon vergebenes File-Handle.
+        fh: FileHandle,
+        /// Open-Result-Flags.
+        flags: u32,
+    },
 }
 
 /// Inode-Attribute (POSIX-Quintessenz).
@@ -423,6 +463,72 @@ mod tests {
         let bytes = wire::encode_reply(&frame).unwrap();
         let decoded = wire::decode_reply(&bytes).unwrap();
         assert_eq!(frame, decoded);
+    }
+
+    #[test]
+    fn unlink_request_round_trips() {
+        let frame = RequestFrame {
+            header: FrameHeader { unique: 5 },
+            op: Request::Unlink {
+                parent: 1,
+                name: "gone.txt".to_string(),
+            },
+        };
+        let bytes = wire::encode_request(&frame).unwrap();
+        assert_eq!(frame, wire::decode_request(&bytes).unwrap());
+    }
+
+    #[test]
+    fn mkdir_request_and_reply_round_trip() {
+        let frame = RequestFrame {
+            header: FrameHeader { unique: 6 },
+            op: Request::Mkdir {
+                parent: 1,
+                name: "sub".to_string(),
+                mode: 0o755,
+            },
+        };
+        let bytes = wire::encode_request(&frame).unwrap();
+        assert_eq!(frame, wire::decode_request(&bytes).unwrap());
+
+        let reply = ReplyFrame {
+            header: FrameHeader { unique: 6 },
+            payload: ReplyPayload::Ok(Reply::Mkdir(Attr {
+                ino: 42, size: 0, blocks: 0, mode: 0o40755, nlink: 2,
+                uid: 0, gid: 0, kind: 2, crtime_secs: 1, mtime_secs: 1, ctime_secs: 1,
+            })),
+        };
+        let bytes = wire::encode_reply(&reply).unwrap();
+        assert_eq!(reply, wire::decode_reply(&bytes).unwrap());
+    }
+
+    #[test]
+    fn create_request_and_reply_round_trip() {
+        let frame = RequestFrame {
+            header: FrameHeader { unique: 7 },
+            op: Request::Create {
+                parent: 1,
+                name: "new.txt".to_string(),
+                mode: 0o644,
+                flags: 0x8002,
+            },
+        };
+        let bytes = wire::encode_request(&frame).unwrap();
+        assert_eq!(frame, wire::decode_request(&bytes).unwrap());
+
+        let reply = ReplyFrame {
+            header: FrameHeader { unique: 7 },
+            payload: ReplyPayload::Ok(Reply::Create {
+                attr: Attr {
+                    ino: 99, size: 0, blocks: 0, mode: 0o100644, nlink: 1,
+                    uid: 0, gid: 0, kind: 1, crtime_secs: 1, mtime_secs: 1, ctime_secs: 1,
+                },
+                fh: 17,
+                flags: 0,
+            }),
+        };
+        let bytes = wire::encode_reply(&reply).unwrap();
+        assert_eq!(reply, wire::decode_reply(&bytes).unwrap());
     }
 
     #[test]

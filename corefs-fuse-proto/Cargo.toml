@@ -1,8 +1,8 @@
 [package]
 name = "corefs-fuse-proto"
-version = { workspace = true }
-edition = { workspace = true }
-license = { workspace = true }
+version = "0.1.19"
+edition = "2024"
+license = "MIT"
 description = "AnyOS-natives Wire-Format für das CoreFS-FUSE-Subsystem (Request/Reply-Enums, optional bincode-Kodierung)."
 
 [features]
@@ -13,5 +13,8 @@ default = []
 std = []
 
 [dependencies]
-serde = { workspace = true }
-bincode = { workspace = true }
+# Inline-Versionen (statt workspace = true), damit die Crate auch von
+# Workspaces ausserhalb des corefs-Repos (z. B. AnyOS-Kernel) als
+# Path-Dependency konsumiert werden kann.
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+bincode = { version = "2.0", default-features = false, features = ["alloc", "serde"] }
