@@ -55,6 +55,7 @@ pub mod dump;
 pub mod error;
 pub mod fsck;
 pub mod mkfs;
+pub mod mount_check;
 pub mod repair;
 pub mod report;
 pub mod scrub;
