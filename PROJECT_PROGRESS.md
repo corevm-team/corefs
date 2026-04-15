@@ -6,9 +6,9 @@
 
 ## Aktueller Status
 
-**Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp  
-**Build-Status:** stabil  
-**Test-Status:** `636/636` Tests erfolgreich  
+**Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp, mit AnyOS-Kernel-Treiber, AnyOS-CLI-Tools und FUSE-IPC-Grundgerüst  
+**Build-Status:** stabil (corefs workspace grün; AnyOS-Kernel + `corefsd` bauen für `x86_64-anyos` / `x86_64-anyos-user`)  
+**Test-Status:** corefs-workspace `820/820` grün; corefs-core no-default-features `334/334` grün  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -455,33 +455,33 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [x] `Filesystem`-Trait ([kernel/src/fs/vfs/types.rs](../anyos/kernel/src/fs/vfs/types.rs)) implementieren — `CoreFsDriver` deckt jetzt `read`/`write`/`lookup`/`readdir`/`create`/`delete` ab; Mutationen laufen gegen einen gehaltenen `PersistedState`, `CoreFsDriver::flush()` persistiert via `save_state_native` atomar
 - [x] `FsType::CoreFs` im VFS-Enum ergänzen
 - [x] Superblock-Magic-Erkennung in der Boot-/Partitions-Detection — `fs::corefs::probe::detect(disk_id, partition_lba)` prüft ODF_MAGIC am Primär-Superblock (Block 1 = LBA 8 partition-relativ)
-- [ ] Block-Cache-Integration ([kernel/src/fs/blockcache.rs](../anyos/kernel/src/fs/blockcache.rs)) via BlockDevice-Wrapper
+- [~] Block-Cache-Integration ([kernel/src/fs/blockcache.rs](../anyos/kernel/src/fs/blockcache.rs)) via BlockDevice-Wrapper — Adapter dokumentiert den TODO-Scope (Hot-Path-Read, Write-through-Invalidierung beim `sync`); konkrete Implementierung bewusst deferiert, da das Boot-Read-Path heute durch den segment-internen Cache von `DeviceVolume` gedeckt ist
 - [x] Mount als Root-FS möglich — `fs::vfs::mount_corefs(path, disk, lba, sectors, device_id)` registriert den Treiber im VFS; `fs::corefs::try_auto_mount_corefs(...)` + Boot-Hook in `boot::x86::storage::try_mount_corefs_partitions` scannen jede Partition und mounten CoreFS-Volumes unter `/mnt/corefs`, `/mnt/corefs1`, …
 - [x] Read-Path funktional (readdir, read, getattr) — `FsType::CoreFs`-Arme in `fs::vfs::mod::read_dir` + `stat_inner` dispatchen über den `Filesystem`-Trait des gehaltenen `CoreFsDriver`; `sync_corefs()`-VFS-Helper exponiert die Flush-API für Shutdown-Hooks
 - [x] Write-Path funktional (create, write, unlink, mkdir) — VFS-Dispatch für **`open` (inkl. `O_CREAT`/`O_SYNC`/`O_APPEND`/`O_TRUNC`), `read`, `write`, `close`/`decref`, `delete`, `mkdir`** in `fs::vfs::mod` mit `FsType::CoreFs`-Match-Armen (fs_id=8). Driver: `create(Regular|Directory)`, byte-genaues `write` mit automatischem Resize des `BlockRecord`, `delete` verschiebt nach `deleted_inodes`.
 - [x] **`rename`, `truncate`, `chmod`, `chown`, `symlink`** — CoreFsDriver exponiert `truncate_file`, `rename_entry` (incl. Descendants), `set_mode`, `set_owner`, `create_symlink` (Target als UTF-8 im BlockRecord). VFS-Dispatch leitet die entsprechenden CoreFS-Mount-Operationen sauber an den Treiber. Cross-mount rename bleibt bis zur allgemeinen Cross-FS-Rename-Infrastruktur abgelehnt.
-- [ ] Unclean-Mount-Recovery über WAL bei Boot
-- [ ] Kernel-Integration-Tests mit vorbereitetem CoreFS-Image
+- [x] Unclean-Mount-Recovery über WAL bei Boot — `PersistedState::replay_pending_wal(now)` im `corefs-core` spielt strukturelle Ops (CreateFile/Directory, DeletePath, RenamePath, TruncateInode-size) direkt auf dem `PersistedState` zurück; AnyOS-`CoreFsDriver::mount_writable` hängt das automatisch ein und loggt `structural`/`skipped_data`/`txn` im Serial. Block-Level-Replay (PatchExtent) bleibt App-Schicht-Aufgabe.
+- [ ] Kernel-Integration-Tests mit vorbereitetem CoreFS-Image (AnyOS-seitige Test-Infrastruktur noch nicht vorhanden)
 
 ### 5.6 AnyOS — Generisches FUSE-Subsystem (native Variante)
 
-- [x] Modul `anyos/kernel/src/fs/fuse/` anlegen — **Skelett**: `FuseSession` mit Request-Queue, Pending-Reply-BTreeMap keyed by monoton wachsende `unique`-ID, Close-Semantik; 5 Unit-Tests
-- [ ] Character-Device/Syscall-Interface für Daemon-Registrierung
-- [ ] Request-Queue + Reply-Matching via `unique`-ID — *in-memory vorhanden, nicht an `/dev/fuse` angebunden*
-- [ ] AnyOS-Wire-Protokoll-Encoder/-Decoder (gemeinsam mit `corefs-fuse-proto`)
-- [ ] Mount-Syscall: Daemon-Handle + Mount-Point
-- [ ] FUSE-Filesystem als `FsType::Fuse` im VFS — Delegation jedes Calls an Daemon
+- [x] Modul `anyos/kernel/src/fs/fuse/` anlegen — `FuseSession` mit Request-Queue, Pending-Reply-BTreeMap keyed by monoton wachsende `unique`-ID, Close-Semantik; 10 Unit-Tests (inkl. Registry + devfs-Adapter)
+- [x] Character-Device/Syscall-Interface für Daemon-Registrierung — `/dev/fuse` im `DevFs` registriert; `FUSE_REGISTRY` (global) hält Sessions unter `SessionId`; `devfs_read`/`devfs_write` reichen Frames als `unique (8 LE) || body` durch
+- [x] Request-Queue + Reply-Matching via `unique`-ID — angebunden an `/dev/fuse`
+- [~] AnyOS-Wire-Protokoll-Encoder/-Decoder (gemeinsam mit `corefs-fuse-proto`) — Ser/De passiert im Userspace-Daemon; der Kernel transportiert opake Bytes
+- [ ] Mount-Syscall: Daemon-Handle + Mount-Point — `FsType::Fuse` existiert im VFS-Enum, Mount-Helper und VFS-Dispatch-Arme (open/read/write/lookup/readdir → Request → blockierende Reply) sind noch offen und erfordern Wait/Wake-Primitiven im Scheduler
+- [~] FUSE-Filesystem als `FsType::Fuse` im VFS — Enum-Variante + `statfs`/`list_mounts`-Arme vorhanden; Dispatch auf die Session (blockierendes Round-Trip) offen
 - [ ] Crash-Handling: Daemon-Absturz → sauberer Unmount / EIO für offene Handles
 - [ ] Hello-World-Test-FS-Daemon zur Validierung (unabhängig von CoreFS)
-- [ ] Protokoll-Abstraktion so gewählt, dass späterer Linux-FUSE-Wire parallel einhängbar ist
+- [x] Protokoll-Abstraktion so gewählt, dass späterer Linux-FUSE-Wire parallel einhängbar ist — der `/dev/fuse`-Transport ist bytestrom-agnostisch, der Wire-Decoder lebt im Daemon
 
 ### 5.7 AnyOS — `corefsd` Userspace-Daemon
 
-- [x] Binary `anyos/bin/corefsd/` anlegen — **Skelett**: linkt `corefs-core` + `corefs-fuse-adapter` + `corefs-fuse-proto`, fährt `SessionLoop` über einen In-Memory-`MockTransport`, beantwortet `Init`/`Destroy`, ENOSYS für alles andere
+- [x] Binary `anyos/bin/corefsd/` anlegen — linkt `corefs-core` + `corefs-fuse-adapter` + `corefs-fuse-proto`, fährt `SessionLoop` über `DevFuseTransport`
 - [x] Linkt `corefs-core` + `corefs-fuse-adapter` + `corefs-fuse-proto`
-- [ ] Block-Device-Zugriff via AnyOS-Syscalls → `BlockDevice`-Impl
-- [ ] Daemon registriert sich beim Kernel-FUSE-Subsystem — *Kernel-IPC-Bindung offen*
-- [~] Event-Loop: Request → `corefs-core` → Reply — *Skelett mit stub Handler vorhanden, echte CoreFS-Bindung folgt sobald das FUSE-Kernel-Subsystem echte Requests liefert*
+- [ ] Block-Device-Zugriff via AnyOS-Syscalls → `BlockDevice`-Impl (im Daemon; Kernel-seitige `BlockDeviceAdapter` existiert bereits für den direkten CoreFS-Treiber)
+- [x] Daemon registriert sich beim Kernel-FUSE-Subsystem — `DevFuseTransport::open()` auf `/dev/fuse`; Fallback-Demo-Loop wenn das Device nicht verfügbar
+- [~] Event-Loop: Request → `corefs-core` → Reply — IPC-Pfad vollständig (bincode-legacy über `/dev/fuse`); Handler aktuell nur `Init`/`Destroy` korrekt, alles andere ENOSYS — die CoreFS-Bindung (OdfDeviceSession-Owner + POSIX-Pfad-Mapping) ist Folge-Kommit
 - [ ] Sauberes Shutdown bei Unmount-Signal
 - [ ] End-to-End-Test: Userspace-Mount, Datei schreiben/lesen, Unmount
 
@@ -505,7 +505,7 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [ ] Online-Scrub gegen gemountetes FS (via Kernel-Ioctl oder Daemon-RPC)
 - [ ] Online-Snapshot gegen gemountetes FS
 - [ ] Online-Defrag gegen gemountetes FS
-- [ ] Tool-Dispatcher erkennt gemountetes vs. offline-Device und wählt Pfad
+- [~] Tool-Dispatcher erkennt gemountetes vs. offline-Device und wählt Pfad — `corefs-tools::mount_check::probe_device(path)` parst `/proc/mounts` und liefert `MountStatus::{NotMounted, Mounted{paths}, Unknown}`. Die Tool-Frontends können das konsultieren, bevor sie destruktive Operationen ausführen; der Ioctl-/Daemon-RPC-Pfad für tatsächliche Online-Operationen bleibt offen.
 
 ### 5.10 Optional: Linux-FUSE-Wire-Kompatibilität (Variante a)
 
