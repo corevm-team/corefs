@@ -40,6 +40,7 @@ pub mod grouped;
 pub mod journaled;
 pub mod native;
 pub mod reader;
+pub mod resize;
 pub mod scrub;
 pub mod session;
 pub mod volume;
