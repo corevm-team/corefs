@@ -205,6 +205,61 @@ pub enum Request {
         /// Open-Flags (POSIX, z. B. `O_RDWR`).
         flags: u32,
     },
+    /// Inode-Attribute partiell setzen (chmod/chown/truncate/…).
+    Setattr {
+        /// Inode-Nummer.
+        ino: InodeNo,
+        /// Nur gesetzte Felder werden angewendet.
+        attr: PartialAttr,
+    },
+    /// Leeres Verzeichnis entfernen.
+    Rmdir {
+        /// Inode-Nummer des Eltern-Verzeichnisses.
+        parent: InodeNo,
+        /// Komponentenname des Verzeichnisses.
+        name: String,
+    },
+    /// Eintrag umbenennen / verschieben.
+    Rename {
+        /// Eltern-Inode der Quelle.
+        parent: InodeNo,
+        /// Ursprünglicher Name.
+        old_name: String,
+        /// Eltern-Inode des Ziels.
+        new_parent: InodeNo,
+        /// Zielname.
+        new_name: String,
+    },
+    /// Symlink anlegen.
+    Symlink {
+        /// Eltern-Inode.
+        parent: InodeNo,
+        /// Name des neuen Symlinks.
+        name: String,
+        /// Ziel-Pfad.
+        target: String,
+    },
+    /// Symlink-Ziel lesen.
+    Readlink {
+        /// Inode-Nummer des Symlinks.
+        ino: InodeNo,
+    },
+    /// Offene File-Handles flushen.
+    Flush {
+        /// Inode-Nummer.
+        ino: InodeNo,
+        /// File-Handle.
+        fh: FileHandle,
+    },
+    /// Offene File-Handles fsync-en.
+    Fsync {
+        /// Inode-Nummer.
+        ino: InodeNo,
+        /// File-Handle.
+        fh: FileHandle,
+        /// `true` = nur Daten, `false` = Daten + Metadaten.
+        datasync: bool,
+    },
 }
 
 /// Operation-spezifischer Antwort-Body.
@@ -257,6 +312,39 @@ pub enum Reply {
         /// Open-Result-Flags.
         flags: u32,
     },
+    /// Antwort auf [`Request::Setattr`] — die neuen, vollständigen Attribute.
+    Setattr(Attr),
+    /// Antwort auf [`Request::Rmdir`].
+    Rmdir,
+    /// Antwort auf [`Request::Rename`].
+    Rename,
+    /// Antwort auf [`Request::Symlink`] — Attribute des neuen Symlinks.
+    Symlink(Attr),
+    /// Antwort auf [`Request::Readlink`] — Ziel-Pfad.
+    Readlink(String),
+    /// Antwort auf [`Request::Flush`].
+    Flush,
+    /// Antwort auf [`Request::Fsync`].
+    Fsync,
+}
+
+/// Partielles Attributupdate für [`Request::Setattr`].
+///
+/// Jedes Feld ist `Option<T>` — `None` = unverändert lassen.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartialAttr {
+    /// Neue POSIX-Mode-Bits.
+    pub mode: Option<u32>,
+    /// Neuer Owner-UID.
+    pub uid: Option<u32>,
+    /// Neue Owner-GID.
+    pub gid: Option<u32>,
+    /// Neue Dateigröße (Truncate).
+    pub size: Option<u64>,
+    /// Neue Modification-Time in Sekunden seit Epoche.
+    pub mtime_secs: Option<u64>,
+    /// Neue Access-Time in Sekunden seit Epoche.
+    pub atime_secs: Option<u64>,
 }
 
 /// Inode-Attribute (POSIX-Quintessenz).
@@ -529,6 +617,113 @@ mod tests {
         };
         let bytes = wire::encode_reply(&reply).unwrap();
         assert_eq!(reply, wire::decode_reply(&bytes).unwrap());
+    }
+
+    #[test]
+    fn setattr_request_and_reply_round_trip() {
+        let frame = RequestFrame {
+            header: FrameHeader { unique: 10 },
+            op: Request::Setattr {
+                ino: 42,
+                attr: PartialAttr {
+                    mode: Some(0o640),
+                    uid: Some(1000),
+                    gid: None,
+                    size: Some(4096),
+                    mtime_secs: Some(1_700_000_000),
+                    atime_secs: None,
+                },
+            },
+        };
+        let bytes = wire::encode_request(&frame).unwrap();
+        assert_eq!(frame, wire::decode_request(&bytes).unwrap());
+
+        let reply = ReplyFrame {
+            header: FrameHeader { unique: 10 },
+            payload: ReplyPayload::Ok(Reply::Setattr(Attr {
+                ino: 42, size: 4096, blocks: 8, mode: 0o100640, nlink: 1,
+                uid: 1000, gid: 0, kind: 1, crtime_secs: 1, mtime_secs: 1_700_000_000, ctime_secs: 2,
+            })),
+        };
+        let bytes = wire::encode_reply(&reply).unwrap();
+        assert_eq!(reply, wire::decode_reply(&bytes).unwrap());
+    }
+
+    #[test]
+    fn rmdir_rename_round_trip() {
+        let frame = RequestFrame {
+            header: FrameHeader { unique: 11 },
+            op: Request::Rmdir { parent: 1, name: "old".to_string() },
+        };
+        let bytes = wire::encode_request(&frame).unwrap();
+        assert_eq!(frame, wire::decode_request(&bytes).unwrap());
+
+        let frame2 = RequestFrame {
+            header: FrameHeader { unique: 12 },
+            op: Request::Rename {
+                parent: 1,
+                old_name: "a".to_string(),
+                new_parent: 2,
+                new_name: "b".to_string(),
+            },
+        };
+        let bytes2 = wire::encode_request(&frame2).unwrap();
+        assert_eq!(frame2, wire::decode_request(&bytes2).unwrap());
+    }
+
+    #[test]
+    fn symlink_readlink_round_trip() {
+        let frame = RequestFrame {
+            header: FrameHeader { unique: 13 },
+            op: Request::Symlink {
+                parent: 1,
+                name: "link".to_string(),
+                target: "/tmp/target".to_string(),
+            },
+        };
+        assert_eq!(
+            frame,
+            wire::decode_request(&wire::encode_request(&frame).unwrap()).unwrap()
+        );
+
+        let reply = ReplyFrame {
+            header: FrameHeader { unique: 14 },
+            payload: ReplyPayload::Ok(Reply::Readlink("/tmp/target".to_string())),
+        };
+        assert_eq!(
+            reply,
+            wire::decode_reply(&wire::encode_reply(&reply).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn flush_fsync_round_trip() {
+        let frame = RequestFrame {
+            header: FrameHeader { unique: 15 },
+            op: Request::Flush { ino: 3, fh: 5 },
+        };
+        assert_eq!(
+            frame,
+            wire::decode_request(&wire::encode_request(&frame).unwrap()).unwrap()
+        );
+
+        let frame2 = RequestFrame {
+            header: FrameHeader { unique: 16 },
+            op: Request::Fsync { ino: 3, fh: 5, datasync: true },
+        };
+        assert_eq!(
+            frame2,
+            wire::decode_request(&wire::encode_request(&frame2).unwrap()).unwrap()
+        );
+
+        let reply = ReplyFrame {
+            header: FrameHeader { unique: 17 },
+            payload: ReplyPayload::Ok(Reply::Flush),
+        };
+        assert_eq!(
+            reply,
+            wire::decode_reply(&wire::encode_reply(&reply).unwrap()).unwrap()
+        );
     }
 
     #[test]
