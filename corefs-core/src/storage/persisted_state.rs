@@ -51,6 +51,23 @@ pub struct RestoreReport {
     pub skipped_paths: Vec<String>,
 }
 
+/// Report eines [`PersistedState::replay_pending_wal`]-Laufs.
+///
+/// `applied_structural` zählt die auf Metadata-Ebene angewandten
+/// Operationen (CreateFile/CreateDirectory/DeletePath/RenamePath/
+/// TruncateInode-Größenfeld). `skipped_data_ops` zählt die Operationen,
+/// deren Replay die volle App-Schicht erfordert (insbesondere
+/// `PatchExtent` und die Blockdaten einer `TruncateInode`-Verkürzung).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalReplayReport {
+    /// Angewandte strukturelle Operationen (Metadata-Ebene).
+    pub applied_structural: usize,
+    /// Übersprungene Operationen, die Block-Level-Logik benötigen.
+    pub skipped_data_ops: usize,
+    /// Transaktions-ID der replay-ten WAL (falls vorhanden).
+    pub transaction_id: Option<u64>,
+}
+
 impl PersistedState {
     /// Konstruiert einen leeren `PersistedState` aus einer Konfiguration und
     /// einem Erstellungszeitstempel.
@@ -269,6 +286,133 @@ impl PersistedState {
             restored_files,
             restored_dirs,
             skipped_paths,
+        })
+    }
+
+    /// Spielt einen vorhandenen `pending_wal` soweit möglich direkt gegen
+    /// den `PersistedState` zurück.
+    ///
+    /// Bestimmt für den Unclean-Mount-Recovery-Pfad, in dem eine
+    /// plattformneutrale Teil-Recovery **vor** dem vollen App-Mount
+    /// stattfinden soll — z. B. im AnyOS-Kernel, wo die std/FUSE-Service-
+    /// Schicht gar nicht existiert.
+    ///
+    /// Unterstützt:
+    ///
+    /// * `CreateFile` — legt einen File-Inode mit Default-Metadata an,
+    ///   sofern noch keiner mit demselben Pfad aktiv ist.
+    /// * `CreateDirectory` — analog für Verzeichnisse.
+    /// * `DeletePath` — verschiebt aktiven Inode in `deleted_inodes`.
+    /// * `RenamePath` — aktualisiert den Pfad eines aktiven Inodes.
+    /// * `TruncateInode` — setzt `inode.size` auf den Wert aus dem WAL;
+    ///   die Blockdaten werden **nicht** angepasst (Skip-Zähler +1).
+    ///
+    /// **Nicht** unterstützt (wird im Report als `skipped_data_ops` gezählt):
+    ///
+    /// * `PatchExtent` — erfordert den Block-Store-Pfad aus
+    ///   [`crate::storage::block_store::BlockStore`] und ist bewusst der
+    ///   App-Schicht vorbehalten.
+    ///
+    /// Nach dem Aufruf ist `pending_wal == None`.
+    pub fn replay_pending_wal(
+        &mut self,
+        now: crate::platform::Timestamp,
+    ) -> CoreFsResult<WalReplayReport> {
+        use crate::domain::metadata::FileMetadata;
+        use crate::storage::volume_wal::WalOperation;
+
+        let Some(wal) = self.pending_wal.take() else {
+            return Ok(WalReplayReport {
+                applied_structural: 0,
+                skipped_data_ops: 0,
+                transaction_id: None,
+            });
+        };
+
+        let transaction_id = Some(wal.transaction_id);
+        let mut applied_structural = 0usize;
+        let mut skipped_data_ops = 0usize;
+
+        for op in wal.operations.into_iter() {
+            match op {
+                WalOperation::CreateFile { path, inode } => {
+                    self.resurrect_inode_if_soft_deleted(&path);
+                    if !self.active_inodes.iter().any(|i| i.path == path) {
+                        let node = Inode::new_at(
+                            inode,
+                            InodeKind::File,
+                            path,
+                            FileMetadata::default(),
+                            now,
+                        );
+                        self.active_inodes.push(node);
+                    }
+                    applied_structural += 1;
+                }
+                WalOperation::CreateDirectory { path, inode } => {
+                    self.resurrect_inode_if_soft_deleted(&path);
+                    if !self.active_inodes.iter().any(|i| i.path == path) {
+                        let node = Inode::new_at(
+                            inode,
+                            InodeKind::Directory,
+                            path,
+                            FileMetadata::default(),
+                            now,
+                        );
+                        self.active_inodes.push(node);
+                    }
+                    applied_structural += 1;
+                }
+                WalOperation::DeletePath { path } => {
+                    if let Some(pos) =
+                        self.active_inodes.iter().position(|i| i.path == path)
+                    {
+                        let node = self.active_inodes.remove(pos);
+                        self.deleted_inodes.push(node);
+                    }
+                    applied_structural += 1;
+                }
+                WalOperation::RenamePath { from, to } => {
+                    if let Some(inode) =
+                        self.active_inodes.iter_mut().find(|i| i.path == from)
+                    {
+                        inode.path = to;
+                        inode.changed_at = now;
+                    }
+                    applied_structural += 1;
+                }
+                WalOperation::TruncateInode { inode, size } => {
+                    if let Some(node) =
+                        self.active_inodes.iter_mut().find(|i| i.id == inode)
+                    {
+                        node.size = size;
+                        node.modified_at = now;
+                        node.changed_at = now;
+                    }
+                    // Blockdaten bleiben unberührt — Skip-Zähler dokumentiert das.
+                    skipped_data_ops += 1;
+                    applied_structural += 1;
+                }
+                WalOperation::PatchExtent { .. } => {
+                    skipped_data_ops += 1;
+                }
+            }
+        }
+
+        self.journal_entries.push(JournalEntry {
+            timestamp: now,
+            operation: alloc::string::ToString::to_string("replay_pending_wal"),
+            target: alloc::string::ToString::to_string("/"),
+            details: format!(
+                "txn={:?} structural={} skipped_data={}",
+                transaction_id, applied_structural, skipped_data_ops
+            ),
+        });
+
+        Ok(WalReplayReport {
+            applied_structural,
+            skipped_data_ops,
+            transaction_id,
         })
     }
 
@@ -630,6 +774,102 @@ mod tests {
             crate::platform::Timestamp::EPOCH,
         ));
         assert_eq!(state.next_inode_id(), InodeId(10));
+    }
+
+    #[test]
+    fn replay_pending_wal_applies_structural_ops_and_consumes_wal() {
+        use crate::storage::volume_wal::{VolumeWal, WalOperation};
+
+        let mut state =
+            PersistedState::empty_at(CoreFsConfig::default(), crate::platform::Timestamp::EPOCH);
+        state.active_inodes.push(Inode::new_at(
+            InodeId(5),
+            InodeKind::File,
+            "/old.txt".to_string(),
+            FileMetadata::default(),
+            crate::platform::Timestamp::EPOCH,
+        ));
+        let mut wal = VolumeWal::new_at(77, "unclean", crate::platform::Timestamp::EPOCH);
+        wal.push(WalOperation::CreateDirectory {
+            path: "/dir".to_string(),
+            inode: InodeId(6),
+        });
+        wal.push(WalOperation::CreateFile {
+            path: "/dir/file".to_string(),
+            inode: InodeId(7),
+        });
+        wal.push(WalOperation::RenamePath {
+            from: "/old.txt".to_string(),
+            to: "/renamed.txt".to_string(),
+        });
+        wal.push(WalOperation::TruncateInode {
+            inode: InodeId(5),
+            size: 128,
+        });
+        wal.push(WalOperation::DeletePath {
+            path: "/dir/file".to_string(),
+        });
+        wal.push(WalOperation::PatchExtent {
+            inode: InodeId(5),
+            device_block: 0,
+            block_offset: 0,
+            inode_offset: 0,
+            bytes: alloc::vec![1, 2, 3],
+            final_len: 3,
+        });
+        state.pending_wal = Some(wal);
+
+        let report = state
+            .replay_pending_wal(crate::platform::Timestamp::EPOCH)
+            .expect("replay ok");
+
+        assert_eq!(report.transaction_id, Some(77));
+        // CreateDir + CreateFile + Rename + Truncate + Delete = 5 structural.
+        assert_eq!(report.applied_structural, 5);
+        // PatchExtent skipped + TruncateInode has data side (counted).
+        assert_eq!(report.skipped_data_ops, 2);
+        assert!(state.pending_wal.is_none());
+
+        // Rename took effect.
+        assert!(
+            state.active_inodes.iter().any(|i| i.path == "/renamed.txt")
+        );
+        assert!(!state.active_inodes.iter().any(|i| i.path == "/old.txt"));
+        // Truncate size applied.
+        let node = state
+            .active_inodes
+            .iter()
+            .find(|i| i.id == InodeId(5))
+            .expect("renamed inode still present");
+        assert_eq!(node.size, 128);
+        // Dir present.
+        assert!(state.active_inodes.iter().any(|i| i.path == "/dir"));
+        // CreateFile then DeletePath => file is now in deleted_inodes.
+        assert!(
+            state
+                .deleted_inodes
+                .iter()
+                .any(|i| i.path == "/dir/file")
+        );
+        // Audit journal has an entry.
+        assert!(
+            state
+                .journal_entries
+                .iter()
+                .any(|e| e.operation == "replay_pending_wal")
+        );
+    }
+
+    #[test]
+    fn replay_pending_wal_on_none_is_noop() {
+        let mut state =
+            PersistedState::empty_at(CoreFsConfig::default(), crate::platform::Timestamp::EPOCH);
+        let report = state
+            .replay_pending_wal(crate::platform::Timestamp::EPOCH)
+            .expect("replay ok");
+        assert_eq!(report.applied_structural, 0);
+        assert_eq!(report.skipped_data_ops, 0);
+        assert!(report.transaction_id.is_none());
     }
 
     #[test]
