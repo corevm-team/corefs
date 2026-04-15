@@ -41,10 +41,57 @@
 
 use corefs_tools::Report;
 use corefs_tools::mkfs::{FormatImageOptions, LayoutMode};
+use corefs_tools::mount_check::{self, MountStatus};
 use corefs_tools::scrub::ScrubMode;
 use corefs_tools::snapshot::CreateOptions;
 use corefs_tools::{ToolsError, defrag, dump, fsck, mkfs, repair, scrub, snapshot};
 use std::io::Write;
+
+/// Outcome of the mount-gate check.
+enum GateDecision {
+    /// Safe to proceed — no mount table match (or the probe returned `Unknown`
+    /// and the caller passed `--online` to accept that risk).
+    Proceed,
+    /// Refuse the operation; the message was already printed to `err`.
+    Refuse,
+}
+
+/// Run the mount-status gate before a mutating operation.
+///
+/// Honest ruleset:
+/// - `MountStatus::NotMounted` → always proceed.
+/// - `MountStatus::Mounted` with default (`--offline`) → refuse with a clear
+///   hint to unmount or pass `--online`.
+/// - `MountStatus::Mounted` with `--online` → refuse with `Unsupported`
+///   because no ioctl/RPC path is wired yet.
+/// - `MountStatus::Unknown` → proceed; on AnyOS or environments without a
+///   mount table this is the only workable default.
+fn check_mount_gate<E: Write>(
+    path: &str,
+    online: bool,
+    err: &mut E,
+) -> GateDecision {
+    match mount_check::probe_device(path) {
+        MountStatus::NotMounted | MountStatus::Unknown => GateDecision::Proceed,
+        MountStatus::Mounted { mount_paths } => {
+            let joined = mount_paths.join(", ");
+            if online {
+                let _ = writeln!(
+                    err,
+                    "corefs-cli: device '{path}' mounted at {joined} — \
+                     online operations require ioctl/RPC dispatch (not yet implemented)"
+                );
+            } else {
+                let _ = writeln!(
+                    err,
+                    "corefs-cli: device '{path}' mounted at {joined} — \
+                     refusing offline mutation; unmount first or re-run with --online"
+                );
+            }
+            GateDecision::Refuse
+        }
+    }
+}
 
 /// Dispatch-Ergebnis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +102,12 @@ pub enum ExitStatus {
     ToolError,
     /// Argument-/Usage-Fehler (unbekanntes Subcommand, fehlende Flag).
     UsageError,
+    /// Operation vom mount-check-Gate abgelehnt. Default-Verhalten ist
+    /// `--offline`: ein in `/proc/mounts` gelistetes Device wird nicht
+    /// mutiert. Mit `--online` kann der Aufrufer das Gate aufweichen —
+    /// aktuell steht aber kein Online-Pfad (Ioctl/RPC) bereit, sodass auch
+    /// `--online` mit `Unsupported` endet.
+    Unsupported,
 }
 
 /// Argumente parsen und an die richtige Tool-Operation delegieren.
@@ -129,6 +182,10 @@ fn run_repair<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> 
         Err(msg) => return usage_err(err, &msg),
     };
     let json = has_flag(args, "--json");
+    let online = has_flag(args, "--online");
+    if matches!(check_mount_gate(&positional[0], online, err), GateDecision::Refuse) {
+        return ExitStatus::Unsupported;
+    }
     finish(repair::repair_image(&positional[0]), out, err, json)
 }
 
@@ -150,6 +207,10 @@ fn run_scrub<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> E
         }
     };
     let json = has_flag(args, "--json");
+    let online = has_flag(args, "--online");
+    if matches!(check_mount_gate(&positional[0], online, err), GateDecision::Refuse) {
+        return ExitStatus::Unsupported;
+    }
     finish(scrub::scrub_image(&positional[0], mode), out, err, json)
 }
 
@@ -203,6 +264,10 @@ fn run_snapshot<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -
             };
             let scope_root = parse_string(&args[1..], "--scope");
             let json = has_flag(&args[1..], "--json");
+            let online = has_flag(&args[1..], "--online");
+            if matches!(check_mount_gate(&positional[0], online, err), GateDecision::Refuse) {
+                return ExitStatus::Unsupported;
+            }
             finish(
                 snapshot::create(&positional[0], &CreateOptions { name, scope_root }),
                 out,
@@ -220,6 +285,10 @@ fn run_snapshot<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -
                 Err(msg) => return usage_err(err, &msg),
             };
             let json = has_flag(&args[1..], "--json");
+            let online = has_flag(&args[1..], "--online");
+            if matches!(check_mount_gate(&positional[0], online, err), GateDecision::Refuse) {
+                return ExitStatus::Unsupported;
+            }
             finish(snapshot::delete(&positional[0], id), out, err, json)
         }
         "restore" => {
@@ -232,6 +301,10 @@ fn run_snapshot<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -
                 Err(msg) => return usage_err(err, &msg),
             };
             let json = has_flag(&args[1..], "--json");
+            let online = has_flag(&args[1..], "--online");
+            if matches!(check_mount_gate(&positional[0], online, err), GateDecision::Refuse) {
+                return ExitStatus::Unsupported;
+            }
             finish(snapshot::restore(&positional[0], id), out, err, json)
         }
         other => usage_err(err, &format!("snapshot: unknown subcommand '{other}' (use list|create|delete|restore)")),
@@ -244,6 +317,10 @@ fn run_defrag<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> 
         Err(msg) => return usage_err(err, &msg),
     };
     let json = has_flag(args, "--json");
+    let online = has_flag(args, "--online");
+    if matches!(check_mount_gate(&positional[0], online, err), GateDecision::Refuse) {
+        return ExitStatus::Unsupported;
+    }
     finish(defrag::defrag_image(&positional[0]), out, err, json)
 }
 
@@ -315,7 +392,7 @@ fn collect_positional(args: &[String], expected: usize, hint: &str) -> Result<Ve
 }
 
 fn is_known_bool_flag(flag: &str) -> bool {
-    matches!(flag, "--json" | "--blob" | "--help" | "-h")
+    matches!(flag, "--json" | "--blob" | "--help" | "-h" | "--online" | "--offline")
 }
 
 fn has_flag(args: &[String], flag: &str) -> bool {
@@ -381,10 +458,17 @@ SUBCOMMANDS:
     help
         Show this message.
 
+MUTATING SUBCOMMANDS (repair / scrub / defrag / snapshot create|delete|restore)
+honour a mount-check gate. By default (`--offline`, implicit) the tool
+refuses to operate on a device that appears in /proc/mounts. Pass
+`--online` to explicitly request an online operation — currently still
+rejected because the ioctl/RPC control channel is not yet wired.
+
 EXIT CODES:
     0 — success
     1 — tool error (corrupt image, missing file, snapshot not found, …)
     2 — usage error (unknown subcommand, missing flag)
+    3 — unsupported (mount-check gate refused; online path not implemented)
 ";
     let _ = writeln!(w, "{banner}");
 }

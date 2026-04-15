@@ -8,6 +8,8 @@
 //! - `0` — Erfolg
 //! - `1` — Tool-Fehler (Image korrupt, I/O-Fehler, Snapshot nicht gefunden, …)
 //! - `2` — Argument-/Usage-Fehler (unbekanntes Subcommand, fehlende Flag, …)
+//! - `3` — Operation vom mount-check-Gate abgelehnt (device mounted, oder
+//!         `--online` ohne verfügbaren Ioctl/RPC-Pfad).
 
 use std::process::ExitCode;
 
@@ -19,5 +21,6 @@ fn main() -> ExitCode {
         corefs_cli::ExitStatus::Ok => ExitCode::from(0),
         corefs_cli::ExitStatus::ToolError => ExitCode::from(1),
         corefs_cli::ExitStatus::UsageError => ExitCode::from(2),
+        corefs_cli::ExitStatus::Unsupported => ExitCode::from(3),
     }
 }

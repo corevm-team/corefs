@@ -423,3 +423,39 @@ fn collect_positional_reports_missing_required_arg() {
     assert!(r.is_err());
     assert!(r.unwrap_err().contains("test <path>"));
 }
+
+// =====================================================================
+// Mount-check gate
+// =====================================================================
+
+#[test]
+fn scrub_unknown_mount_status_proceeds() {
+    // An implausible path yields Unknown on most systems (or NotMounted on
+    // Linux where /proc/mounts is readable). Either way the gate must not
+    // refuse and the ToolError (because the path doesn't exist) surfaces.
+    let (mut out, mut err) = capture();
+    let status = dispatch(
+        &args(&["scrub", "/does/not/exist/corefs-cli-gate-probe.img"]),
+        &mut out,
+        &mut err,
+    );
+    assert_ne!(
+        status,
+        ExitStatus::Unsupported,
+        "gate must not refuse non-mounted / unknown devices"
+    );
+}
+
+#[test]
+fn defrag_accepts_online_flag_as_bool() {
+    // --online must be treated as a boolean flag and not eat the path token.
+    let (mut out, mut err) = capture();
+    let status = dispatch(
+        &args(&["defrag", "--online", "/does/not/exist/corefs-cli-gate.img"]),
+        &mut out,
+        &mut err,
+    );
+    // Gate may refuse (if the probe sees it as mounted somehow) or tool
+    // fails. Crucially it is NOT a UsageError — the path was parsed.
+    assert_ne!(status, ExitStatus::UsageError);
+}
