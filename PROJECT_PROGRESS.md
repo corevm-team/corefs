@@ -458,15 +458,16 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [ ] Block-Cache-Integration ([kernel/src/fs/blockcache.rs](../anyos/kernel/src/fs/blockcache.rs)) via BlockDevice-Wrapper
 - [x] Mount als Root-FS möglich — `fs::vfs::mount_corefs(path, disk, lba, sectors, device_id)` registriert den Treiber im VFS; `fs::corefs::try_auto_mount_corefs(...)` + Boot-Hook in `boot::x86::storage::try_mount_corefs_partitions` scannen jede Partition und mounten CoreFS-Volumes unter `/mnt/corefs`, `/mnt/corefs1`, …
 - [x] Read-Path funktional (readdir, read, getattr) — `FsType::CoreFs`-Arme in `fs::vfs::mod::read_dir` + `stat_inner` dispatchen über den `Filesystem`-Trait des gehaltenen `CoreFsDriver`; `sync_corefs()`-VFS-Helper exponiert die Flush-API für Shutdown-Hooks
-- [x] Write-Path funktional (create, write, unlink, mkdir) — VFS-Dispatch für **`open` (inkl. `O_CREAT`/`O_SYNC`/`O_APPEND`), `read`, `write`, `close`/`decref`, `delete`, `mkdir`** in `fs::vfs::mod` mit `FsType::CoreFs`-Match-Armen (fs_id=8). Driver: `create(Regular|Directory)`, byte-genaues `write` mit automatischem Resize des `BlockRecord`, `delete` verschiebt nach `deleted_inodes`. **Ehrlich abgelehnt** (Short-Circuit zu `PermissionDenied` ohne Driver-Fallthrough): `rename`, `truncate`, `chmod`, `chown`, `symlink`, `O_TRUNC` auf existierender Datei — alle brauchen zusätzliche Driver-APIs in Folge-Iterationen.
+- [x] Write-Path funktional (create, write, unlink, mkdir) — VFS-Dispatch für **`open` (inkl. `O_CREAT`/`O_SYNC`/`O_APPEND`/`O_TRUNC`), `read`, `write`, `close`/`decref`, `delete`, `mkdir`** in `fs::vfs::mod` mit `FsType::CoreFs`-Match-Armen (fs_id=8). Driver: `create(Regular|Directory)`, byte-genaues `write` mit automatischem Resize des `BlockRecord`, `delete` verschiebt nach `deleted_inodes`.
+- [x] **`rename`, `truncate`, `chmod`, `chown`, `symlink`** — CoreFsDriver exponiert `truncate_file`, `rename_entry` (incl. Descendants), `set_mode`, `set_owner`, `create_symlink` (Target als UTF-8 im BlockRecord). VFS-Dispatch leitet die entsprechenden CoreFS-Mount-Operationen sauber an den Treiber. Cross-mount rename bleibt bis zur allgemeinen Cross-FS-Rename-Infrastruktur abgelehnt.
 - [ ] Unclean-Mount-Recovery über WAL bei Boot
 - [ ] Kernel-Integration-Tests mit vorbereitetem CoreFS-Image
 
 ### 5.6 AnyOS — Generisches FUSE-Subsystem (native Variante)
 
-- [ ] Modul `anyos/kernel/src/fs/fuse/` anlegen
+- [x] Modul `anyos/kernel/src/fs/fuse/` anlegen — **Skelett**: `FuseSession` mit Request-Queue, Pending-Reply-BTreeMap keyed by monoton wachsende `unique`-ID, Close-Semantik; 5 Unit-Tests
 - [ ] Character-Device/Syscall-Interface für Daemon-Registrierung
-- [ ] Request-Queue + Reply-Matching via `unique`-ID
+- [ ] Request-Queue + Reply-Matching via `unique`-ID — *in-memory vorhanden, nicht an `/dev/fuse` angebunden*
 - [ ] AnyOS-Wire-Protokoll-Encoder/-Decoder (gemeinsam mit `corefs-fuse-proto`)
 - [ ] Mount-Syscall: Daemon-Handle + Mount-Point
 - [ ] FUSE-Filesystem als `FsType::Fuse` im VFS — Delegation jedes Calls an Daemon
@@ -476,11 +477,11 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 
 ### 5.7 AnyOS — `corefsd` Userspace-Daemon
 
-- [ ] App `anyos/apps/corefsd/` anlegen
-- [ ] Linkt `corefs-core` + `corefs-fuse-adapter` + `corefs-fuse-proto`
+- [x] Binary `anyos/bin/corefsd/` anlegen — **Skelett**: linkt `corefs-core` + `corefs-fuse-adapter` + `corefs-fuse-proto`, fährt `SessionLoop` über einen In-Memory-`MockTransport`, beantwortet `Init`/`Destroy`, ENOSYS für alles andere
+- [x] Linkt `corefs-core` + `corefs-fuse-adapter` + `corefs-fuse-proto`
 - [ ] Block-Device-Zugriff via AnyOS-Syscalls → `BlockDevice`-Impl
-- [ ] Daemon registriert sich beim Kernel-FUSE-Subsystem
-- [ ] Event-Loop: Request → `corefs-core` → Reply
+- [ ] Daemon registriert sich beim Kernel-FUSE-Subsystem — *Kernel-IPC-Bindung offen*
+- [~] Event-Loop: Request → `corefs-core` → Reply — *Skelett mit stub Handler vorhanden, echte CoreFS-Bindung folgt sobald das FUSE-Kernel-Subsystem echte Requests liefert*
 - [ ] Sauberes Shutdown bei Unmount-Signal
 - [ ] End-to-End-Test: Userspace-Mount, Datei schreiben/lesen, Unmount
 
@@ -493,7 +494,7 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [x] `anyos/bin/corefs-defrag/` — **funktional**: hydriert `OdfDeviceSession`, ruft `PersistedState::defragment_in_place()`, persistiert via `mutate`/flush. Reports moved_entries/reclaimed_gaps/final_device_blocks (Text+JSON).
 - [x] `anyos/bin/corefs-snapshot/` — **list/create/delete/restore funktional**. `create` erfasst Inode-Metadaten (kind/size/timestamps/mode), `Snapshot.file_data` bleibt leer (`metadata_only: true` im Report) — Content-Capture braucht die std-gebundene `read_file`-Pipeline (decompress+decrypt). `restore` wrappt jetzt `PersistedState::restore_snapshot_at(id, EPOCH)` aus `corefs-core` und rendert den Report (restored_files, restored_dirs, skipped_paths) in Text+JSON.
 - [x] `anyos/bin/corefs-resize/` — **grow funktional**: ruft `corefs-core::storage::ondisk::resize::grow_device` auf, validiert Block-Alignment und Device-Kapazität, aktualisiert Superblock + Bitmap + beide Redundanz-SBs. Shrink bewusst nicht angeboten (Evakuierung der obersten Blöcke wäre separates Feature).
-- [x] `anyos/bin/corefs-tier/` — **status funktional**: `tier_status_from_state` liefert per-Tier File-Counts (Hot/Warm/Cold) und Top-N hottest paths aus `hot_path_records`. `promote`/`demote` bleiben `ExitCode::Unsupported` — echte Migration braucht zwei physische Devices und die std-gebundene `Migrator`-Pipeline.
+- [x] `anyos/bin/corefs-tier/` — **status + multi-device-migration funktional**: single-device `status` via `tier_status_from_state` (per-Tier File-Counts + Top-N hottest paths). Dual-device `rebalance` / `promote --block <N>` / `demote --block <N>` öffnen zwei `AnyOsBlockDevice`, wrappen sie in `TieredDevice`, rufen `Migrator::rebalance` bzw. `migrate_block`. `rebalance` nutzt aktuell einen leeren `HotnessTracker` (Promote-Phase ist No-op bis Access-Frequency-Telemetrie persistiert wird); explizite `promote`/`demote` bewegen einzelne Blöcke deterministisch.
 - [x] Gemeinsames Arg-Parsing-Hilfsmodul: `anyos/libs/libcorefs-tools/args.rs` — GNU-style long-option Parser (`--device 0`, `--capacity 16M`, `--json`) mit `_`-Digit-Separator und k/M/G/T-Multiplikatoren
 - [x] Einheitliche Report-Rendering-Routinen: `anyos/libs/libcorefs-tools/report.rs` — `Report`-Trait + handrolliger `JsonBuilder` (kein `serde_json`, `no_std+alloc`-fähig)
 - [x] Build-Integration: `anyos/cmake/UserPrograms.cmake` — Cargo-Package-Namen mit `_` (Cargo verbietet `.`), Sysroot-ELFs werden via `anyelf` nach `/System/sbin/mkfs.corefs`, `/System/sbin/fsck.corefs`, `/System/sbin/corefs-*` umbenannt
