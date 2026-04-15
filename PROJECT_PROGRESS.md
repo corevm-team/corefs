@@ -469,10 +469,10 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [x] Character-Device/Syscall-Interface für Daemon-Registrierung — `/dev/fuse` im `DevFs` registriert; `FUSE_REGISTRY` (global) hält Sessions unter `SessionId`; `devfs_read`/`devfs_write` reichen Frames als `unique (8 LE) || body` durch
 - [x] Request-Queue + Reply-Matching via `unique`-ID — angebunden an `/dev/fuse`
 - [~] AnyOS-Wire-Protokoll-Encoder/-Decoder (gemeinsam mit `corefs-fuse-proto`) — Ser/De passiert im Userspace-Daemon; der Kernel transportiert opake Bytes
-- [~] Mount-Syscall: Daemon-Handle + Mount-Point — `FsType::Fuse` existiert im VFS-Enum, blockierende Session-Primitiven (`FuseSession::enqueue_and_wait`) + `fuse_call`-Helper stehen, volle Dispatch-Arme (open/read/write/lookup/readdir) folgen in Phase 5.7 zusammen mit dem Inode-Cache
+- [x] Mount-Syscall: Daemon-Handle + Mount-Point — `vfs::mount_fuse(path, session_id)` legt einen Mount-Point vom Typ `FsType::Fuse` an und allokiert eine eigene `InodeMap` pro Session; blockierende Session-Primitiven (`FuseSession::enqueue_and_wait`) + `fuse_call`-Helper stehen, volle Dispatch-Arme (open/read/write/close/read_dir/stat/delete/mkdir) wired
 - [x] Blocking Request/Reply im Kernel — `FuseSession::enqueue_and_wait` mit `waiters: BTreeMap<Unique, tid>`, wake via `scheduler::wake_thread`; `deliver_reply` / `close` wecken wartende Threads; 3 neue Unit-Tests
 - [x] `fuse_call`-Helper (Kernel) — serialisiert `corefs_fuse_proto::Request` via bincode-legacy, ruft `enqueue_and_wait`, dekodiert `ReplyPayload`; `FuseCallError` + POSIX-errno→`FsError`-Mapping; 2 neue Unit-Tests gegen Mock-Session
-- [~] FUSE-Filesystem als `FsType::Fuse` im VFS — Enum-Variante + `statfs`/`list_mounts`-Arme vorhanden, blockierendes Round-Trip-Primitiv + Helper fertig, Retrofit der einzelnen VFS-Dispatch-Sites (read_dir/open/…) folgt
+- [x] FUSE-Filesystem als `FsType::Fuse` im VFS — `fs_id=9` an allen Dispatch-Sites (open/read/write/close/decref/read_dir/stat_inner/delete/mkdir); FUSE `u64` ↔ VFS `u32` via per-Mount `kernel::fs::fuse::inode_map::InodeMap`; FileHandle wird in `OpenFile.parent_cluster`/`seek_cache_offset` geparkt. `statfs` bleibt TODO.
 - [ ] Crash-Handling: Daemon-Absturz → sauberer Unmount / EIO für offene Handles
 - [ ] Hello-World-Test-FS-Daemon zur Validierung (unabhängig von CoreFS)
 - [x] Protokoll-Abstraktion so gewählt, dass späterer Linux-FUSE-Wire parallel einhängbar ist — der `/dev/fuse`-Transport ist bytestrom-agnostisch, der Wire-Decoder lebt im Daemon
@@ -481,9 +481,9 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 
 - [x] Binary `anyos/bin/corefsd/` anlegen — linkt `corefs-core` + `corefs-fuse-adapter` + `corefs-fuse-proto`, fährt `SessionLoop` über `DevFuseTransport`
 - [x] Linkt `corefs-core` + `corefs-fuse-adapter` + `corefs-fuse-proto`
-- [ ] Block-Device-Zugriff via AnyOS-Syscalls → `BlockDevice`-Impl (im Daemon; Kernel-seitige `BlockDeviceAdapter` existiert bereits für den direkten CoreFS-Treiber)
 - [x] Daemon registriert sich beim Kernel-FUSE-Subsystem — `DevFuseTransport::open()` auf `/dev/fuse`; Fallback-Demo-Loop wenn das Device nicht verfügbar
-- [~] Event-Loop: Request → `corefs-core` → Reply — IPC-Pfad vollständig (bincode-legacy über `/dev/fuse`); Handler aktuell nur `Init`/`Destroy` korrekt, alles andere ENOSYS — die CoreFS-Bindung (OdfDeviceSession-Owner + POSIX-Pfad-Mapping + Inode-Cache) ist Folge-Kommit
+- [x] Event-Loop: Request → `corefs-core` → Reply — IPC-Pfad vollständig (bincode-legacy über `/dev/fuse`); `bin/corefsd/src/handler.rs::CoreFsHandler` besitzt eine `OdfDeviceSession` und übersetzt Init/Destroy/Getattr/Lookup/Readdir/Open/Release/Read/Write/Create/Mkdir/Unlink/Statfs in `PersistedState`-Zugriffe; `--device` + `--capacity` wählen das Block-Device (fallback: Stub-Handler, der nur Init/Destroy beantwortet).
+- [x] Block-Device-Zugriff via AnyOS-Syscalls → `BlockDevice`-Impl (im Daemon; via `libcorefs-tools::block_device::AnyOsBlockDevice` wiederverwendet, `OdfDeviceSession::open` + `format_new_at` mit Fallback)
 - [x] Proto erweitert um `Unlink`/`Mkdir`/`Create` (Request+Reply) — additiv, 3 neue Round-Trip-Tests; `corefs-fuse-proto/Cargo.toml` pinnt serde+bincode inline, damit die Crate als Path-Dep aus dem AnyOS-Workspace konsumierbar ist
 - [ ] Sauberes Shutdown bei Unmount-Signal
 - [ ] End-to-End-Test: Userspace-Mount, Datei schreiben/lesen, Unmount
