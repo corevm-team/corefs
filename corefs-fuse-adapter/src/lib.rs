@@ -117,6 +117,12 @@ impl<T: Transport, H: FuseHandler> SessionLoop<T, H> {
     ///
     /// Bei Transport-Fehlern wird die Schleife beendet und der Fehler
     /// zurückgegeben.
+    /// Zerlegt die Session nach Ende des Laufs in Transport und Handler.
+    /// Nützlich für Tests / Debug-Inspektion der Transport-Interna.
+    pub fn into_parts(self) -> (T, H) {
+        (self.transport, self.handler)
+    }
+
     pub fn run(&mut self) -> Result<(), T::Error> {
         loop {
             let frame = match self.transport.recv_request()? {
