@@ -171,7 +171,6 @@ impl PersistedState {
             .ok_or_else(|| CoreFsError::NotFound(format!("snapshot {snapshot_id} not found")))?
             .clone();
 
-        let _ = now; // reserved for audit/journal hooks in follow-up iteration
         let mut restored_files = 0usize;
         let mut restored_dirs = 0usize;
         let mut skipped_paths: Vec<String> = Vec::new();
@@ -250,6 +249,19 @@ impl PersistedState {
                 InodeKind::Symlink => {}
             }
         }
+
+        // Audit-Eintrag im Journal — dokumentiert die Restore-Operation
+        // im persistierten Audit-Log. Verwendet `now` (Aufrufer-Timestamp)
+        // und liefert damit deterministische Replay-Fähigkeit.
+        self.journal_entries.push(JournalEntry {
+            timestamp: now,
+            operation: alloc::string::ToString::to_string("restore_snapshot"),
+            target: format!("/.snapshots/{}", snapshot.name),
+            details: format!(
+                "id={snapshot_id} restored_files={restored_files} restored_dirs={restored_dirs} skipped={}",
+                skipped_paths.len()
+            ),
+        });
 
         Ok(RestoreReport {
             snapshot_id,
