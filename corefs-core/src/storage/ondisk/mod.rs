@@ -43,6 +43,7 @@ pub mod reader;
 pub mod resize;
 pub mod scrub;
 pub mod session;
+pub mod tier;
 pub mod volume;
 
 pub use checksum::Crc32c;
