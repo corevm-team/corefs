@@ -102,11 +102,14 @@ fn cs4_concurrent_readers_on_exported_state() {
     }
 
     let state = Arc::new(fs.export_state());
+    let block_bytes = Arc::new(fs.read_all_block_bytes());
     let mut handles = Vec::new();
     for _ in 0..8 {
         let s = Arc::clone(&state);
+        let bb = Arc::clone(&block_bytes);
         handles.push(thread::spawn(move || {
-            let reader = CoreFsService::from_persisted_state((*s).clone());
+            let mut reader = CoreFsService::from_persisted_state((*s).clone());
+            reader.restore_block_bytes((*bb).clone());
             let paths = reader.list_paths();
             assert_eq!(paths.len(), 20);
             // Every reader sees identical content.
@@ -134,6 +137,7 @@ fn cs5_snapshot_readers_isolated_from_writer_mutations() {
 
     // Take a state snapshot before further mutations.
     let snapshot_state = Arc::new(fs.export_state());
+    let snapshot_bytes = Arc::new(fs.read_all_block_bytes());
 
     // Writer continues mutating.
     fs.create_file("/v2", b"second", &[]).unwrap();
@@ -142,8 +146,10 @@ fn cs5_snapshot_readers_isolated_from_writer_mutations() {
     let mut handles = Vec::new();
     for _ in 0..4 {
         let s = Arc::clone(&snapshot_state);
+        let bb = Arc::clone(&snapshot_bytes);
         handles.push(thread::spawn(move || {
-            let reader = CoreFsService::from_persisted_state((*s).clone());
+            let mut reader = CoreFsService::from_persisted_state((*s).clone());
+            reader.restore_block_bytes((*bb).clone());
             // Snapshot readers see the OLD state: /v1 exists with original content,
             // /v2 does not exist.
             assert_eq!(reader.read_file("/v1").unwrap(), b"first");

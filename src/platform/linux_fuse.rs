@@ -149,14 +149,21 @@ impl CoreFsFuseView {
         state: PersistedState,
         encryption_service: Option<&crate::services::encryption::EncryptionService>,
     ) -> Self {
+        // BlockRecord is now metadata-only — bytes are not stored in PersistedState.
+        // For the ODF/read-only path the block_map is empty; use from_service() for
+        // live mounts that need actual file content.
+        let block_map: HashMap<InodeId, Vec<u8>> = HashMap::new();
+        Self::from_state_with_encryption_and_bytes(state, encryption_service, block_map)
+    }
+
+    fn from_state_with_encryption_and_bytes(
+        state: PersistedState,
+        encryption_service: Option<&crate::services::encryption::EncryptionService>,
+        block_map: HashMap<InodeId, Vec<u8>>,
+    ) -> Self {
         let mut nodes_by_ino = HashMap::new();
         let mut ino_by_path = HashMap::new();
         let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        let block_map: HashMap<InodeId, Vec<u8>> = state
-            .block_records
-            .into_iter()
-            .map(|record| (record.inode, record.bytes))
-            .collect();
 
         let root = FuseNode {
             path: "/".to_string(),
@@ -219,7 +226,20 @@ impl CoreFsFuseView {
 
     fn load_image(path: impl AsRef<Path>) -> CoreFsResult<Self> {
         let fs = CoreFsService::load_image_from_path(path)?;
-        Ok(Self::from_state(fs.export_state()))
+        let block_bytes = fs.read_all_block_bytes();
+        let encryption_service = if fs.export_state().config.security.encryption_at_rest {
+            let mut enc = crate::services::encryption::EncryptionService::default();
+            enc.derive_key_from(fs.volume_name().as_bytes());
+            Some(enc)
+        } else {
+            None
+        };
+        let state = fs.export_state();
+        Ok(Self::from_state_with_encryption_and_bytes(
+            state,
+            encryption_service.as_ref(),
+            block_bytes,
+        ))
     }
 
     /// Load a `CoreFsFuseView` from an ODF-native volume image.  The
@@ -546,6 +566,12 @@ enum FuseBacking {
     Odf {
         device: crate::storage::block_device::FileImageDevice,
         image_path: PathBuf,
+        /// Cache of InodeId → (content_crc, extents) for blocks already
+        /// written to the ODF device.  Avoids re-writing unchanged data.
+        odf_extents: std::collections::HashMap<
+            crate::domain::inode::InodeId,
+            (u32, Vec<crate::storage::block_store::ExtentRef>),
+        >,
     },
 }
 
@@ -830,9 +856,17 @@ impl CoreFsFuseMountRw {
         let dirty_state = service.persisted_state();
         save_state_native_incremental(&mut device, &dirty_state)?;
 
+        // Build ODF extents cache and restore file bytes from ODF device.
+        let odf_extents = crate::storage::ondisk::session::build_odf_extents_cache_pub(
+            &service.export_state(),
+        );
+        crate::storage::ondisk::session::restore_bytes_from_odf_device_pub(
+            &device,
+            &mut service,
+        )?;
         Ok(Self::from_service(
             service,
-            FuseBacking::Odf { device, image_path },
+            FuseBacking::Odf { device, image_path, odf_extents },
         ))
     }
 
@@ -861,8 +895,14 @@ impl CoreFsFuseMountRw {
                 )?;
                 Ok(())
             }
-            FuseBacking::Odf { device, .. } => {
+            FuseBacking::Odf { device, odf_extents, .. } => {
                 let state = self.service.persisted_state();
+                let state = crate::storage::ondisk::session::write_bytes_to_odf_device_pub(
+                    device,
+                    &self.service,
+                    state,
+                    odf_extents,
+                )?;
                 let _report =
                     crate::storage::ondisk::native::save_state_native_incremental(device, &state)?;
                 Ok(())
@@ -1112,11 +1152,9 @@ impl CoreFsFuseMountRw {
     /// Called after `from_service` and after any operation that changes paths (rename).
     fn rebuild_indexes(&mut self) {
         let state = self.service.export_state();
-        let block_map: HashMap<crate::domain::inode::InodeId, Vec<u8>> = state
-            .block_records
-            .into_iter()
-            .map(|r| (r.inode, r.bytes))
-            .collect();
+        // BlockRecord is now metadata-only; read actual bytes from the compat device.
+        let block_map: HashMap<crate::domain::inode::InodeId, Vec<u8>> =
+            self.service.read_all_block_bytes();
 
         let mut nodes_by_ino = HashMap::new();
         let mut ino_by_path = HashMap::new();

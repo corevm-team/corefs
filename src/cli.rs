@@ -725,8 +725,8 @@ where
             let capacity_bytes = parse_flag_u64(&args[4..], "--size").unwrap_or(64 * 1024 * 1024);
             let report = odf_migrate_from_volume_image(src, dst, capacity_bytes)?;
             println!(
-                "migrated {} → {}: {} inode(s), generation {}",
-                src, dst, report.active_slots, report.generation
+                "migrated {src} → {dst}: {} inode(s), generation {}",
+                report.active_slots, report.generation
             );
         }
         command => {
@@ -830,29 +830,44 @@ fn odf_session_demo(image_path: &str, capacity: u64) -> CoreFsResult<()> {
     Ok(())
 }
 
+struct MigrateReport {
+    active_slots: usize,
+    generation: u64,
+}
+
 fn odf_migrate_from_volume_image(
     src: &str,
     dst: &str,
     capacity_bytes: u64,
-) -> CoreFsResult<crate::storage::ondisk::native::NativeSaveReport> {
-    use crate::storage::block_device::{BlockDevice, FileImageDevice};
-    use crate::storage::ondisk::native::save_state_native;
-    use crate::storage::ondisk::volume::{FormatOptions, format_device};
-    use crate::storage::volume_image::load_volume_image;
-    // Load the legacy volume_image.
-    let state = load_volume_image(std::path::Path::new(src))?;
-    // Format a fresh ODF device and save in native layout.
-    let mut dst_dev = FileImageDevice::create(dst, capacity_bytes, 4096)?;
-    let opts = FormatOptions {
-        label: state.volume.name.clone(),
-        uuid: generate_uuid(),
-        inode_count: crate::storage::ondisk::layout::DEFAULT_INODE_COUNT,
-        journal_blocks: crate::storage::ondisk::layout::DEFAULT_JOURNAL_BLOCKS,
-    };
-    format_device(&mut dst_dev, &opts)?;
-    let report = save_state_native(&mut dst_dev, &state)?;
-    let _ = dst_dev.sync();
-    Ok(report)
+) -> CoreFsResult<MigrateReport> {
+    use crate::storage::ondisk::session::{OdfFileSession, OdfSessionOptions};
+    use crate::storage::volume_image::load_volume_image_with_bytes;
+
+    // Load the legacy volume_image with file bytes.
+    let (state, block_bytes) = load_volume_image_with_bytes(std::path::Path::new(src))?;
+
+    // Restore bytes into a CoreFsService.
+    let mut svc = crate::app::CoreFsService::from_persisted_state(state.clone());
+    svc.restore_block_bytes(block_bytes);
+    let active_slots = svc.list_paths().len();
+
+    // Format a new ODF image file and flush via the ODF session which handles
+    // writing bytes to the device correctly.
+    let mut opts = OdfSessionOptions::with_defaults();
+    opts.capacity_bytes = capacity_bytes;
+    opts.label = state.volume.name.clone();
+    opts.uuid = generate_uuid();
+    opts.config = state.config.clone();
+
+    let mut sess = OdfFileSession::format_new(dst, &opts)?;
+    // Replace the session's service with the migrated one.
+    *sess.service_mut() = svc;
+    let report = sess.flush()?;
+
+    Ok(MigrateReport {
+        active_slots,
+        generation: report.incremental.generation,
+    })
 }
 
 fn generate_uuid() -> [u8; 16] {

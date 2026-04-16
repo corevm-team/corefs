@@ -76,10 +76,10 @@ fn clean_native_volume_has_no_errors() {
     });
     state.block_records.push(BlockRecord {
         inode: InodeId(42),
-        bytes: b"abc".to_vec(),
-        checksum: 0,
-        device_block: 0,
-        allocated_blocks: 0,
+        logical_size: 3,
+        extents: vec![],
+        content_crc: 0,
+        flags: 0,
     });
     save_state_native(&mut dev, &state).unwrap();
     let report = check(&dev).unwrap();
@@ -134,27 +134,28 @@ fn stale_tertiary_superblock_warns() {
 
 #[test]
 fn extent_pointing_outside_data_region_is_error() {
-    let mut dev = make_dev();
-    let mut state = empty_state();
-    state.active_inodes.push(Inode {
-        id: InodeId(5),
-        kind: InodeKind::File,
-        path: "/y".into(),
-        size: 0,
-        created_at: UNIX_EPOCH.into(),
-        modified_at: UNIX_EPOCH.into(),
-        changed_at: UNIX_EPOCH.into(),
-        metadata: FileMetadata::default(),
-    });
-    state.block_records.push(BlockRecord {
-        inode: InodeId(5),
-        bytes: b"zz".to_vec(),
-        checksum: 0,
-        device_block: 0,
-        allocated_blocks: 0,
-    });
-    save_state_native(&mut dev, &state).unwrap();
+    // Use the OdfDeviceSession so that bytes are written to the device
+    // and the inode gets real extents we can later corrupt.
+    use crate::storage::ondisk::session::{OdfDeviceSession, OdfSessionOptions};
+    let opts = OdfSessionOptions {
+        capacity_bytes: 4096 * BLOCK_SIZE as u64,
+        label: "fsck".into(),
+        uuid: [1u8; 16],
+        inode_count: 1024,
+        journal_blocks: 32,
+        config: crate::config::CoreFsConfig::default(),
+    };
+    let dev_box: Box<dyn crate::storage::block_device::BlockDevice> =
+        Box::new(MemoryDevice::new(4096 * BLOCK_SIZE, 4096).unwrap());
+    let mut sess = OdfDeviceSession::format_new(dev_box, &opts).unwrap();
+    sess.mutate(|fs| {
+        fs.create_file("/y", b"zz", &[])?;
+        Ok(())
+    })
+    .unwrap();
+    let mut dev_box = sess.into_device();
 
+    let dev = dev_box.as_mut();
     // Tamper with slot 10's first extent to point at block 0 (reserved).
     let sb_bytes = dev.read_at(BLOCK_SIZE, BLOCK_SIZE).unwrap();
     let sb = crate::storage::ondisk::superblock::Superblock::decode_block(&sb_bytes).unwrap();
@@ -179,7 +180,7 @@ fn extent_pointing_outside_data_region_is_error() {
     // firing first — we want the extent check to be the one that fires.
     dev.write_at(block * BLOCK_SIZE, &buf).unwrap();
 
-    let report = check(&dev).unwrap();
+    let report = check(dev).unwrap();
     assert!(
         report
             .issues
@@ -202,29 +203,27 @@ fn fsck_is_read_only() {
 
 #[test]
 fn report_counts_inodes_and_extents() {
-    let mut dev = make_dev();
-    let mut state = empty_state();
-    for i in 1..5 {
-        state.active_inodes.push(Inode {
-            id: InodeId(i),
-            kind: InodeKind::File,
-            path: format!("/f{i}"),
-            size: 0,
-            created_at: SystemTime::now().into(),
-            modified_at: SystemTime::now().into(),
-            changed_at: SystemTime::now().into(),
-            metadata: FileMetadata::default(),
-        });
-        state.block_records.push(BlockRecord {
-            inode: InodeId(i),
-            bytes: vec![i as u8; 10],
-            checksum: 0,
-            device_block: 0,
-            allocated_blocks: 0,
-        });
-    }
-    save_state_native(&mut dev, &state).unwrap();
-    let report = check(&dev).unwrap();
+    use crate::storage::ondisk::session::{OdfDeviceSession, OdfSessionOptions};
+    let opts = OdfSessionOptions {
+        capacity_bytes: 4096 * BLOCK_SIZE as u64,
+        label: "fsck".into(),
+        uuid: [1u8; 16],
+        inode_count: 1024,
+        journal_blocks: 32,
+        config: crate::config::CoreFsConfig::default(),
+    };
+    let dev_box: Box<dyn crate::storage::block_device::BlockDevice> =
+        Box::new(MemoryDevice::new(4096 * BLOCK_SIZE, 4096).unwrap());
+    let mut sess = OdfDeviceSession::format_new(dev_box, &opts).unwrap();
+    sess.mutate(|fs| {
+        for i in 1..5u64 {
+            fs.create_file(&format!("/f{i}"), &[i as u8; 10], &[])?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let dev_box = sess.into_device();
+    let report = check(dev_box.as_ref()).unwrap();
     assert!(report.is_clean(), "issues: {:?}", report.issues);
     assert!(report.extents_checked >= 4);
     assert!(report.blocks_referenced >= 4);

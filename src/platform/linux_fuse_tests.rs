@@ -256,8 +256,15 @@ fn odf_rw_persist_is_incremental() {
         .expect("recreate");
 
     // Reach into the underlying device to read the incremental report.
+    // Use write_bytes_to_odf_device first to ensure correct ODF extents.
     let state = mount.service.persisted_state();
-    if let FuseBacking::Odf { device, .. } = &mut mount.backing {
+    if let FuseBacking::Odf { device, odf_extents, .. } = &mut mount.backing {
+        let state = crate::storage::ondisk::session::write_bytes_to_odf_device_pub(
+            device,
+            &mount.service,
+            state,
+            odf_extents,
+        ).expect("prepare bytes");
         let report = save_state_native_incremental(device, &state).expect("incr");
         // Initial file + 9 unchanged from the initial population + the
         // churned file = 9 unchanged minimum (being conservative).

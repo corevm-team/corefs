@@ -245,8 +245,10 @@ fn char_service_in_memory_state_roundtrip_preserves_all_files() {
     for (path, content) in files {
         fs.create_file(path, content, &[]).unwrap();
     }
+    let block_bytes = fs.read_all_block_bytes();
     let state = fs.persisted_state();
-    let reloaded = CoreFsService::from_persisted_state(state);
+    let mut reloaded = CoreFsService::from_persisted_state(state);
+    reloaded.restore_block_bytes(block_bytes);
     for (path, expected) in files {
         assert_eq!(
             reloaded.read_file(path).unwrap(),
@@ -312,14 +314,18 @@ fn char_service_integrity_scrub_passes_on_clean_image() {
 #[test]
 fn char_service_integrity_scrub_detects_corrupted_checksum() {
     // Simulate a corrupted block by manipulating the persisted state:
-    // keep bytes intact but break the checksum so verify() returns false.
+    // keep bytes intact but break the content_crc so verify() returns false.
     let mut fs = test_fs();
     fs.create_file("/corrupt.bin", b"some content here", &[]).unwrap();
 
     let mut state = fs.persisted_state();
-    // Corrupt the checksum of the first block record.
+    // Corrupt the content_crc of the first block record.
     if let Some(rec) = state.block_records.first_mut() {
-        rec.checksum = rec.checksum.wrapping_add(1);
+        rec.content_crc = rec.content_crc.wrapping_add(1);
+        // Also corrupt the extent's CRC so the compat-device verify fails.
+        if let Some(ext) = rec.extents.first_mut() {
+            ext.content_crc = ext.content_crc.wrapping_add(1);
+        }
     }
     let corrupted_fs = CoreFsService::from_persisted_state(state);
     let report = corrupted_fs.scrub();

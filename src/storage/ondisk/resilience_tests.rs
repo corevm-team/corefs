@@ -120,51 +120,47 @@ fn i2_failed_sync_during_commit_returns_error() {
 
 #[test]
 fn i3_silent_data_block_corruption_is_caught_by_data_crc() {
-    use crate::domain::inode::{Inode, InodeId, InodeKind};
-    use crate::domain::metadata::FileMetadata;
-    use crate::storage::block_store::BlockRecord;
+    use crate::storage::block_device::MemoryDevice;
     use crate::storage::ondisk::reader::OdfReader;
-    use std::time::UNIX_EPOCH;
+    use crate::storage::ondisk::session::{OdfDeviceSession, OdfSessionOptions};
 
-    let mut dev = formatted_faulty(4096);
-    // Populate a file via the normal save path, then silently corrupt
-    // one byte of the underlying device.
-    let mut state = empty_state();
+    // Populate a file via the ODF session so bytes land on the device,
+    // then silently corrupt one byte of the underlying device.
+    let opts = OdfSessionOptions {
+        capacity_bytes: 4096 * BLOCK_SIZE as u64,
+        label: "resilience".into(),
+        uuid: [0u8; 16],
+        inode_count: 512,
+        journal_blocks: 32,
+        config: crate::config::CoreFsConfig::default(),
+    };
+    let dev_box: Box<dyn crate::storage::block_device::BlockDevice> =
+        Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
     let content = b"enterprise payload".to_vec();
-    state.active_inodes.push(Inode {
-        id: InodeId(7),
-        kind: InodeKind::File,
-        path: "/f".into(),
-        size: content.len(),
-        created_at: UNIX_EPOCH.into(),
-        modified_at: UNIX_EPOCH.into(),
-        changed_at: UNIX_EPOCH.into(),
-        metadata: FileMetadata::default(),
-    });
-    state.block_records.push(BlockRecord {
-        inode: InodeId(7),
-        bytes: content.clone(),
-        checksum: 0,
-        device_block: 0,
-        allocated_blocks: 0,
-    });
-    save_state_native(&mut dev, &state).unwrap();
+    let mut sess = OdfDeviceSession::format_new(dev_box, &opts).unwrap();
+    sess.mutate(|fs| {
+        fs.create_file("/f", &content, &[])?;
+        Ok(())
+    })
+    .unwrap();
+    let mut dev_box = sess.into_device();
+    let dev = dev_box.as_ref();
 
     // Find the inode's data block through the reader, then corrupt the
     // first byte *in place* so the bitmap CRC still matches (the flip
     // sits in data, not bitmap).
     let data_block = {
-        let reader = OdfReader::open(&dev).unwrap();
+        let reader = OdfReader::open(dev_box.as_ref()).unwrap();
         let summaries = reader.list_inodes().unwrap();
         let slot = summaries[0].slot;
         reader.read_on_disk_inode(slot).unwrap().extents[0].physical_block
     };
-    let mut raw = dev.read_at(data_block * BLOCK_SIZE, BLOCK_SIZE).unwrap();
+    let mut raw = dev_box.read_at(data_block * BLOCK_SIZE, BLOCK_SIZE).unwrap();
     raw[3] ^= 0xFF;
-    dev.write_at(data_block * BLOCK_SIZE, &raw).unwrap();
+    dev_box.write_at(data_block * BLOCK_SIZE, &raw).unwrap();
 
     // Reader must refuse to return silently-corrupted content.
-    let mut reader = OdfReader::open(&dev).unwrap();
+    let mut reader = OdfReader::open(dev_box.as_ref()).unwrap();
     let err = reader.read_file_by_path("/f").unwrap_err();
     assert!(format!("{err}").contains("data CRC"));
 }

@@ -218,6 +218,7 @@ fn load_image_recovers_unclean_runtime_state_and_aborts_pending_transaction() {
     let mut fs = test_fs();
     fs.create_file("/runtime.txt", b"stable", &[])
         .expect("file");
+    let block_bytes = fs.read_all_block_bytes();
     let mut state = fs.export_state();
     state.clean_unmount = false;
     state.journal_runtime = JournalRuntimeState {
@@ -236,7 +237,7 @@ fn load_image_recovers_unclean_runtime_state_and_aborts_pending_transaction() {
         }),
         ..JournalRuntimeState::default()
     };
-    volume_image::save_volume_image(&path, &state).expect("save image");
+    volume_image::save_volume_image_with_bytes(&path, &state, &block_bytes).expect("save image");
 
     let loaded = CoreFsService::load_image_from_path(&path).expect("load image");
 

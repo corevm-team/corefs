@@ -136,10 +136,10 @@ fn synthetic_state(files: usize, payload: usize) -> PersistedState {
         });
         state.block_records.push(BlockRecord {
             inode: id,
-            bytes: vec![(i % 256) as u8; payload],
-            checksum: 0,
-            device_block: 0,
-            allocated_blocks: 0,
+            logical_size: payload as u64,
+            extents: vec![],
+            content_crc: 0,
+            flags: 0,
         });
     }
     state

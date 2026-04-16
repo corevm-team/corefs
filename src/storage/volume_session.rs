@@ -124,14 +124,16 @@ impl DeviceVolumeSession {
     ) -> CoreFsResult<Self> {
         let service = CoreFsService::format(config);
         let state = service.persisted_state();
-        volume_image::save_to_device(device.as_mut(), &state)?;
+        let block_bytes = service.read_all_block_bytes();
+        volume_image::save_to_device_with_bytes(device.as_mut(), &state, &block_bytes)?;
         Ok(Self { device, service })
     }
 
     /// Opens an existing CoreFS volume from a device.
     pub fn open(device: Box<dyn BlockDevice>) -> CoreFsResult<Self> {
-        let state = volume_image::load_from_device(device.as_ref())?;
+        let (state, block_bytes) = volume_image::load_from_device_with_bytes(device.as_ref())?;
         let mut service = CoreFsService::from_persisted_state(state);
+        service.restore_block_bytes(block_bytes);
         if service.has_pending_wal() {
             service.recover_pending_wal()?;
         }
@@ -156,7 +158,8 @@ impl DeviceVolumeSession {
     /// Writes the current volume state to the device.
     pub fn flush(&mut self) -> CoreFsResult<()> {
         let state = self.service.persisted_state();
-        volume_image::save_to_device(self.device.as_mut(), &state)?;
+        let block_bytes = self.service.read_all_block_bytes();
+        volume_image::save_to_device_with_bytes(self.device.as_mut(), &state, &block_bytes)?;
         Ok(())
     }
 

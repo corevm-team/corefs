@@ -987,6 +987,7 @@ impl CoreFsService {
     pub fn save_image_to_path(&self, path: impl AsRef<Path>) -> CoreFsResult<()> {
         let path = path.as_ref();
         let state = self.persisted_state();
+        let block_bytes = self.read_all_block_bytes();
         // Write to a sibling temp file first, then rename atomically so a crash
         // during the write never leaves a partially-written image behind.
         let tmp_name = path
@@ -994,7 +995,7 @@ impl CoreFsService {
             .map(|n| format!("{}.tmp", n.to_string_lossy()))
             .unwrap_or_else(|| "corefs.img.tmp".to_string());
         let tmp_path = path.with_file_name(tmp_name);
-        volume_image::save_volume_image(&tmp_path, &state)?;
+        volume_image::save_volume_image_with_bytes(&tmp_path, &state, &block_bytes)?;
         std::fs::rename(&tmp_path, path).map_err(|error| {
             let _ = std::fs::remove_file(&tmp_path);
             CoreFsError::State(format!("atomic rename of image failed: {error}"))
@@ -1003,8 +1004,12 @@ impl CoreFsService {
 
     pub fn load_image_from_path(path: impl AsRef<Path>) -> CoreFsResult<Self> {
         let path = path.as_ref();
-        let state = volume_image::load_volume_image(path)?;
+        let (state, block_bytes) = volume_image::load_volume_image_with_bytes(path)?;
         let mut service = Self::from_persisted_state(state);
+        // Write file bytes back into the compat device so read_file() works.
+        for (inode_id, bytes) in block_bytes {
+            service.blocks.write(inode_id, bytes);
+        }
         if service.has_pending_wal() {
             service.recover_pending_wal()?;
             service.save_image_to_path(path)?;
@@ -1372,6 +1377,40 @@ impl CoreFsService {
         self.hot_paths.record_metadata(to);
         self.journal.record("rename", from, format!("to={to}"));
         Ok(())
+    }
+
+    /// Low-level: write raw bytes for `inode` into the compat device.
+    /// Use this only for restoring bytes obtained from an external source
+    /// (disk, ODF device, etc.).  Prefer the higher-level write/create APIs.
+    pub fn blocks_write(&mut self, inode: crate::domain::inode::InodeId, bytes: Vec<u8>) {
+        self.blocks.write(inode, bytes);
+    }
+
+    /// Writes file bytes back into the compat device after a state restore.
+    /// Used when the bytes were obtained from a previous service via
+    /// `read_all_block_bytes()` and the state was transferred without disk I/O.
+    pub fn restore_block_bytes(
+        &mut self,
+        block_bytes: std::collections::HashMap<crate::domain::inode::InodeId, Vec<u8>>,
+    ) {
+        for (inode_id, bytes) in block_bytes {
+            self.blocks.write(inode_id, bytes);
+        }
+    }
+
+    /// Returns a map of `InodeId → raw stored bytes` for every inode that has
+    /// a block record in the compat device.  Used by code paths (e.g. FUSE) that
+    /// need to materialise file content without going through the full read pipeline.
+    pub fn read_all_block_bytes(&self) -> std::collections::HashMap<crate::domain::inode::InodeId, Vec<u8>> {
+        self.catalog
+            .list_paths()
+            .into_iter()
+            .filter_map(|path| {
+                let inode = self.catalog.get(&path)?;
+                let record = self.blocks.read(inode.id)?;
+                Some((inode.id, record.bytes))
+            })
+            .collect()
     }
 
     pub fn persisted_state(&self) -> PersistedState {

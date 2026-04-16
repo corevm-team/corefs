@@ -37,34 +37,25 @@ fn session_opts() -> OdfSessionOptions {
 /// Create a formatted FaultyDevice and populate it with a known good state.
 fn formatted_faulty_with_state(file_count: usize) -> FaultyDevice<MemoryDevice> {
     let opts = session_opts();
-    let mut mem = MemoryDevice::new(opts.capacity_bytes, 4096).unwrap();
-    format_device(
-        &mut mem,
-        &FormatOptions {
-            label: "fault-test".into(),
-            uuid: [0u8; 16],
-            inode_count: 256,
-            journal_blocks: 32,
-        },
-    )
-    .unwrap();
-
-    // Build a service, populate files, persist.
-    let mut config = CoreFsConfig::default();
-    config.performance.compression_enabled = false;
-    config.security.encryption_at_rest = false;
-    let mut service = CoreFsService::format(config);
-    for i in 0..file_count {
-        service
-            .create_file(
+    // Use OdfDeviceSession so file bytes are written to the device correctly.
+    let mem = MemoryDevice::new(opts.capacity_bytes, 4096).unwrap();
+    let dev: Box<dyn crate::storage::block_device::BlockDevice> = Box::new(mem);
+    let mut sess = OdfDeviceSession::format_new(dev, &opts).unwrap();
+    sess.mutate(|fs| {
+        for i in 0..file_count {
+            fs.create_file(
                 &format!("/file{i:03}"),
                 format!("content-{i}").as_bytes(),
                 &[],
-            )
-            .unwrap();
-    }
-    let state = service.persisted_state();
-    save_state_native(&mut mem, &state).unwrap();
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let dev_box = sess.into_device();
+    // Downcast back to MemoryDevice for FaultyDevice wrapping.
+    let raw = dev_box.read_at(0, dev_box.capacity()).unwrap();
+    let mem = MemoryDevice::from_bytes(raw, 4096).unwrap();
 
     FaultyDevice::new(mem, FaultPlan::new())
 }

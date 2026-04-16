@@ -37,17 +37,17 @@ fn reconcile_persisted_state_normalizes_entries_and_blocks() {
         block_records: vec![
             BlockRecord {
                 inode: crate::domain::inode::InodeId(1),
-                bytes: b"hello".to_vec(),
-                checksum: 1,
-                device_block: 0,
-                allocated_blocks: 1,
+                logical_size: 5,
+                extents: vec![],
+                content_crc: 1,
+                flags: 0,
             },
             BlockRecord {
                 inode: crate::domain::inode::InodeId(99),
-                bytes: b"orphan".to_vec(),
-                checksum: 2,
-                device_block: 1,
-                allocated_blocks: 1,
+                logical_size: 6,
+                extents: vec![],
+                content_crc: 2,
+                flags: 0,
             },
         ],
         journal_entries: vec![

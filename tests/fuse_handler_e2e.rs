@@ -13,7 +13,7 @@
 //! bug in the daemon — this file is the authoritative host-side oracle.
 
 use std::boxed::Box;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::string::{String, ToString};
 use std::vec::Vec;
 
@@ -42,6 +42,8 @@ struct MiniHandler {
     next_no: InodeNo,
     next_fh: u64,
     open_files: BTreeMap<u64, InodeNo>,
+    /// Byte store for file/symlink data (separate from BlockRecord metadata).
+    byte_store: HashMap<InodeId, Vec<u8>>,
 }
 
 impl MiniHandler {
@@ -55,6 +57,7 @@ impl MiniHandler {
             next_no: 2,
             next_fh: 1,
             open_files: BTreeMap::new(),
+            byte_store: HashMap::new(),
         }
     }
 
@@ -135,31 +138,37 @@ impl MiniHandler {
 
     fn write(&mut self, ino: InodeNo, offset: u64, data: &[u8]) -> Result<u32, HandlerErr> {
         let path = self.path_of(ino).ok_or(HandlerErr::Errno(ENOENT))?;
-        let res = self.session.mutate(|st| {
-            let id = st
-                .active_inodes
+        let start = offset as usize;
+        let end = start + data.len();
+        // Look up inode id first (immutable borrow).
+        let id = {
+            let st = self.session.state();
+            st.active_inodes
                 .iter()
                 .find(|i| i.path == path)
                 .map(|i| i.id)
-                .ok_or_else(|| CoreFsError::NotFound(path.clone()))?;
-            let rec = if let Some(idx) = st.block_records.iter().position(|r| r.inode == id) {
-                &mut st.block_records[idx]
-            } else {
+                .ok_or(HandlerErr::Errno(ENOENT))?
+        };
+        // Update byte store.
+        let bytes = self.byte_store.entry(id).or_default();
+        if bytes.len() < end {
+            bytes.resize(end, 0);
+        }
+        bytes[start..end].copy_from_slice(data);
+        let new_len = bytes.len();
+        // Update PersistedState metadata.
+        let res = self.session.mutate(|st| {
+            if st.block_records.iter().all(|r| r.inode != id) {
                 st.block_records.push(BlockRecord {
                     inode: id,
-                    bytes: Vec::new(),
-                    checksum: 0,
-                    device_block: 0,
-                    allocated_blocks: 0,
+                    logical_size: new_len as u64,
+                    extents: vec![],
+                    content_crc: 0,
+                    flags: 0,
                 });
-                st.block_records.last_mut().unwrap()
-            };
-            let start = offset as usize;
-            let end = start + data.len();
-            if rec.bytes.len() < end {
-                rec.bytes.resize(end, 0);
+            } else if let Some(rec) = st.block_records.iter_mut().find(|r| r.inode == id) {
+                rec.logical_size = new_len as u64;
             }
-            rec.bytes[start..end].copy_from_slice(data);
             if let Some(inode) = st.active_inodes.iter_mut().find(|i| i.id == id) {
                 if end > inode.size {
                     inode.size = end;
@@ -174,19 +183,16 @@ impl MiniHandler {
 
     fn read(&self, ino: InodeNo, offset: u64, size: u32) -> Result<Vec<u8>, HandlerErr> {
         let path = self.path_of(ino).ok_or(HandlerErr::Errno(ENOENT))?;
-        let st = self.session.state();
-        let id = st
-            .active_inodes
-            .iter()
-            .find(|i| i.path == path)
-            .map(|i| i.id)
-            .ok_or(HandlerErr::Errno(ENOENT))?;
-        let bytes = st
-            .block_records
-            .iter()
-            .find(|r| r.inode == id)
-            .map(|r| r.bytes.clone())
-            .unwrap_or_default();
+        let id = {
+            let st = self.session.state();
+            st.active_inodes
+                .iter()
+                .find(|i| i.path == path)
+                .map(|i| i.id)
+                .ok_or(HandlerErr::Errno(ENOENT))?
+        };
+        let empty = Vec::new();
+        let bytes = self.byte_store.get(&id).unwrap_or(&empty);
         let start = offset as usize;
         let end = start.saturating_add(size as usize).min(bytes.len());
         Ok(if start >= bytes.len() {
@@ -294,24 +300,29 @@ impl MiniHandler {
 
     fn setattr_size(&mut self, ino: InodeNo, new_size: u64) -> Result<(), HandlerErr> {
         let path = self.path_of(ino).ok_or(HandlerErr::Errno(ENOENT))?;
-        let res = self.session.mutate(|st| {
-            let id = st
-                .active_inodes
+        let ns = new_size as usize;
+        let id = {
+            let st = self.session.state();
+            st.active_inodes
                 .iter()
                 .find(|i| i.path == path)
                 .map(|i| i.id)
-                .ok_or_else(|| CoreFsError::NotFound(path.clone()))?;
-            if let Some(idx) = st.block_records.iter().position(|r| r.inode == id) {
-                let rec = &mut st.block_records[idx];
-                let ns = new_size as usize;
-                if rec.bytes.len() < ns {
-                    rec.bytes.resize(ns, 0);
-                } else {
-                    rec.bytes.truncate(ns);
-                }
+                .ok_or(HandlerErr::Errno(ENOENT))?
+        };
+        // Update byte store.
+        let bytes = self.byte_store.entry(id).or_default();
+        if bytes.len() < ns {
+            bytes.resize(ns, 0);
+        } else {
+            bytes.truncate(ns);
+        }
+        // Update PersistedState metadata.
+        let res = self.session.mutate(|st| {
+            if let Some(rec) = st.block_records.iter_mut().find(|r| r.inode == id) {
+                rec.logical_size = new_size;
             }
             if let Some(inode) = st.active_inodes.iter_mut().find(|i| i.id == id) {
-                inode.size = new_size as usize;
+                inode.size = ns;
                 inode.touch_modified_at(Timestamp::EPOCH);
             }
             Ok(())
@@ -350,14 +361,16 @@ impl MiniHandler {
             st.active_inodes.push(inode);
             st.block_records.push(BlockRecord {
                 inode: InodeId(next_id),
-                bytes: target_bytes,
-                checksum: 0,
-                device_block: 0,
-                allocated_blocks: 0,
+                logical_size: len as u64,
+                extents: vec![],
+                content_crc: 0,
+                flags: 0,
             });
             Ok(InodeId(next_id))
         });
         let (id, _) = res.map_err(|_| HandlerErr::Errno(5))?;
+        // Store target bytes in the byte store.
+        self.byte_store.insert(id, target_bytes);
         let inode = {
             let st = self.session.state();
             st.active_inodes.iter().find(|i| i.id == id).cloned().unwrap()
@@ -367,22 +380,21 @@ impl MiniHandler {
 
     fn readlink(&self, ino: InodeNo) -> Result<String, HandlerErr> {
         let path = self.path_of(ino).ok_or(HandlerErr::Errno(ENOENT))?;
-        let st = self.session.state();
-        let inode = st
-            .active_inodes
-            .iter()
-            .find(|i| i.path == path)
-            .ok_or(HandlerErr::Errno(ENOENT))?;
-        if inode.kind != InodeKind::Symlink {
-            return Err(HandlerErr::Errno(22));
-        }
-        let bytes = st
-            .block_records
-            .iter()
-            .find(|r| r.inode == inode.id)
-            .map(|r| r.bytes.clone())
-            .unwrap_or_default();
-        Ok(String::from_utf8(bytes).unwrap())
+        let id = {
+            let st = self.session.state();
+            let inode = st
+                .active_inodes
+                .iter()
+                .find(|i| i.path == path)
+                .ok_or(HandlerErr::Errno(ENOENT))?;
+            if inode.kind != InodeKind::Symlink {
+                return Err(HandlerErr::Errno(22));
+            }
+            inode.id
+        };
+        let empty = Vec::new();
+        let bytes = self.byte_store.get(&id).unwrap_or(&empty);
+        Ok(String::from_utf8(bytes.clone()).unwrap())
     }
 
     fn readdir(&self, parent: InodeNo) -> Result<Vec<String>, HandlerErr> {

@@ -16,9 +16,10 @@ use crate::services::journal::JournalRuntimeState;
 use crate::services::journal::{JournalRepairSummary, reconcile_persisted_state};
 use crate::services::sync::SyncStatus;
 use crate::services::versioning::FileVersion;
-use crate::storage::block_store::{AllocatorPolicy, BlockRecord, FreeExtentRecord};
+use crate::storage::block_store::{AllocatorPolicy, BlockRecord, ExtentRef, FreeExtentRecord};
 use crate::storage::volume_wal::VolumeWal;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -151,9 +152,27 @@ struct RecoveredImageState {
     reconstructed_block_descriptors: bool,
 }
 
+/// Save a volume image to `path`.  File bytes for each block record must be
+/// provided via `block_bytes`; records without a corresponding entry get an
+/// empty blob in the DATA segment.
+pub fn save_volume_image_with_bytes(
+    path: impl AsRef<Path>,
+    state: &PersistedState,
+    block_bytes: &HashMap<InodeId, Vec<u8>>,
+) -> CoreFsResult<()> {
+    save_volume_image_inner(path.as_ref(), state, block_bytes)
+}
+
 pub fn save_volume_image(path: impl AsRef<Path>, state: &PersistedState) -> CoreFsResult<()> {
-    let path = path.as_ref();
-    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size);
+    save_volume_image_inner(path.as_ref(), state, &HashMap::new())
+}
+
+fn save_volume_image_inner(
+    path: &Path,
+    state: &PersistedState,
+    block_bytes: &HashMap<InodeId, Vec<u8>>,
+) -> CoreFsResult<()> {
+    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size, block_bytes);
 
     let mut segments = vec![
         raw_segment_from_bytes(*b"SUPR", vec![0; SUPERBLOCK_SIZE]),
@@ -309,6 +328,42 @@ pub fn load_volume_image(path: impl AsRef<Path>) -> CoreFsResult<PersistedState>
     }
 
     persisted_state_from_entries(&bytes, &entries, path)
+}
+
+/// Like [`load_volume_image`] but also returns the raw bytes for each
+/// block record so they can be written into a `BlockStore` compat device.
+pub fn load_volume_image_with_bytes(
+    path: impl AsRef<Path>,
+) -> CoreFsResult<(PersistedState, HashMap<InodeId, Vec<u8>>)> {
+    let path = path.as_ref();
+    let bytes = fs::read(path).map_err(|error| {
+        CoreFsError::State(format!(
+            "failed to read CoreFS volume image from {}: {error}",
+            path.display()
+        ))
+    })?;
+
+    let inspected = inspect_volume_image_bytes(&bytes, path)?;
+    let segment_count = inspected.report.segment_count;
+    let entries = inspected.entries;
+    let superblock = inspected.superblock;
+
+    if superblock.alignment as usize != SEGMENT_ALIGNMENT {
+        return Err(CoreFsError::State(format!(
+            "unsupported CoreFS volume image alignment {} in {}",
+            superblock.alignment,
+            path.display()
+        )));
+    }
+
+    if superblock.segment_count as usize != segment_count {
+        return Err(CoreFsError::State(format!(
+            "invalid CoreFS volume image segment count in {}",
+            path.display()
+        )));
+    }
+
+    persisted_state_from_entries_with_bytes(&bytes, &entries, path)
 }
 
 pub fn inspect_volume_image(path: impl AsRef<Path>) -> CoreFsResult<VolumeImageInspectionReport> {
@@ -577,35 +632,36 @@ fn find_segment<'a>(entries: &'a [SegmentEntry], kind: &[u8; 4]) -> CoreFsResult
 fn split_blocks(
     block_records: &[BlockRecord],
     block_size: usize,
+    block_bytes: &HashMap<InodeId, Vec<u8>>,
 ) -> (Vec<BlockDescriptor>, Vec<u8>) {
     let mut descriptors = Vec::with_capacity(block_records.len());
     let block_size = block_size.max(1) as u64;
-    let total_size = block_records
-        .iter()
-        .map(|record| {
-            record
-                .device_block
-                .saturating_add(record.allocated_blocks.max(1))
-                .saturating_mul(block_size)
-        })
-        .max()
-        .unwrap_or(0) as usize;
-    let mut data = vec![0u8; total_size];
+
+    // Lay out blobs sequentially in the DATA segment (offset = cumulative bytes).
+    let mut data: Vec<u8> = Vec::new();
 
     for record in block_records {
-        let offset = record.device_block.saturating_mul(block_size);
-        let length = record.bytes.len() as u64;
-        let start = offset as usize;
-        let end = start.saturating_add(record.bytes.len());
-        if end > data.len() {
-            data.resize(end, 0);
-        }
-        data[start..end].copy_from_slice(&record.bytes);
+        let bytes = block_bytes
+            .get(&record.inode)
+            .cloned()
+            .unwrap_or_default();
+        let offset = data.len() as u64;
+        let length = bytes.len() as u64;
+        let device_block = record.first_physical_block();
+        // When no bytes are provided (length == 0), store logical_size in
+        // `allocated_blocks` so the round-trip can recover it.  When bytes
+        // are present, `allocated_blocks` carries the block count as usual.
+        let allocated_blocks = if length == 0 {
+            record.logical_size  // encode logical_size for round-trip
+        } else {
+            record.total_blocks().max(1)
+        };
+        data.extend_from_slice(&bytes);
         descriptors.push(BlockDescriptor {
             inode: record.inode,
-            checksum: record.checksum,
-            device_block: record.device_block,
-            allocated_blocks: record.allocated_blocks.max(1),
+            checksum: u64::from(record.content_crc),
+            device_block,
+            allocated_blocks,
             offset,
             length,
         });
@@ -620,20 +676,69 @@ fn join_blocks(descriptors: Vec<BlockDescriptor>, data: &[u8]) -> CoreFsResult<V
     for descriptor in descriptors {
         let start = descriptor.offset as usize;
         let end = start + descriptor.length as usize;
-        let bytes = data.get(start..end).ok_or_else(|| {
-            CoreFsError::State("invalid CoreFS block descriptor range in volume image".to_string())
-        })?;
-
+        // Validate range (data may be empty for records with no bytes).
+        if end > data.len() && descriptor.length > 0 {
+            return Err(CoreFsError::State(
+                "invalid CoreFS block descriptor range in volume image".to_string(),
+            ));
+        }
+        let content_crc = descriptor.checksum as u32;
+        let (logical_size, extent) = if descriptor.length > 0 {
+            // Data segment has bytes: use length as logical_size and create an extent.
+            let ls = descriptor.length;
+            let allocated_blocks = descriptor.allocated_blocks.max(1);
+            let ext = vec![ExtentRef {
+                logical_block: 0,
+                logical_len: ls as u32,
+                physical_block: descriptor.device_block,
+                length_blocks: allocated_blocks as u32,
+                physical_len: ls as u32,
+                content_crc,
+                flags: 0,
+            }];
+            (ls, ext)
+        } else {
+            // No data: logical_size was encoded in allocated_blocks by split_blocks.
+            let ls = descriptor.allocated_blocks; // logical_size encoded here
+            (ls, vec![])
+        };
         block_records.push(BlockRecord {
             inode: descriptor.inode,
-            bytes: bytes.to_vec(),
-            checksum: descriptor.checksum,
-            device_block: descriptor.device_block,
-            allocated_blocks: descriptor.allocated_blocks.max(1),
+            logical_size,
+            extents: extent,
+            content_crc,
+            flags: 0,
         });
     }
 
     Ok(block_records)
+}
+
+/// Extract bytes from the DATA segment for each loaded block record.
+/// Returns a `(Vec<BlockRecord>, HashMap<InodeId, Vec<u8>>)` pair so the
+/// caller can write bytes into the compat device of a `BlockStore`.
+fn join_blocks_with_bytes(
+    descriptors: Vec<BlockDescriptor>,
+    data: &[u8],
+) -> CoreFsResult<(Vec<BlockRecord>, HashMap<InodeId, Vec<u8>>)> {
+    let mut block_records = Vec::with_capacity(descriptors.len());
+    let mut bytes_map: HashMap<InodeId, Vec<u8>> = HashMap::new();
+
+    for descriptor in &descriptors {
+        let start = descriptor.offset as usize;
+        let end = start + descriptor.length as usize;
+        if end > data.len() && descriptor.length > 0 {
+            return Err(CoreFsError::State(
+                "invalid CoreFS block descriptor range in volume image".to_string(),
+            ));
+        }
+        if descriptor.length > 0 {
+            let blob = data[start..end].to_vec();
+            bytes_map.insert(descriptor.inode, blob);
+        }
+    }
+    block_records = join_blocks(descriptors, data)?;
+    Ok((block_records, bytes_map))
 }
 
 fn align_up(value: usize, alignment: usize) -> usize {
@@ -1381,6 +1486,97 @@ fn persisted_state_from_entries(
     })
 }
 
+/// Like `persisted_state_from_entries` but also returns the raw bytes for
+/// every block record loaded from the DATA segment.
+fn persisted_state_from_entries_with_bytes(
+    bytes: &[u8],
+    entries: &[SegmentEntry],
+    path: &Path,
+) -> CoreFsResult<(PersistedState, HashMap<InodeId, Vec<u8>>)> {
+    // Reuse the common parsing helpers via a thin wrapper.
+    let config = deserialize_optional_segment::<ConfigSegment>(bytes, entries, b"CNFG", path)?
+        .map(|s| s.config)
+        .unwrap_or_default();
+    let volume = deserialize_optional_segment::<VolumeSegment>(bytes, entries, b"VOLM", path)?
+        .map(|s| s.volume)
+        .unwrap_or_else(|| VolumeDescriptor::from_config(&config));
+    let active = match find_segment(entries, b"AINO") {
+        Ok(e) => deserialize_inode_segment(bytes, e, path)?,
+        Err(_) => Vec::new(),
+    };
+    let deleted = match find_segment(entries, b"DINO") {
+        Ok(e) => deserialize_inode_segment(bytes, e, path)?,
+        Err(_) => Vec::new(),
+    };
+    let journal = match find_segment(entries, b"JOUR") {
+        Ok(e) => deserialize_journal_segment(bytes, e, path)?,
+        Err(_) => Vec::new(),
+    };
+    let versions = deserialize_optional_segment::<VersionSegment>(bytes, entries, b"VERS", path)?
+        .map(|s| s.versions)
+        .unwrap_or_default();
+    let sync = deserialize_optional_segment::<SyncSegment>(bytes, entries, b"SYNC", path)?
+        .map(|s| s.sync_statuses)
+        .unwrap_or_default();
+    let hot_paths = deserialize_optional_segment::<HotPathSegment>(bytes, entries, b"HOTP", path)?
+        .map(|s| s.records)
+        .unwrap_or_default();
+    let snapshots = match find_segment(entries, b"SNAP") {
+        Ok(e) => deserialize_snapshot_segment(bytes, e, path)?,
+        Err(_) => SnapshotSegment { snapshots: Vec::new(), next_snapshot_id: 0 },
+    };
+    let journal_runtime =
+        deserialize_optional_segment::<JournalRuntimeSegment>(bytes, entries, b"TXNJ", path)?
+            .unwrap_or(JournalRuntimeSegment {
+                clean_unmount: true,
+                runtime: JournalRuntimeState::default(),
+                pending_wal: None,
+            });
+    let free_space =
+        deserialize_optional_segment::<FreeSpaceSegment>(bytes, &entries, b"FREE", path)?
+            .unwrap_or(FreeSpaceSegment {
+                policy: AllocatorPolicy::default(),
+                extents: Vec::new(),
+            });
+
+    let (block_records, block_bytes) = match (
+        deserialize_optional_segment::<BlockDescriptorSegment>(bytes, entries, b"BLKD", path)?,
+        find_segment(entries, b"DATA").ok(),
+    ) {
+        (Some(descriptors), Some(data_entry)) => {
+            let data = segment_bytes(bytes, data_entry, path)?;
+            join_blocks_with_bytes(descriptors.descriptors, data)?
+        }
+        _ => (Vec::new(), HashMap::new()),
+    };
+    let free_extents = if free_space.extents.is_empty() {
+        reconstruct_free_extents_from_records(&block_records)
+    } else {
+        free_space.extents
+    };
+    validate_free_space_layout(&block_records, &free_extents)?;
+
+    let state = PersistedState {
+        config,
+        volume,
+        clean_unmount: journal_runtime.clean_unmount && superblock_clean(entries, bytes, path)?,
+        pending_wal: journal_runtime.pending_wal,
+        active_inodes: active,
+        deleted_inodes: deleted,
+        allocator_policy: free_space.policy,
+        free_extents,
+        hot_path_records: hot_paths,
+        block_records,
+        journal_entries: journal,
+        journal_runtime: journal_runtime.runtime,
+        versions,
+        sync_statuses: sync,
+        snapshots: snapshots.snapshots,
+        next_snapshot_id: snapshots.next_snapshot_id,
+    };
+    Ok((state, block_bytes))
+}
+
 fn persisted_state_from_entries_relaxed(
     bytes: &[u8],
     entries: &[SegmentEntry],
@@ -1517,12 +1713,29 @@ fn reconstruct_block_records_from_data(
                 ))
             })?
             .to_vec();
+        let device_block = (offset / block_size) as u64;
+        let allocated_blocks = inode.size.max(1).div_ceil(block_size) as u64;
+        let content_crc = checksum(&payload) as u32;
+        let logical_size = payload.len() as u64;
+        let extent = if logical_size > 0 {
+            vec![ExtentRef {
+                logical_block: 0,
+                logical_len: logical_size as u32,
+                physical_block: device_block,
+                length_blocks: allocated_blocks as u32,
+                physical_len: logical_size as u32,
+                content_crc,
+                flags: 0,
+            }]
+        } else {
+            vec![]
+        };
         records.push(BlockRecord {
             inode: inode.id,
-            checksum: checksum(&payload),
-            bytes: payload,
-            device_block: (offset / block_size) as u64,
-            allocated_blocks: inode.size.max(1).div_ceil(block_size) as u64,
+            logical_size,
+            extents: extent,
+            content_crc,
+            flags: 0,
         });
         offset = end;
     }
@@ -1531,15 +1744,14 @@ fn reconstruct_block_records_from_data(
 }
 
 fn reconstruct_free_extents_from_records(block_records: &[BlockRecord]) -> Vec<FreeExtentRecord> {
+    // Only records with actual extents occupy physical space.
     let mut occupied: Vec<(u64, u64)> = block_records
         .iter()
+        .filter(|record| !record.extents.is_empty())
         .map(|record| {
-            (
-                record.device_block,
-                record
-                    .device_block
-                    .saturating_add(record.allocated_blocks.max(1)),
-            )
+            let start = record.first_physical_block();
+            let end = start.saturating_add(record.total_blocks().max(1));
+            (start, end)
         })
         .collect();
     occupied.sort_by_key(|(start, _)| *start);
@@ -1583,15 +1795,14 @@ fn validate_free_space_layout(
         }
     }
 
+    // Only records with actual extents occupy physical space.
     let occupied: Vec<(u64, u64)> = block_records
         .iter()
+        .filter(|record| !record.extents.is_empty())
         .map(|record| {
-            (
-                record.device_block,
-                record
-                    .device_block
-                    .saturating_add(record.allocated_blocks.max(1)),
-            )
+            let start = record.first_physical_block();
+            let end = start.saturating_add(record.total_blocks().max(1));
+            (start, end)
         })
         .collect();
 
@@ -1971,7 +2182,6 @@ fn current_generation() -> u64 {
 // ---------------------------------------------------------------------------
 
 use crate::storage::block_device::BlockDevice;
-use std::collections::HashMap;
 
 /// Fully-built image ready to be written to a device.
 struct BuiltImage {
@@ -1985,6 +2195,18 @@ struct BuiltImage {
 }
 
 /// Builds an in-memory image from the persisted state.  Does not perform I/O.
+fn build_image_with_bytes(
+    state: &PersistedState,
+    sector_size: usize,
+    capacity: u64,
+    block_bytes: &HashMap<InodeId, Vec<u8>>,
+) -> CoreFsResult<BuiltImage> {
+    let label = "<device>";
+    let path = Path::new(label);
+    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size, block_bytes);
+    build_image_inner(state, sector_size, capacity, path, descriptors, block_data)
+}
+
 fn build_image(
     state: &PersistedState,
     sector_size: usize,
@@ -1992,7 +2214,18 @@ fn build_image(
 ) -> CoreFsResult<BuiltImage> {
     let label = "<device>";
     let path = Path::new(label);
-    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size);
+    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size, &HashMap::new());
+    build_image_inner(state, sector_size, capacity, path, descriptors, block_data)
+}
+
+fn build_image_inner(
+    state: &PersistedState,
+    sector_size: usize,
+    capacity: u64,
+    path: &Path,
+    descriptors: Vec<BlockDescriptor>,
+    block_data: Vec<u8>,
+) -> CoreFsResult<BuiltImage> {
 
     let mut segments = vec![
         raw_segment_from_bytes(*b"SUPR", vec![0; SUPERBLOCK_SIZE]),
@@ -2145,6 +2378,69 @@ fn write_full_image(device: &mut dyn BlockDevice, built: &BuiltImage) -> CoreFsR
 pub fn save_to_device(device: &mut dyn BlockDevice, state: &PersistedState) -> CoreFsResult<()> {
     let built = build_image(state, device.sector_size() as usize, device.capacity())?;
     write_full_image(device, &built)
+}
+
+/// Like [`save_to_device`] but includes file bytes in the DATA segment.
+pub fn save_to_device_with_bytes(
+    device: &mut dyn BlockDevice,
+    state: &PersistedState,
+    block_bytes: &HashMap<InodeId, Vec<u8>>,
+) -> CoreFsResult<()> {
+    let built = build_image_with_bytes(state, device.sector_size() as usize, device.capacity(), block_bytes)?;
+    write_full_image(device, &built)
+}
+
+/// Like [`load_from_device`] but also returns the raw bytes for each
+/// block record so they can be written into the compat device of a BlockStore.
+pub fn load_from_device_with_bytes(
+    device: &dyn BlockDevice,
+) -> CoreFsResult<(PersistedState, HashMap<InodeId, Vec<u8>>)> {
+    let label = "<device>";
+    let path = Path::new(label);
+    let sector_size = device.sector_size() as u64;
+    let header_sector = device.read_at(0, sector_size)?;
+    if header_sector.len() < HEADER_SIZE {
+        return Err(CoreFsError::State("device too small for CoreFS header".to_string()));
+    }
+    if &header_sector[..8] != MAGIC {
+        return Err(CoreFsError::State("device does not contain a CoreFS volume (invalid magic)".to_string()));
+    }
+    let version = u32::from_le_bytes(header_sector[8..12].try_into().expect("fixed slice"));
+    if version != FORMAT_VERSION {
+        return Err(CoreFsError::State(format!("unsupported CoreFS format version {version} on device")));
+    }
+    let segment_count = u32::from_le_bytes(header_sector[12..16].try_into().expect("fixed slice")) as usize;
+    let directory_offset = HEADER_SIZE;
+    let directory_length = segment_count * SEGMENT_ENTRY_SIZE;
+    let directory_end = directory_offset + directory_length;
+    let header_bytes = if header_sector.len() >= directory_end {
+        header_sector
+    } else {
+        let extra_needed = directory_end as u64;
+        let full = device.read_at(0, extra_needed.max(sector_size))?;
+        full
+    };
+    let directory = header_bytes
+        .get(directory_offset..directory_end)
+        .ok_or_else(|| CoreFsError::State("truncated CoreFS directory on device".to_string()))?;
+    let entries = parse_directory(directory)?;
+    let image_end = entries.iter().map(|e| e.offset + e.length).max().unwrap_or(directory_end as u64);
+    let total_read = align_up(image_end as usize, sector_size as usize).min(device.capacity() as usize);
+    let bytes = if total_read as u64 > header_bytes.len() as u64 {
+        let remaining_offset = header_bytes.len() as u64;
+        let remaining = device.read_at(remaining_offset, total_read as u64 - remaining_offset)?;
+        let mut full = header_bytes;
+        full.extend_from_slice(&remaining);
+        full
+    } else {
+        header_bytes[..total_read].to_vec()
+    };
+    let inspected = inspect_volume_image_bytes(&bytes, path)?;
+    let superblock = inspected.superblock;
+    if superblock.alignment as usize != SEGMENT_ALIGNMENT {
+        return Err(CoreFsError::State(format!("unsupported CoreFS alignment {} on device", superblock.alignment)));
+    }
+    persisted_state_from_entries_with_bytes(&bytes, &inspected.entries, path)
 }
 
 /// Cache of segment layout and payload bytes used by
@@ -2445,7 +2741,7 @@ pub fn inspect_device(device: &dyn BlockDevice) -> CoreFsResult<VolumeImageInspe
 pub fn build_volume_image_bytes(state: &PersistedState) -> CoreFsResult<Vec<u8>> {
     let label = "<memory>";
     let path = Path::new(label);
-    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size);
+    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size, &HashMap::new());
 
     let mut segments = vec![
         raw_segment_from_bytes(*b"SUPR", vec![0; SUPERBLOCK_SIZE]),

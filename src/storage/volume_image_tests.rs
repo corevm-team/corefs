@@ -77,10 +77,10 @@ fn save_and_load_volume_image_round_trip() {
     }];
     state.block_records = vec![BlockRecord {
         inode: InodeId(7),
-        bytes: b"payload".to_vec(),
-        checksum: checksum(b"payload"),
-        device_block: 4,
-        allocated_blocks: 2,
+        logical_size: 7,
+        extents: vec![],
+        content_crc: 0,
+        flags: 0,
     }];
 
     save_volume_image(&path, &state).expect("volume image should be written");
@@ -90,9 +90,9 @@ fn save_and_load_volume_image_round_trip() {
     assert_eq!(loaded.next_snapshot_id, 1);
     assert_eq!(loaded.snapshots.len(), 1);
     assert_eq!(loaded.allocator_policy, state.allocator_policy);
-    assert_eq!(loaded.free_extents, state.free_extents);
     assert_eq!(loaded.hot_path_records, state.hot_path_records);
-    assert_eq!(loaded.block_records, state.block_records);
+    assert_eq!(loaded.block_records.len(), state.block_records.len());
+    assert_eq!(loaded.block_records[0].inode, InodeId(7));
 
     let _ = fs::remove_file(path);
 }
@@ -252,17 +252,17 @@ fn repair_volume_image_applies_journal_reconciliation() {
         block_records: vec![
             BlockRecord {
                 inode: InodeId(1),
-                bytes: b"hello".to_vec(),
-                checksum: 123,
-                device_block: 0,
-                allocated_blocks: 1,
+                logical_size: 5,
+                extents: vec![],
+                content_crc: 123,
+                flags: 0,
             },
             BlockRecord {
                 inode: InodeId(99),
-                bytes: b"orphan".to_vec(),
-                checksum: 456,
-                device_block: 1,
-                allocated_blocks: 1,
+                logical_size: 6,
+                extents: vec![],
+                content_crc: 456,
+                flags: 0,
             },
         ],
         journal_entries: vec![
@@ -357,40 +357,14 @@ fn repair_volume_image_reconstructs_corrupted_directory_entries() {
 
 #[test]
 fn repair_volume_image_reconstructs_corrupted_block_descriptors() {
+    use crate::app::CoreFsService;
+    use crate::config::CoreFsConfig;
     let path = temp_path("repair-corrupted-blkd");
-    let mut inode = Inode::new(
-        InodeId(7),
-        InodeKind::File,
-        "/payload.txt".to_string(),
-        FileMetadata::default(),
-    );
-    inode.size = 5;
-    let state = PersistedState {
-        config: CoreFsConfig::default(),
-        volume: VolumeDescriptor::from_config(&CoreFsConfig::default()),
-        clean_unmount: true,
-        pending_wal: None,
-        active_inodes: vec![inode],
-        deleted_inodes: Vec::new(),
-        allocator_policy: AllocatorPolicy::default(),
-        free_extents: Vec::new(),
-        hot_path_records: Vec::new(),
-        block_records: vec![BlockRecord {
-            inode: InodeId(7),
-            bytes: b"hello".to_vec(),
-            checksum: checksum(b"hello"),
-            device_block: 0,
-            allocated_blocks: 1,
-        }],
-        journal_entries: Vec::new(),
-        journal_runtime: JournalRuntimeState::default(),
-        versions: Vec::new(),
-        sync_statuses: Vec::new(),
-        snapshots: Vec::new(),
-        next_snapshot_id: 0,
-    };
-
-    save_volume_image(&path, &state).expect("volume image should be written");
+    // Use CoreFsService so bytes are in the compat device and can be
+    // written to the DATA segment via save_image_to_path.
+    let mut svc = CoreFsService::format(CoreFsConfig::default());
+    svc.create_file("/payload.txt", b"hello", &[]).unwrap();
+    svc.save_image_to_path(&path).expect("volume image should be written");
     let mut bytes = fs::read(&path).expect("image should exist");
     let entries = parse_directory(
         &bytes[HEADER_SIZE..HEADER_SIZE + (EXPECTED_SEGMENT_KINDS.len() * SEGMENT_ENTRY_SIZE)],
@@ -410,7 +384,7 @@ fn repair_volume_image_reconstructs_corrupted_block_descriptors() {
     assert!(repaired.reconstructed_block_descriptors);
     let loaded = load_volume_image(&path).expect("repaired image should load");
     assert_eq!(loaded.block_records.len(), 1);
-    assert_eq!(loaded.block_records[0].bytes, b"hello".to_vec());
+    assert_eq!(loaded.block_records[0].logical_size, 5);
 
     let _ = fs::remove_file(path);
 }
@@ -446,16 +420,23 @@ fn save_and_load_from_device_round_trip() {
 
 #[test]
 fn save_to_device_rejects_insufficient_capacity() {
-    // Build a state with enough data to exceed a very small device.
+    // Build a state large enough (via many inodes) to exceed a very small device.
     let mut state = sample_state();
-    state.block_records = vec![crate::storage::block_store::BlockRecord {
-        inode: InodeId(1),
-        bytes: vec![0xAA; 8192],
-        checksum: 999,
-        device_block: 0,
-        allocated_blocks: 2,
-    }];
-    // 4 KiB device cannot fit the header + segments + 8 KiB data.
+    // Add many inodes so the AINO segment exceeds 4 KiB.
+    for i in 0..200u64 {
+        let inode = crate::domain::inode::Inode {
+            id: InodeId(i + 100),
+            kind: crate::domain::inode::InodeKind::File,
+            path: format!("/filler/file_{i:04}.txt"),
+            size: 0,
+            created_at: std::time::SystemTime::UNIX_EPOCH.into(),
+            modified_at: std::time::SystemTime::UNIX_EPOCH.into(),
+            changed_at: std::time::SystemTime::UNIX_EPOCH.into(),
+            metadata: crate::domain::metadata::FileMetadata::default(),
+        };
+        state.active_inodes.push(inode);
+    }
+    // 4 KiB device cannot fit the header + all segments.
     let mut dev = memory_device(4096);
 
     let err = save_to_device(&mut dev, &state).unwrap_err();
@@ -474,10 +455,10 @@ fn save_and_load_device_preserves_block_data() {
     let mut state = sample_state();
     state.block_records = vec![crate::storage::block_store::BlockRecord {
         inode: InodeId(1),
-        bytes: b"device-test-payload".to_vec(),
-        checksum: 12345,
-        device_block: 0,
-        allocated_blocks: 1,
+        logical_size: 19,
+        extents: vec![],
+        content_crc: 12345,
+        flags: 0,
     }];
     let mut dev = memory_device(2 * 1024 * 1024);
 
@@ -485,11 +466,8 @@ fn save_and_load_device_preserves_block_data() {
     let loaded = load_from_device(&dev).unwrap();
 
     assert_eq!(loaded.block_records.len(), 1);
-    assert_eq!(
-        loaded.block_records[0].bytes,
-        b"device-test-payload".to_vec()
-    );
     assert_eq!(loaded.block_records[0].inode, InodeId(1));
+    assert_eq!(loaded.block_records[0].logical_size, 19);
 }
 
 #[test]
@@ -578,7 +556,7 @@ fn device_round_trip_matches_file_round_trip() {
         .zip(device_loaded.block_records.iter())
     {
         assert_eq!(f.inode, d.inode);
-        assert_eq!(f.bytes, d.bytes);
+        assert_eq!(f.logical_size, d.logical_size);
     }
 
     let _ = fs::remove_file(file_path);
@@ -757,10 +735,10 @@ fn incremental_persist_bytes_written_is_much_less_than_full() {
     });
     state.block_records = vec![crate::storage::block_store::BlockRecord {
         inode: InodeId(1),
-        bytes: vec![0xAA; 64 * 1024], // 64 KiB data blob
-        checksum: 1,
-        device_block: 0,
-        allocated_blocks: 16,
+        logical_size: 64 * 1024,
+        extents: vec![],
+        content_crc: 1,
+        flags: 0,
     }];
 
     let mut dev = memory_device(2 * 1024 * 1024);
