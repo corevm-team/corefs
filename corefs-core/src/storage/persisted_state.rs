@@ -249,13 +249,16 @@ impl PersistedState {
                         .map(|i| i.id)
                         .expect("inode just inserted/updated");
                     // Drop any existing records for this inode, then reinsert.
+                    // Note: In the extent-based design, actual file data is written to
+                    // the BlockDevice by the App layer (CoreFsService::restore_snapshot).
+                    // Here we only create a placeholder BlockRecord with logical_size.
                     self.block_records.retain(|r| r.inode != inode_id);
                     self.block_records.push(BlockRecord {
                         inode: inode_id,
-                        bytes: bytes.clone(),
-                        checksum: 0,
-                        device_block: 0,
-                        allocated_blocks: 0,
+                        logical_size: bytes.len() as u64,
+                        extents: alloc::vec![],
+                        content_crc: 0,
+                        flags: 0,
                     });
                 }
             }
@@ -636,7 +639,9 @@ mod tests {
             .iter()
             .find(|r| r.inode == file_inode.id)
             .expect("record present");
-        assert_eq!(br.bytes, b"abc");
+        // In the extent-based design, bytes live on the device.
+        // The placeholder BlockRecord carries logical_size.
+        assert_eq!(br.logical_size, 3);
     }
 
     #[test]
@@ -684,7 +689,8 @@ mod tests {
         // InodeId unchanged (overwrote the existing entry).
         assert_eq!(f.id, InodeId(7));
         let br = state.block_records.iter().find(|r| r.inode == f.id).unwrap();
-        assert_eq!(br.bytes, b"hi");
+        // Extent-based design: logical_size reflects the snapshot data length.
+        assert_eq!(br.logical_size, 2);
     }
 
     #[test]
@@ -701,10 +707,10 @@ mod tests {
         state.active_inodes.push(existing);
         state.block_records.push(BlockRecord {
             inode: InodeId(3),
-            bytes: b"old-body".to_vec(),
-            checksum: 0,
-            device_block: 0,
-            allocated_blocks: 0,
+            logical_size: 8,
+            extents: alloc::vec![],
+            content_crc: 0,
+            flags: 0,
         });
 
         push_snapshot(
@@ -717,13 +723,13 @@ mod tests {
             .restore_snapshot_at(2, crate::platform::Timestamp::EPOCH)
             .expect("restore ok");
         assert_eq!(report.restored_files, 1);
-        // block_records for /x preserved.
+        // block_records for /x preserved (metadata-only snapshot doesn't touch them).
         let br = state
             .block_records
             .iter()
             .find(|r| r.inode == InodeId(3))
             .expect("record still there");
-        assert_eq!(br.bytes, b"old-body");
+        assert_eq!(br.logical_size, 8);
     }
 
     #[test]

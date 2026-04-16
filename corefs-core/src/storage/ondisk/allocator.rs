@@ -165,6 +165,19 @@ impl OndiskAllocator {
         Ok(())
     }
 
+    /// Mark a specific data block as used (e.g. pre-marking data blocks
+    /// that were written by `BlockStore::write_device` before calling
+    /// `save_state_native`).  Silently ignores blocks outside the data
+    /// region so callers can iterate extent lists safely.
+    pub fn mark_used(&mut self, block: u64) -> CoreFsResult<()> {
+        if block < self.data_start || block >= self.total_blocks {
+            // Outside data region — skip silently.
+            return Ok(());
+        }
+        self.block_bitmap.set(block)?;
+        Ok(())
+    }
+
     /// Current free-data-block count.
     pub fn free_data_blocks(&self) -> u64 {
         let used = self.block_bitmap.popcount().saturating_sub(self.data_start);

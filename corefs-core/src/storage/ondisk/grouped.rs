@@ -382,24 +382,24 @@ pub fn save_state_native_grouped(
     };
     write_inode_at_slot(device, &sb, ANCILLARY_INODE_SLOT, &anc_inode)?;
 
-    // Bytes-per-inode map.
-    let mut bytes_by_inode: HashMap<InodeId, &[u8]> =
+    // Record-per-inode map (extent-based, no bytes in RAM).
+    let mut records_by_inode: HashMap<InodeId, &crate::storage::block_store::BlockRecord> =
         HashMap::new();
     for rec in &state.block_records {
-        bytes_by_inode.insert(rec.inode, rec.bytes.as_slice());
+        records_by_inode.insert(rec.inode, rec);
     }
 
     // Write each inode.
     let mut active_slots = 0usize;
     let mut deleted_slots = 0usize;
     for inode in &state.active_inodes {
-        let bytes = bytes_by_inode.get(&inode.id).copied().unwrap_or(&[]);
-        write_user_inode(device, &mut alloc, &sb, inode, bytes, false)?;
+        let rec = records_by_inode.get(&inode.id).copied();
+        write_user_inode_from_record(device, &mut alloc, &sb, inode, rec, false)?;
         active_slots += 1;
     }
     for inode in &state.deleted_inodes {
-        let bytes = bytes_by_inode.get(&inode.id).copied().unwrap_or(&[]);
-        write_user_inode(device, &mut alloc, &sb, inode, bytes, true)?;
+        let rec = records_by_inode.get(&inode.id).copied();
+        write_user_inode_from_record(device, &mut alloc, &sb, inode, rec, true)?;
         deleted_slots += 1;
     }
 
@@ -517,24 +517,35 @@ pub fn load_state_native_grouped(device: &dyn BlockDevice) -> CoreFsResult<Persi
         let inode: Inode = crate::bincode_compat::deserialize(&attr.payload).map_err(|e| {
             CoreFsError::State(format!("grouped load: inode deserialize failed: {e}"))
         })?;
-        let bytes = super::native::read_all_extent_bytes_public(device, &on_disk)?;
-        if !bytes.is_empty() {
-            let first_ext = on_disk
-                .extents
-                .first()
-                .copied()
-                .unwrap_or(Extent::default());
-            let total_alloc: u64 = on_disk
+        // Reconstruct a BlockRecord (metadata-only) from on-disk extents.
+        if on_disk.size_bytes > 0 || !on_disk.extents.is_empty() {
+            use crate::storage::block_store::{ExtentRef, EXTENT_COMPRESSED, EXTENT_ENCRYPTED};
+            let extent_refs: Vec<ExtentRef> = on_disk
                 .extents
                 .iter()
-                .map(|e| u64::from(e.length_blocks))
-                .sum();
+                .map(|e| ExtentRef {
+                    logical_block: e.logical_block,
+                    logical_len: e.length_blocks.saturating_mul(BLOCK_SIZE as u32),
+                    physical_block: e.physical_block,
+                    length_blocks: e.length_blocks,
+                    physical_len: e.length_blocks.saturating_mul(BLOCK_SIZE as u32),
+                    content_crc: on_disk.data_crc as u32,
+                    flags: 0,
+                })
+                .collect();
+            let mut flags = 0u32;
+            if on_disk.flags & super::inode::FLAG_COMPRESSED != 0 {
+                flags |= EXTENT_COMPRESSED;
+            }
+            if on_disk.flags & super::inode::FLAG_ENCRYPTED != 0 {
+                flags |= EXTENT_ENCRYPTED;
+            }
             block_records.push(BlockRecord {
                 inode: inode.id,
-                bytes,
-                checksum: on_disk.data_crc,
-                device_block: first_ext.physical_block,
-                allocated_blocks: total_alloc,
+                logical_size: on_disk.size_bytes,
+                extents: extent_refs,
+                content_crc: on_disk.data_crc as u32,
+                flags,
             });
         }
         if on_disk.flags & super::native::FLAG_DELETED != 0 {
@@ -633,6 +644,94 @@ fn write_user_inode(
         generation: 1,
         extents: if has_index { Vec::new() } else { extents },
         index_block_addr,
+        xattr_block_addr: attr_block_addr,
+        domain_inode_id: inode.id.0,
+        data_crc,
+    };
+    write_inode_at_slot(device, sb, slot, &on_disk)
+}
+
+/// Extent-aware variant of [`write_user_inode`].  Data already on device.
+fn write_user_inode_from_record(
+    device: &mut dyn BlockDevice,
+    alloc: &mut MultiGroupAllocator,
+    sb: &Superblock,
+    inode: &Inode,
+    rec: Option<&crate::storage::block_store::BlockRecord>,
+    deleted: bool,
+) -> CoreFsResult<()> {
+    let slot = alloc.allocate_inode()?;
+
+    let (on_disk_extents, size_bytes, data_crc, blocks_alloc) = if let Some(rec) = rec {
+        if rec.extents.is_empty() {
+            (Vec::new(), rec.logical_size, rec.content_crc as u64, 0u64)
+        } else {
+            let mut on_disk_extents: Vec<Extent> = Vec::new();
+            let mut total_blocks = 0u64;
+            for ext in &rec.extents {
+                let e = Extent {
+                    logical_block: ext.logical_block,
+                    length_blocks: ext.length_blocks,
+                    physical_block: ext.physical_block,
+                };
+                // TODO: mark blocks used in MultiGroupAllocator when that API is available
+                total_blocks += u64::from(ext.length_blocks);
+                on_disk_extents.push(e);
+            }
+            if on_disk_extents.len() > super::inode::MAX_INLINE_EXTENTS {
+                on_disk_extents.truncate(super::inode::MAX_INLINE_EXTENTS);
+            }
+            (on_disk_extents, rec.logical_size, rec.content_crc as u64, total_blocks)
+        }
+    } else {
+        (Vec::new(), 0u64, 0u64, 0u64)
+    };
+
+    let attr_bytes = crate::bincode_compat::serialize(inode)
+        .map_err(|e| CoreFsError::State(format!("grouped: inode serialize failed: {e}")))?;
+    if attr_bytes.len() > super::attr_block::ATTR_BLOCK_CAPACITY {
+        return Err(CoreFsError::State(format!(
+            "grouped: serialized inode {} exceeds attr block capacity",
+            attr_bytes.len()
+        )));
+    }
+    let attr_ext = alloc.allocate_near(1, slot)?;
+    let attr_block_addr = attr_ext.physical_block;
+    let encoded = AttrBlock::new(attr_bytes).encode()?;
+    device.write_at(attr_block_addr * BLOCK_SIZE, &encoded)?;
+
+    let kind = match inode.kind {
+        InodeKind::File => OnDiskKind::File,
+        InodeKind::Directory => OnDiskKind::Directory,
+        InodeKind::Symlink => OnDiskKind::Symlink,
+    };
+    let mut flags = super::inode::FLAG_HAS_XATTRS;
+    if deleted {
+        flags |= super::native::FLAG_DELETED;
+    }
+    if inode.metadata.encrypted {
+        flags |= super::inode::FLAG_ENCRYPTED;
+    }
+    if inode.metadata.compressed {
+        flags |= super::inode::FLAG_COMPRESSED;
+    }
+    let on_disk = OnDiskInode {
+        version: 1,
+        kind,
+        mode: inode.metadata.mode,
+        uid: inode.metadata.uid,
+        gid: inode.metadata.gid,
+        link_count: 1,
+        flags,
+        size_bytes,
+        blocks_allocated: blocks_alloc,
+        created_at: systime_to_secs(inode.created_at),
+        modified_at: systime_to_secs(inode.modified_at),
+        changed_at: systime_to_secs(inode.changed_at),
+        accessed_at: systime_to_secs(inode.modified_at),
+        generation: 1,
+        extents: on_disk_extents,
+        index_block_addr: 0,
         xattr_block_addr: attr_block_addr,
         domain_inode_id: inode.id.0,
         data_crc,

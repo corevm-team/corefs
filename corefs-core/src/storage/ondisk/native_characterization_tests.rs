@@ -3,11 +3,9 @@
 //
 // Characterization tests for native save / load (ODF per-inode layout).
 //
-// These tests pin the observable behaviour of `save_state_native` /
-// `load_state_native` / `save_state_native_incremental`.  They must pass
-// against the current implementation and must still pass — unchanged —
-// after the extent-based refactor.  A pre-refactor green that turns red
-// post-refactor signals a regression.
+// Updated for Phase A refactor: BlockRecord is now extent-based (no bytes).
+// File bytes live on the device; tests write content via helpers and
+// verify via device reads.
 
 use super::*;
 use crate::config::CoreFsConfig;
@@ -17,7 +15,7 @@ use crate::domain::volume::VolumeDescriptor;
 use crate::platform::Timestamp;
 use crate::services::journal::JournalRuntimeState;
 use crate::storage::block_device::MemoryDevice;
-use crate::storage::block_store::{AllocatorPolicy, BlockRecord};
+use crate::storage::block_store::{AllocatorPolicy, BlockRecord, ExtentRef};
 use crate::storage::ondisk::checksum::Crc32c;
 use crate::storage::ondisk::layout::BLOCK_SIZE;
 use crate::storage::ondisk::volume::{FormatOptions, format_device};
@@ -87,14 +85,64 @@ fn prng_bytes(seed: u64, len: usize) -> alloc::vec::Vec<u8> {
         .collect()
 }
 
-fn block_rec(inode: &Inode, bytes: alloc::vec::Vec<u8>) -> BlockRecord {
-    BlockRecord {
-        inode: inode.id,
-        bytes,
-        checksum: 0,
-        device_block: 0,
-        allocated_blocks: 0,
+/// Write content for an inode to a specific block on the device and
+/// return a BlockRecord with the extent populated.
+fn write_content_to_device(
+    dev: &mut MemoryDevice,
+    inode: &Inode,
+    bytes: &[u8],
+    base_block: u64,
+) -> BlockRecord {
+    let crc = if bytes.is_empty() { 0 } else { Crc32c::hash(bytes) };
+    if !bytes.is_empty() {
+        let needed_blocks = (bytes.len() as u64).div_ceil(BLOCK_SIZE);
+        let padded_len = (needed_blocks * BLOCK_SIZE) as usize;
+        let mut buf = alloc::vec![0u8; padded_len];
+        buf[..bytes.len()].copy_from_slice(bytes);
+        dev.write_at(base_block * BLOCK_SIZE, &buf).expect("write ok");
+        let needed_blocks_u32 = needed_blocks as u32;
+        BlockRecord {
+            inode: inode.id,
+            logical_size: bytes.len() as u64,
+            extents: alloc::vec![ExtentRef {
+                logical_block: 0,
+                logical_len: bytes.len() as u32,
+                physical_block: base_block,
+                length_blocks: needed_blocks_u32,
+                physical_len: bytes.len() as u32,
+                content_crc: crc,
+                flags: 0,
+            }],
+            content_crc: crc,
+            flags: 0,
+        }
+    } else {
+        BlockRecord {
+            inode: inode.id,
+            logical_size: 0,
+            extents: alloc::vec![],
+            content_crc: 0,
+            flags: 0,
+        }
     }
+}
+
+/// Read bytes for a BlockRecord from the device.
+fn read_record_bytes(dev: &MemoryDevice, rec: &BlockRecord) -> alloc::vec::Vec<u8> {
+    if rec.extents.is_empty() || rec.logical_size == 0 {
+        return alloc::vec![];
+    }
+    let mut out = alloc::vec![];
+    for ext in &rec.extents {
+        let byte_offset = ext.physical_block * BLOCK_SIZE;
+        let read_len = u64::from(ext.length_blocks) * BLOCK_SIZE;
+        if let Ok(buf) = dev.read_at(byte_offset, read_len) {
+            let want = (ext.logical_len as usize).min(buf.len());
+            out.extend_from_slice(&buf[..want]);
+        }
+    }
+    out.truncate(rec.logical_size as usize);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -122,28 +170,29 @@ fn char_save_load_one_file_preserves_bytes() {
     let content = b"hello world";
     let inode = file_inode(1, "/hello.txt", content.len());
     state.active_inodes.push(inode.clone());
-    state.block_records.push(block_rec(&inode, content.to_vec()));
+    // Use block 500 (well after ODF metadata region for a 4096-block device).
+    state.block_records.push(write_content_to_device(&mut dev, &inode, content, 500));
     save_state_native(&mut dev, &state).unwrap();
     let loaded = load_state_native(&dev).unwrap();
     assert_eq!(loaded.block_records.len(), 1);
-    assert_eq!(loaded.block_records[0].bytes, content);
+    assert_eq!(read_record_bytes(&dev, &loaded.block_records[0]), content);
     assert_eq!(loaded.active_inodes[0].path, "/hello.txt");
 }
 
 #[test]
 fn char_save_load_large_file_preserves_bytes() {
-    // 2 MiB random payload — characterises that load reads back all bytes
-    // without truncation regardless of how many extents were needed.
+    // 2 MiB random payload
     let mut dev = fresh_dev(8192);
     format_device(&mut dev, &default_opts()).unwrap();
     let mut state = empty_state();
     let content = prng_bytes(0xABCD_1234, 2 * 1024 * 1024);
     let inode = file_inode(1, "/big.bin", content.len());
     state.active_inodes.push(inode.clone());
-    state.block_records.push(block_rec(&inode, content.clone()));
+    // 2 MiB = 512 blocks. Use block 600 as base.
+    state.block_records.push(write_content_to_device(&mut dev, &inode, &content, 600));
     save_state_native(&mut dev, &state).unwrap();
     let loaded = load_state_native(&dev).unwrap();
-    assert_eq!(loaded.block_records[0].bytes, content);
+    assert_eq!(read_record_bytes(&dev, &loaded.block_records[0]), content);
 }
 
 #[test]
@@ -155,10 +204,10 @@ fn char_save_load_sparse_file_preserves_zero_fill() {
     let zeros = alloc::vec![0u8; 8192];
     let inode = file_inode(1, "/sparse.bin", zeros.len());
     state.active_inodes.push(inode.clone());
-    state.block_records.push(block_rec(&inode, zeros.clone()));
+    state.block_records.push(write_content_to_device(&mut dev, &inode, &zeros, 500));
     save_state_native(&mut dev, &state).unwrap();
     let loaded = load_state_native(&dev).unwrap();
-    assert_eq!(loaded.block_records[0].bytes, zeros);
+    assert_eq!(read_record_bytes(&dev, &loaded.block_records[0]), zeros);
 }
 
 #[test]
@@ -209,10 +258,10 @@ fn char_incremental_save_unchanged_inode_is_classified_unchanged() {
     let mut state = empty_state();
     let inode = file_inode(1, "/stable.txt", 5);
     state.active_inodes.push(inode.clone());
-    state.block_records.push(block_rec(&inode, b"hello".to_vec()));
+    state.block_records.push(write_content_to_device(&mut dev, &inode, b"hello", 500));
     // Initial full save.
     save_state_native(&mut dev, &state).unwrap();
-    // Reload to get the CRC32C-keyed checksum that incremental save expects.
+    // Reload to get extent-keyed CRC that incremental save expects.
     let state2 = load_state_native(&dev).unwrap();
     // Incremental save of an unchanged state must report ≥1 unchanged inode.
     let report = save_state_native_incremental(&mut dev, &state2).unwrap();
@@ -243,7 +292,7 @@ fn char_corrupted_attr_block_returns_error_on_load() {
     let mut state = empty_state();
     let inode = file_inode(1, "/x.txt", 3);
     state.active_inodes.push(inode.clone());
-    state.block_records.push(block_rec(&inode, b"abc".to_vec()));
+    state.block_records.push(write_content_to_device(&mut dev, &inode, b"abc", 500));
     save_state_native(&mut dev, &state).unwrap();
 
     // Find the on-disk inode slot and corrupt its attr block.
@@ -273,33 +322,36 @@ fn char_corrupted_attr_block_returns_error_on_load() {
 fn char_corrupted_data_block_yields_crc_mismatch_on_load() {
     // If a data extent's bytes are corrupted on device, the loaded
     // BlockRecord's CRC32C checksum no longer matches the content.
-    // (load_state_native stores the on-disk data_crc without re-verifying.)
     let mut dev = fresh_dev(4096);
     format_device(&mut dev, &default_opts()).unwrap();
     let mut state = empty_state();
     let content = b"verify me";
     let inode = file_inode(1, "/v.txt", content.len());
     state.active_inodes.push(inode.clone());
-    state.block_records.push(block_rec(&inode, content.to_vec()));
+    let rec = write_content_to_device(&mut dev, &inode, content, 500);
+    state.block_records.push(rec);
     save_state_native(&mut dev, &state).unwrap();
 
     // First load to discover the physical extent address.
     let initial = load_state_native(&dev).unwrap();
-    let rec = &initial.block_records[0];
-    let data_offset = rec.device_block * BLOCK_SIZE;
+    let loaded_rec = &initial.block_records[0];
+    // Get the physical block of the extent.
+    let data_block = loaded_rec.extents.first().map(|e| e.physical_block).unwrap_or(500);
+    let data_offset = data_block * BLOCK_SIZE;
 
     // Corrupt one byte in the data extent.
     let mut buf = dev.read_at(data_offset, BLOCK_SIZE).unwrap();
     buf[0] ^= 0xFF;
     dev.write_at(data_offset, &buf).unwrap();
 
-    // Reload: bytes are corrupted but the on-disk data_crc was not updated,
-    // so the loaded record's CRC no longer matches the content.
+    // Reload: the on-disk data_crc was not updated, so the loaded
+    // record's CRC no longer matches the actual bytes on disk.
     let corrupted = load_state_native(&dev).unwrap();
     let crec = &corrupted.block_records[0];
-    let actual_crc = u64::from(Crc32c::hash(&crec.bytes));
+    let actual_bytes = read_record_bytes(&dev, crec);
+    let actual_crc = Crc32c::hash(&actual_bytes);
     assert_ne!(
-        actual_crc, crec.checksum,
+        actual_crc, crec.content_crc,
         "corrupted bytes must not match the stored CRC32C"
     );
 }

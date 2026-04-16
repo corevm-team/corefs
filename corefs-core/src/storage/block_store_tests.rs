@@ -5,6 +5,31 @@ use super::*;
 use alloc::string::ToString;
 use alloc::{vec, vec::Vec};
 
+// Helper: build a BlockRecord with the new fields, using a single simple extent
+// with a given device_block and allocated_blocks (for backward-compat tests).
+fn make_record(inode: InodeId, payload: &[u8], device_block: u64, allocated_blocks: u64) -> BlockRecord {
+    let crc = if payload.is_empty() { 0 } else { crate::storage::ondisk::checksum::Crc32c::hash(payload) };
+    BlockRecord {
+        inode,
+        logical_size: payload.len() as u64,
+        extents: if payload.is_empty() {
+            alloc::vec![]
+        } else {
+            alloc::vec![ExtentRef {
+                logical_block: 0,
+                logical_len: payload.len() as u32,
+                physical_block: device_block,
+                length_blocks: allocated_blocks as u32,
+                physical_len: payload.len() as u32,
+                content_crc: crc,
+                flags: 0,
+            }]
+        },
+        content_crc: crc,
+        flags: 0,
+    }
+}
+
 #[test]
 fn write_read_verify_and_remove_manage_blocks() {
     let mut store = BlockStore::default();
@@ -102,20 +127,8 @@ fn shrinking_write_releases_surplus_blocks_for_reuse() {
 #[test]
 fn records_rebuild_free_extents_and_reuse_gaps() {
     let records = vec![
-        BlockRecord {
-            inode: InodeId(1),
-            bytes: b"aa".to_vec(),
-            checksum: checksum(b"aa"),
-            device_block: 0,
-            allocated_blocks: 1,
-        },
-        BlockRecord {
-            inode: InodeId(2),
-            bytes: b"bb".to_vec(),
-            checksum: checksum(b"bb"),
-            device_block: 2,
-            allocated_blocks: 1,
-        },
+        make_record(InodeId(1), b"aa", 0, 1),
+        make_record(InodeId(2), b"bb", 2, 1),
     ];
     let mut store = BlockStore::from_records_with_block_size(records, 4);
 
@@ -135,13 +148,7 @@ fn allocator_metadata_round_trips_with_policy_and_free_extents() {
         background_compaction_enabled: true,
         fragmentation_threshold_percent: 40,
     };
-    let records = vec![BlockRecord {
-        inode: InodeId(1),
-        bytes: b"aa".to_vec(),
-        checksum: checksum(b"aa"),
-        device_block: 2,
-        allocated_blocks: 1,
-    }];
+    let records = vec![make_record(InodeId(1), b"aa", 2, 1)];
     let free_extents = vec![FreeExtentRecord {
         device_block: 0,
         allocated_blocks: 2,
@@ -157,20 +164,8 @@ fn allocator_metadata_round_trips_with_policy_and_free_extents() {
 #[test]
 fn defragment_compacts_entries_and_clears_gaps() {
     let records = vec![
-        BlockRecord {
-            inode: InodeId(1),
-            bytes: b"aa".to_vec(),
-            checksum: checksum(b"aa"),
-            device_block: 0,
-            allocated_blocks: 1,
-        },
-        BlockRecord {
-            inode: InodeId(2),
-            bytes: b"bb".to_vec(),
-            checksum: checksum(b"bb"),
-            device_block: 3,
-            allocated_blocks: 1,
-        },
+        make_record(InodeId(1), b"aa", 0, 1),
+        make_record(InodeId(2), b"bb", 3, 1),
     ];
     let free_extents = vec![FreeExtentRecord {
         device_block: 1,
@@ -195,20 +190,8 @@ fn defragment_compacts_entries_and_clears_gaps() {
 #[test]
 fn fragmentation_report_detects_split_free_space() {
     let records = vec![
-        BlockRecord {
-            inode: InodeId(1),
-            bytes: b"aa".to_vec(),
-            checksum: checksum(b"aa"),
-            device_block: 0,
-            allocated_blocks: 1,
-        },
-        BlockRecord {
-            inode: InodeId(2),
-            bytes: b"bb".to_vec(),
-            checksum: checksum(b"bb"),
-            device_block: 3,
-            allocated_blocks: 1,
-        },
+        make_record(InodeId(1), b"aa", 0, 1),
+        make_record(InodeId(2), b"bb", 3, 1),
     ];
     let free_extents = vec![
         FreeExtentRecord {
@@ -240,20 +223,8 @@ fn fragmentation_report_detects_split_free_space() {
 #[test]
 fn optimize_compacts_when_policy_requires_it() {
     let records = vec![
-        BlockRecord {
-            inode: InodeId(1),
-            bytes: b"aa".to_vec(),
-            checksum: checksum(b"aa"),
-            device_block: 0,
-            allocated_blocks: 1,
-        },
-        BlockRecord {
-            inode: InodeId(2),
-            bytes: b"bb".to_vec(),
-            checksum: checksum(b"bb"),
-            device_block: 3,
-            allocated_blocks: 1,
-        },
+        make_record(InodeId(1), b"aa", 0, 1),
+        make_record(InodeId(2), b"bb", 3, 1),
     ];
     let free_extents = vec![
         FreeExtentRecord {
@@ -285,27 +256,9 @@ fn optimize_compacts_when_policy_requires_it() {
 #[test]
 fn prioritize_reallocation_promotes_hot_inodes_to_front() {
     let records = vec![
-        BlockRecord {
-            inode: InodeId(1),
-            bytes: b"aa".to_vec(),
-            checksum: checksum(b"aa"),
-            device_block: 2,
-            allocated_blocks: 1,
-        },
-        BlockRecord {
-            inode: InodeId(2),
-            bytes: b"bb".to_vec(),
-            checksum: checksum(b"bb"),
-            device_block: 0,
-            allocated_blocks: 1,
-        },
-        BlockRecord {
-            inode: InodeId(3),
-            bytes: b"cc".to_vec(),
-            checksum: checksum(b"cc"),
-            device_block: 4,
-            allocated_blocks: 1,
-        },
+        make_record(InodeId(1), b"aa", 2, 1),
+        make_record(InodeId(2), b"bb", 0, 1),
+        make_record(InodeId(3), b"cc", 4, 1),
     ];
     let free_extents = vec![
         FreeExtentRecord {

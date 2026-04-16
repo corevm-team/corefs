@@ -383,7 +383,7 @@ pub fn reconcile_persisted_state(
                 .block_records
                 .iter()
                 .find(|record| record.inode == inode.id)
-                .map(|record| record.bytes.len())
+                .map(|record| record.logical_size as usize)
                 .unwrap_or(0);
             if inode.size != block_len {
                 inode.size = block_len;
