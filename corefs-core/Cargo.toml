@@ -12,7 +12,7 @@ default = ["crypto"]
 # `getrandom`-Erweiterung von `chacha20poly1305` nach, damit die bequeme
 # `EncryptionService::encrypt`-Variante (mit OS-CSPRNG-Nonce) verfügbar
 # ist.  Ohne `std` ist die Crate `no_std + alloc`.
-std = ["crypto", "chacha20poly1305/getrandom"]
+std = ["crypto", "compression", "chacha20poly1305/getrandom"]
 # `crypto` aktiviert ChaCha20-Poly1305-Encryption über `chacha20poly1305`.
 # Standardmässig an. Bare-Metal-Targets (AnyOS-Kernel, `x86_64-anyos`)
 # müssen das Feature deaktivieren, weil die transitive Abhängigkeit
@@ -20,11 +20,17 @@ std = ["crypto", "chacha20poly1305/getrandom"]
 # Ohne `crypto` entfällt der `EncryptionService` aus dem Build —
 # Volumes ohne Encryption-at-rest funktionieren weiterhin.
 crypto = ["dep:chacha20poly1305"]
+# `compression` aktiviert LZ4-Frame-Kompression über `lz4_flex`.
+# Benötigt `std` (lz4_flex frame-Codec nutzt `std::io`).
+# Ohne `compression` entfällt der `CompressionService` aus dem Build —
+# AnyOS-Kernel und andere no_std-Targets brauchen keine Kompression.
+compression = ["dep:lz4_flex"]
 
 [dependencies]
 serde = { workspace = true }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more", "serde"] }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"], optional = true }
+lz4_flex = { workspace = true, features = ["frame"], optional = true }
 bincode = { workspace = true }
 
 [dev-dependencies]

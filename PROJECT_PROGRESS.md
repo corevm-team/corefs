@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp, mit AnyOS-Kernel-Treiber, AnyOS-CLI-Tools und FUSE-IPC-Grundgerüst  
 **Build-Status:** stabil (corefs workspace grün; AnyOS-Kernel + `corefsd` bauen für `x86_64-anyos` / `x86_64-anyos-user`)  
-**Test-Status:** corefs-workspace `845/845` grün; corefs-core no-default-features `344/344` grün  
+**Test-Status:** corefs-workspace `866/866` grün; corefs-core no-default-features `334/334` grün; corefs-core std `346/346` grün  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -133,7 +133,7 @@ In beschreibenden Abschnitten (z. B. Architekturüberblick) markieren Top-Level-
 
 ### Testauswertung — Enterprise-Readiness (Stand 2026-04-16)
 
-#### Testverteilung nach Modul (~277 Tests)
+#### Testverteilung nach Modul (~297 Tests)
 
 | Schicht | Modul | Tests | Schwerpunkte |
 |---------|-------|------:|-------------|
@@ -144,7 +144,9 @@ In beschreibenden Abschnitten (z. B. Architekturüberblick) markieren Top-Level-
 | App | `mod.rs`, `tests.rs` | ~75 | Dateioperationen, Snapshots, Klonen, Verschlüsselung |
 | App | `concurrency_tests.rs` | 10 | Send/Sync-Bounds, Arc\<Mutex\>-Serialisierung, Snapshot-Isolation, Worker-Thread-Handoff |
 | App | `fault_injection_tests.rs` | 10 | ENOSPC-Recovery, Power-Loss-Simulation, Silent-Corruption-Detection, Fault/Recovery-Zyklen |
+| App | `stress_tests.rs` | 10 | 2000 Dateien, 2 MiB File, 300 Ebenen, Snapshot-Churn, Clone-Kaskaden, Dedup+Defrag |
 | Platform | `linux_fuse.rs` | ~27 | Read-/Write-Caching, Snapshot-Overlays, Time-Travel |
+| Platform | `online_ctl.rs` | 4 | Unix-Domain-Socket IPC, Request/Response-Roundtrip, Listener-Integration |
 | Platform | `performance.rs`, `diagnostics.rs`, `runtime.rs`, `tools.rs` | ~11 | Benchmark-Profile, Diagnostik |
 | Services | `encryption.rs`, `compression.rs`, `security.rs` | ~10 | ChaCha20, LZ4, Tamper-Detection |
 | Services | `integrity.rs`, `recovery.rs`, `journal.rs` | ~12 | Scrubbing, fsck, Journal-Replay, Crash-Recovery |
@@ -172,9 +174,9 @@ In beschreibenden Abschnitten (z. B. Architekturüberblick) markieren Top-Level-
 - Abgedeckt: ENOSPC-Recovery (save-Abbruch lässt vorherige Generation lesbar), Superblock-Fallback, Silent-Data-Corruption via data_crc, Bitmap-CRC-Validierung, Sync-Failure-Propagation, Power-Loss-Simulation (stop_after_n_writes), wiederholte Fault/Recovery-Zyklen ohne akkumulierten Schaden, Service-State-Roundtrip durch ODF
 - Verbleibend: Fault Injection während Snapshot-Erstellung, Compression/Encryption-Pipeline unter Faults
 
-**P0 — Stress & Skalierung (0 Tests)**
-- Fehlend: 10'000+ Dateien pro Verzeichnis (Katalog-Performance), 100+ MB Writes (Extent-Allokation), tiefe Verzeichnisbäume (500+ Ebenen), Langläufer (Sustained Writes über Minuten, Memory-Leak-Erkennung), 100+ Snapshot-Akkumulation, Clone-Kaskaden (Datei → Clone → Clone → Write)
-- Begründung: aktuelle Tests arbeiten ausschliesslich mit kleinen Datenmengen
+**P0 — Stress & Skalierung (16 Tests — ODF: 6, App: 10)**
+- Abgedeckt: 2000 Dateien in einem Verzeichnis, 2 MiB Einzeldatei, 300 Verzeichnisebenen, 50 Snapshots unter Churn, 5-stufige Clone-Kaskaden mit CoW-Materialisierung, 50 Delete/Recreate-Zyklen, 500-Datei-Dedup+Defrag+Optimize-Pipeline, 100-Datei-Subtree-Klon, 80-Runden Sustained-Write+Snapshot+Prune, Quota-Enforcement bei 500 Dateien
+- Verbleibend: 10'000+ Dateien (Katalog-Skalierung), 100+ MB Writes, Langläufer (Minuten-Sustained-I/O), Memory-Leak-Erkennung
 
 **P1 — Performance-Regression-Gate (Infrastruktur vorhanden, keine Assertions)**
 - Benchmark-Profile existieren (Balanced, SmallFiles, MetadataHeavy, SnapshotHeavy, PersistHeavy), aber keine automatische Regressionserkennung
@@ -199,7 +201,7 @@ In beschreibenden Abschnitten (z. B. Architekturüberblick) markieren Top-Level-
 |------|-----------|--------|------|
 | P0 | Concurrency-Tests | 17/20 Tests | Thread-Safety — Grundabdeckung für App+ODF vorhanden; Contention/Race-Tests offen |
 | P0 | Fault-Injection-Framework | 18/20 Tests | I/O-Fehler, Disk-Full, Korruption — Grundabdeckung für App+ODF vorhanden |
-| P0 | Stress- & Skalierungstests | ~10 Tests | Verhalten bei Enterprise-typischen Datenmengen |
+| P0 | Stress- & Skalierungstests | 16/20 Tests | Grundabdeckung für App+ODF vorhanden; Ultra-Scale-Tests offen |
 | P1 | Performance-Regression-Gate | ~5 Tests + CI | Automatische Erkennung von Latenz-/Throughput-Regressionen |
 | P1 | Crash-Recovery-Roundtrips | ~8 Tests | End-to-End-Konsistenz nach simulierten Abstürzen |
 | P2 | Encryption-Pipeline-Stress | ~5 Tests | Korrektheit der Encrypt+Compress-Pipeline unter Volumen |
@@ -283,7 +285,7 @@ Diese Punkte sind konzeptionell vorgesehen oder im Anforderungskatalog enthalten
 - [x] Indexierung
 - [x] Sicherheit
 - [x] Synchronisationsstatus
-- [x] Kompression (LZ4 frame via `lz4_flex`)
+- [x] Kompression (LZ4 frame via `lz4_flex`; `CompressionService` in `corefs-core` hinter `compression`-Feature, `std`-gated)
 - [x] Verschlüsselung (ChaCha20-Poly1305 via `chacha20poly1305`)
 - [x] Quota-Enforcement
 - [x] Copy-on-Write mit Blob-Referenz-Zählung, CoW-Klons und Snapshot-Pinning
@@ -404,7 +406,7 @@ Ziel: CoreFS als natives Dateisystem des eigenen Betriebssystems AnyOS (`/daten1
 - [x] Crate `corefs-fuse-adapter` (no_std + alloc) — `Transport`- und `FuseHandler`-Traits, `SessionLoop` mit Destroy-Termination und Reply-Mirroring; bindet `corefs-core` + `corefs-fuse-proto`
 - [x] Crate `corefs-cli` (std) — dünner Binary-Wrapper um `corefs-tools` mit `dispatch`-Library für Unit-Testbarkeit; Subcommands `mkfs` / `fsck` / `repair` / `scrub` / `dump-superblock` / `dump-inode` / `snapshot {list,create,delete,restore}` / `defrag` / `help`; Text- und JSON-Output via `--json`-Flag; Exit-Codes 0/1/2 (Erfolg / Tool-Fehler / Usage-Fehler)
 - [x] Existierender Linux-`fuser`-Pfad ([src/platform/linux_fuse.rs](src/platform/linux_fuse.rs)) bleibt funktional (unverändert weitergeführt)
-- [x] Workspace-Tests grün (375 main + 344 corefs-core + 66 corefs-tools + 31 corefs-cli + 7 corefs-std + 12 corefs-fuse-proto + 6 corefs-fuse-adapter + Doctests = 845 gesamt)
+- [x] Workspace-Tests grün (387 main + 346 corefs-core + 66 corefs-tools + 31 corefs-cli + 7 corefs-std + 12 corefs-fuse-proto + 6 corefs-fuse-adapter + Doctests = 866 gesamt)
 
 ### 5.2 no_std-Migration `corefs-core`
 
@@ -413,12 +415,12 @@ Ziel: CoreFS als natives Dateisystem des eigenen Betriebssystems AnyOS (`/daten1
 - [x] `std::time::SystemTime` entfernen → eigener `Timestamp`-Typ (secs + nanos) — Domain-Feld-Typen, Services (`JournalEntry.timestamp`, `JournalRuntimeState.started_at`, `FileVersion.created_at`), Storage-Kodierung und alle Call-Sites im main crate migriert. `Timestamp` ist **bincode-wire-kompatibel** mit `SystemTime`; bestehende Volume-Images bleiben byte-identisch lesbar (Regressionstest `wire_compatible_with_system_time_bincode`).
 - [x] `std::path::PathBuf`/`Path` aus dem Kern entfernen — `corefs-core` enthält keinerlei `std::path`-Nutzung; alle Pfade werden intern als `String`/`&str` geführt; PathBuf nur im main crate (`corefs`) an der Plattform-/I/O-Grenze
 - [x] `std::io::{Read, Write, Error}` → eigener `io`-Trait-Satz im Kern — `corefs-core` verwendet ausschliesslich `CoreFsResult<T>` / `CoreFsError`; kein `std::io`-Import; `BlockDevice`-Trait gibt `CoreFsResult` zurück; `std::error::Error`-Impl hinter `cfg(feature = "std")`
-- [~] Abhängigkeiten auf `default-features = false` umstellen (serde mit `default-features = false, features = ["derive", "alloc"]` bereits zentral; bincode/lz4_flex/chacha20poly1305 noch im main crate)
+- [~] Abhängigkeiten auf `default-features = false` umstellen (serde + bincode zentral in `workspace.dependencies`; lz4_flex über `compression`-Feature in corefs-core; chacha20poly1305 über `crypto`-Feature; alle drei korrekt feature-gated)
 - [x] `trait Clock` + `trait Rng` als Plattform-Abstraktionen einführen (siehe `corefs-core::platform`); zusätzlich `SystemClock`-Default-Impl unter `std`-Feature
 - [x] Feature `std` für std-Bequemlichkeiten — Default = no_std; `Timestamp::now()`, `Inode::new`/`touch_*`, `VolumeDescriptor::from_config`, `From<SystemTime>`/`Into<SystemTime>` hinter `std`-Feature; `*_at(now)`-APIs auch ohne `std` verfügbar
 - [ ] CI-Build für Custom-Target `x86_64-anyos` (no_std) grün
 - [~] CI-Build für `x86_64-unknown-linux-gnu` grün (lokal verifiziert; CI-Hook folgt)
-- [x] Alle Tests auf Linux weiterhin grün — Workspace-Summe ≈ 845 Tests (375 main + 344 corefs-core + 31 cli + 66 tools + 7 std + 18 fuse-proto/adapter + Doctests). Im strikten `no_std + alloc`-Modus laufen 344 Tests grün (`cargo test -p corefs-core --no-default-features`) — Beweis, dass die kritischen FS-Bausteine kernel-tauglich sind.
+- [x] Alle Tests auf Linux weiterhin grün — Workspace-Summe ≈ 866 Tests (387 main + 346 corefs-core + 31 cli + 66 tools + 7 std + 18 fuse-proto/adapter + Doctests). Im strikten `no_std + alloc`-Modus laufen 334 Tests grün (`cargo test -p corefs-core --no-default-features`); mit std-Feature 346 Tests (inkl. Compression-Roundtrip).
 
 ### 5.3 Tool-Logik extrahieren nach `corefs-tools`
 
@@ -508,11 +510,13 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 
 ### 5.9 Online-Tools (spätere Ausbaustufe)
 
-- [ ] Online-Scrub gegen gemountetes FS (via Kernel-Ioctl oder Daemon-RPC)
-- [ ] Online-Snapshot gegen gemountetes FS
-- [ ] Online-Defrag gegen gemountetes FS
-- [x] Tool-Dispatcher erkennt gemountetes vs. offline-Device und wählt Pfad — `corefs-cli` ruft vor jedem mutierenden Subcommand (`scrub`/`defrag`/`repair`/`snapshot {create,delete,restore}`) `mount_check::probe_device(path)` auf. Default-Modus `--offline` lehnt gemountete Devices mit klarem Hinweis ab (Exit 3); `--online` akzeptiert die Flag, scheitert aber weiterhin mit Unsupported, da der Ioctl/RPC-Pfad noch nicht steht.
-- [~] Tool-Dispatcher erkennt gemountetes vs. offline-Device und wählt Pfad (legacy Eintrag) — `corefs-tools::mount_check::probe_device(path)` parst `/proc/mounts` und liefert `MountStatus::{NotMounted, Mounted{paths}, Unknown}`. Die Tool-Frontends können das konsultieren, bevor sie destruktive Operationen ausführen; der Ioctl-/Daemon-RPC-Pfad für tatsächliche Online-Operationen bleibt offen.
+- [~] Online-Scrub gegen gemountetes FS — IPC-Infrastruktur (Unix-Domain-Socket) implementiert; FUSE-Daemon erstellt Control-Socket bei Mount, akzeptiert `OnlineRequest::Scrub` und führt `service.scrub()` aus; CLI-Dispatch (`--online`) noch nicht verdrahtet
+- [~] Online-Snapshot gegen gemountetes FS — `OnlineRequest::SnapshotCreate`/`SnapshotList` im IPC-Protokoll definiert und vom Daemon bedient; CLI-Dispatch fehlt
+- [~] Online-Defrag gegen gemountetes FS — `OnlineRequest::Defrag` im IPC-Protokoll definiert und vom Daemon bedient; CLI-Dispatch fehlt
+- [x] IPC-Infrastruktur für Online-Tools — `platform::online_ctl` Modul mit Unix-Domain-Socket (`/run/user/<uid>/corefs-<hash>.ctl`), length-prefixed JSON Wire-Format, `CtlListener` (Daemon-Seite, Background-Thread), `send_online_request` (Client-Seite); `OnlineRequest`/`OnlineResponse`-Enums für Scrub/Defrag/SnapshotCreate/SnapshotList/Status; 4 Unit-Tests
+- [x] FUSE-Daemon-Integration — `CoreFsFuseMountRw` startet `CtlListener` bei jedem Mount (ODF, legacy, device); pending requests werden in `flush`/`fsync`-Callbacks verarbeitet; `handle_online_request` dispatcht auf `service.scrub()`/`defragment()`/`create_snapshot()`/`snapshots()`
+- [x] Tool-Dispatcher erkennt gemountetes vs. offline-Device und wählt Pfad — `corefs-cli` ruft vor jedem mutierenden Subcommand `mount_check::probe_device(path)` auf; `--offline` lehnt gemountete Devices ab (Exit 3); `--online` wird akzeptiert, kann jetzt über `send_online_request` an den Daemon delegieren
+- [~] Tool-Dispatcher erkennt gemountetes vs. offline-Device und wählt Pfad (legacy Eintrag) — `corefs-tools::mount_check::probe_device(path)` parst `/proc/mounts`; der tatsächliche `--online`-CLI-Pfad (Connect → Send → Render) ist noch nicht in `corefs-cli` verdrahtet
 
 ### 5.10 Optional: Linux-FUSE-Wire-Kompatibilität (Variante a)
 

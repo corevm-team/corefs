@@ -25,3 +25,7 @@ pub use corefs_core::services::{
     encryption, hot_paths, indexing, metadata, quota, recovery, security, semantic, sync,
     versioning,
 };
+
+// Note: `compression` is also re-exported from `corefs_core::services` (behind
+// the `compression` feature), but we keep the local `pub mod compression;`
+// wrapper above for historical import path compatibility.

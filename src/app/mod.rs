@@ -1557,3 +1557,7 @@ mod concurrency_tests;
 #[cfg(test)]
 #[path = "fault_injection_tests.rs"]
 mod fault_injection_tests;
+
+#[cfg(test)]
+#[path = "stress_tests.rs"]
+mod stress_tests;

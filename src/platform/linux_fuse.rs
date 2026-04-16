@@ -578,6 +578,8 @@ struct CoreFsFuseMountRw {
     virt_ino_map: HashMap<VirtKey, u64>,
     /// Next INO to assign for a new virtual node.
     next_virt_ino: u64,
+    /// Online-tool control socket listener (if mounted with IPC enabled).
+    ctl_listener: Option<crate::platform::online_ctl::CtlListener>,
 }
 
 #[derive(Debug, Clone)]
@@ -671,9 +673,102 @@ impl CoreFsFuseMountRw {
             virt_files: HashMap::new(),
             virt_ino_map: HashMap::new(),
             next_virt_ino: VIRT_INO_BASE,
+            ctl_listener: None,
         };
         mount.rebuild_indexes();
         mount
+    }
+
+    /// Start the online-tool control socket listener for the given mount
+    /// point.  Silently does nothing if the socket cannot be bound
+    /// (non-fatal — the daemon simply has no online-tool support).
+    fn start_ctl_listener(&mut self, mount_point: &Path) {
+        match crate::platform::online_ctl::CtlListener::bind(mount_point) {
+            Ok(listener) => {
+                self.ctl_listener = Some(listener);
+            }
+            Err(_) => { /* non-fatal */ }
+        }
+    }
+
+    /// Drain any pending online-tool requests and execute them.
+    fn process_online_requests(&mut self) {
+        if self.ctl_listener.is_none() {
+            return;
+        }
+        // Collect all pending requests first to avoid borrow conflict.
+        let pending: Vec<_> = self
+            .ctl_listener
+            .as_ref()
+            .unwrap()
+            .rx
+            .try_iter()
+            .collect();
+        for p in pending {
+            let response = self.handle_online_request(&p.request);
+            let _ = p.reply_tx.send(response);
+        }
+    }
+
+    fn handle_online_request(
+        &mut self,
+        request: &crate::platform::online_ctl::OnlineRequest,
+    ) -> crate::platform::online_ctl::OnlineResponse {
+        use crate::platform::online_ctl::{OnlineRequest, OnlineResponse};
+        match request {
+            OnlineRequest::Status => {
+                let paths = self.service.list_paths();
+                OnlineResponse::Ok {
+                    message: format!(
+                        "volume={} files={} dirty={}",
+                        self.service.volume_name(),
+                        paths.len(),
+                        self.dirty,
+                    ),
+                }
+            }
+            OnlineRequest::Scrub { .. } => {
+                let report = self.service.scrub();
+                OnlineResponse::Ok {
+                    message: format!(
+                        "scrub: checked_paths={} valid_blocks={} invalid_blocks={}",
+                        report.checked_paths,
+                        report.valid_blocks,
+                        report.invalid_blocks,
+                    ),
+                }
+            }
+            OnlineRequest::Defrag => {
+                let report = self.service.defragment();
+                OnlineResponse::Ok {
+                    message: format!(
+                        "defrag: moved={} gaps_reclaimed={}",
+                        report.moved_entries, report.reclaimed_gaps,
+                    ),
+                }
+            }
+            OnlineRequest::SnapshotCreate { name } => {
+                let snap = self.service.create_snapshot(name);
+                OnlineResponse::Ok {
+                    message: format!("snapshot created: id={} name={}", snap.id, snap.name),
+                }
+            }
+            OnlineRequest::SnapshotList => {
+                let names: Vec<_> = self
+                    .service
+                    .snapshots()
+                    .iter()
+                    .map(|s| format!("{}:{}", s.id, s.name))
+                    .collect();
+                OnlineResponse::Ok {
+                    message: if names.is_empty() {
+                        "no snapshots".into()
+                    } else {
+                        names.join(", ")
+                    },
+                }
+            }
+        }
     }
 
     fn open_session(_service: CoreFsService, image_path: PathBuf) -> CoreFsResult<Self> {
@@ -2249,6 +2344,8 @@ impl Filesystem for CoreFsFuseMountRw {
         _lock_owner: u64,
         reply: ReplyEmpty,
     ) {
+        self.process_online_requests();
+
         if self.flush_file_handle(_fh).is_err() {
             reply.error(EIO);
             return;
@@ -2271,6 +2368,9 @@ impl Filesystem for CoreFsFuseMountRw {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
+        // Process any pending online-tool requests before persisting.
+        self.process_online_requests();
+
         if self.flush_file_handle(_fh).is_err() {
             reply.error(EIO);
             return;
@@ -2550,7 +2650,8 @@ pub fn mount_odf_image_rw(
 ) -> CoreFsResult<()> {
     let image_path = image_path.as_ref();
     let mount_point = mount_point.as_ref();
-    let mount = CoreFsFuseMountRw::open_odf_session(image_path.to_path_buf())?;
+    let mut mount = CoreFsFuseMountRw::open_odf_session(image_path.to_path_buf())?;
+    mount.start_ctl_listener(mount_point);
     let fs_name = format!("corefs-odf:{}", mount.service.volume_name());
 
     fuser::mount2(
@@ -2579,7 +2680,8 @@ pub fn mount_image_rw(
     let mount_point = mount_point.as_ref();
     let service = CoreFsService::load_image_from_path(image_path)?;
     let fs_name = format!("corefs:{}", service.volume_name());
-    let mount = CoreFsFuseMountRw::open_session(service, image_path.to_path_buf())?;
+    let mut mount = CoreFsFuseMountRw::open_session(service, image_path.to_path_buf())?;
+    mount.start_ctl_listener(mount_point);
 
     fuser::mount2(
         mount,
