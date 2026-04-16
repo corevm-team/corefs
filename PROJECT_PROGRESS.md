@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp, mit AnyOS-Kernel-Treiber, AnyOS-CLI-Tools und FUSE-IPC-Grundgerüst  
 **Build-Status:** stabil (corefs workspace grün; AnyOS-Kernel + `corefsd` bauen für `x86_64-anyos` / `x86_64-anyos-user`)  
-**Test-Status:** corefs-workspace `820/820` grün; corefs-core no-default-features `334/334` grün  
+**Test-Status:** corefs-workspace `845/845` grün; corefs-core no-default-features `344/344` grün  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -131,9 +131,9 @@ In beschreibenden Abschnitten (z. B. Architekturüberblick) markieren Top-Level-
 - [x] redundante Superblock-Fallbacks, Generation-Counter-Selektion, `fsck-image`, Image-Reparatur, Header-Directory-Recovery, Rekonstruktion beschädigter Segmentverzeichnisse, Rekonstruktion defekter Blockdeskriptoren, Journal-Replay, Dirty/Clean-Recovery und Bereinigung verwaister Blockdaten sind testseitig abgesichert
 - [x] `cargo test` aktuell vollständig erfolgreich
 
-### Testauswertung — Enterprise-Readiness (Stand 2026-04-13)
+### Testauswertung — Enterprise-Readiness (Stand 2026-04-16)
 
-#### Testverteilung nach Modul (~257 Tests)
+#### Testverteilung nach Modul (~277 Tests)
 
 | Schicht | Modul | Tests | Schwerpunkte |
 |---------|-------|------:|-------------|
@@ -142,6 +142,8 @@ In beschreibenden Abschnitten (z. B. Architekturüberblick) markieren Top-Level-
 | Storage | `volume_image.rs` | ~12 | Persistenzformat, Superblock, Segmenttabellen, Reparatur |
 | Storage | `allocator.rs`, `catalog.rs`, `volume_wal.rs`, `volume_session.rs` | ~10 | WAL-Ops, Session-Lifecycle, Allokation |
 | App | `mod.rs`, `tests.rs` | ~75 | Dateioperationen, Snapshots, Klonen, Verschlüsselung |
+| App | `concurrency_tests.rs` | 10 | Send/Sync-Bounds, Arc\<Mutex\>-Serialisierung, Snapshot-Isolation, Worker-Thread-Handoff |
+| App | `fault_injection_tests.rs` | 10 | ENOSPC-Recovery, Power-Loss-Simulation, Silent-Corruption-Detection, Fault/Recovery-Zyklen |
 | Platform | `linux_fuse.rs` | ~27 | Read-/Write-Caching, Snapshot-Overlays, Time-Travel |
 | Platform | `performance.rs`, `diagnostics.rs`, `runtime.rs`, `tools.rs` | ~11 | Benchmark-Profile, Diagnostik |
 | Services | `encryption.rs`, `compression.rs`, `security.rs` | ~10 | ChaCha20, LZ4, Tamper-Detection |
@@ -162,14 +164,13 @@ In beschreibenden Abschnitten (z. B. Architekturüberblick) markieren Top-Level-
 
 #### Identifizierte Lücken für Enterprise-Level
 
-**P0 — Concurrency & Thread-Safety (0 Tests)**
-- Kein einziger Multi-Thread-Test vorhanden
-- Fehlend: parallele Schreibzugriffe, gleichzeitige Snapshot-Erstellung während Writes, CoW-Materialisierung unter Contention, Ref-Count-Races, Lock-Ordering / Deadlock-Erkennung
-- Begründung: für ein Dateisystem die kritischste Lücke — Race Conditions können Datenverlust verursachen
+**P0 — Concurrency & Thread-Safety (17 Tests — ODF: 7, App: 10)**
+- Abgedeckt: Send/Sync-Bounds-Verifikation (compile-time), Arc\<Mutex\>-serialisierter Zugriff, Snapshot-Isolation unter parallelen Mutationen, Worker-Thread-Handoff (CoreFsService + OdfDeviceSession), parallele Reads auf exportiertem State, fsck während Writer mutiert
+- Verbleibend: CoW-Materialisierung unter Contention, Ref-Count-Races unter hoher Last, Lock-Ordering / Deadlock-Erkennung
 
-**P0 — Fault Injection (0 Tests)**
-- Fehlend: ENOSPC-Recovery (Platte voll während Write/Journal-Commit/Snapshot), partielle I/O-Fehler, Bit-Rot/Silent-Corruption-Erkennung, Journal-Korruption (abgebrochener WAL-Eintrag), Superblock-Verlust mit Fallback-Validierung, Power-Loss-Simulation (Write-Abbruch an zufälligen Stellen)
-- Begründung: Enterprise bedeutet Überleben defekter Hardware und voller Platten
+**P0 — Fault Injection (18 Tests — ODF: 8, App: 10)**
+- Abgedeckt: ENOSPC-Recovery (save-Abbruch lässt vorherige Generation lesbar), Superblock-Fallback, Silent-Data-Corruption via data_crc, Bitmap-CRC-Validierung, Sync-Failure-Propagation, Power-Loss-Simulation (stop_after_n_writes), wiederholte Fault/Recovery-Zyklen ohne akkumulierten Schaden, Service-State-Roundtrip durch ODF
+- Verbleibend: Fault Injection während Snapshot-Erstellung, Compression/Encryption-Pipeline unter Faults
 
 **P0 — Stress & Skalierung (0 Tests)**
 - Fehlend: 10'000+ Dateien pro Verzeichnis (Katalog-Performance), 100+ MB Writes (Extent-Allokation), tiefe Verzeichnisbäume (500+ Ebenen), Langläufer (Sustained Writes über Minuten, Memory-Leak-Erkennung), 100+ Snapshot-Akkumulation, Clone-Kaskaden (Datei → Clone → Clone → Write)
@@ -196,8 +197,8 @@ In beschreibenden Abschnitten (z. B. Architekturüberblick) markieren Top-Level-
 
 | Prio | Kategorie | Umfang | Ziel |
 |------|-----------|--------|------|
-| P0 | Concurrency-Tests | ~15–20 Tests | Thread-Safety aller mutierbaren Pfade validieren |
-| P0 | Fault-Injection-Framework | ~15 Tests | I/O-Fehler, Disk-Full, Korruption überleben |
+| P0 | Concurrency-Tests | 17/20 Tests | Thread-Safety — Grundabdeckung für App+ODF vorhanden; Contention/Race-Tests offen |
+| P0 | Fault-Injection-Framework | 18/20 Tests | I/O-Fehler, Disk-Full, Korruption — Grundabdeckung für App+ODF vorhanden |
 | P0 | Stress- & Skalierungstests | ~10 Tests | Verhalten bei Enterprise-typischen Datenmengen |
 | P1 | Performance-Regression-Gate | ~5 Tests + CI | Automatische Erkennung von Latenz-/Throughput-Regressionen |
 | P1 | Crash-Recovery-Roundtrips | ~8 Tests | End-to-End-Konsistenz nach simulierten Abstürzen |
@@ -403,21 +404,21 @@ Ziel: CoreFS als natives Dateisystem des eigenen Betriebssystems AnyOS (`/daten1
 - [x] Crate `corefs-fuse-adapter` (no_std + alloc) — `Transport`- und `FuseHandler`-Traits, `SessionLoop` mit Destroy-Termination und Reply-Mirroring; bindet `corefs-core` + `corefs-fuse-proto`
 - [x] Crate `corefs-cli` (std) — dünner Binary-Wrapper um `corefs-tools` mit `dispatch`-Library für Unit-Testbarkeit; Subcommands `mkfs` / `fsck` / `repair` / `scrub` / `dump-superblock` / `dump-inode` / `snapshot {list,create,delete,restore}` / `defrag` / `help`; Text- und JSON-Output via `--json`-Flag; Exit-Codes 0/1/2 (Erfolg / Tool-Fehler / Usage-Fehler)
 - [x] Existierender Linux-`fuser`-Pfad ([src/platform/linux_fuse.rs](src/platform/linux_fuse.rs)) bleibt funktional (unverändert weitergeführt)
-- [x] Workspace-Tests grün (631 main + 21 corefs-core + 65 corefs-tools + 7 corefs-std + 7 corefs-fuse-proto + 6 corefs-fuse-adapter + Doctests)
+- [x] Workspace-Tests grün (375 main + 344 corefs-core + 66 corefs-tools + 31 corefs-cli + 7 corefs-std + 12 corefs-fuse-proto + 6 corefs-fuse-adapter + Doctests = 845 gesamt)
 
 ### 5.2 no_std-Migration `corefs-core`
 
 - [x] `#![no_std]` + `extern crate alloc` in `corefs-core` (konditional über `cfg_attr(not(feature = "std"), no_std)`, zzgl. `forbid(unsafe_code)` und `warn(missing_docs)`)
 - [~] `std::collections::{BTreeMap, HashMap}` → `alloc::collections::BTreeMap` / `hashbrown::HashMap` (Domain-Layer umgestellt; weitere Stellen folgen mit der storage/services-Migration)
 - [x] `std::time::SystemTime` entfernen → eigener `Timestamp`-Typ (secs + nanos) — Domain-Feld-Typen, Services (`JournalEntry.timestamp`, `JournalRuntimeState.started_at`, `FileVersion.created_at`), Storage-Kodierung und alle Call-Sites im main crate migriert. `Timestamp` ist **bincode-wire-kompatibel** mit `SystemTime`; bestehende Volume-Images bleiben byte-identisch lesbar (Regressionstest `wire_compatible_with_system_time_bincode`).
-- [ ] `std::path::PathBuf`/`Path` aus dem Kern entfernen — Kern arbeitet mit `&str`/`PathRef`; vollständige PathBuf-Nutzung nur in `corefs-std`/`corefs-cli`
-- [ ] `std::io::{Read, Write, Error}` → eigener `io`-Trait-Satz im Kern
+- [x] `std::path::PathBuf`/`Path` aus dem Kern entfernen — `corefs-core` enthält keinerlei `std::path`-Nutzung; alle Pfade werden intern als `String`/`&str` geführt; PathBuf nur im main crate (`corefs`) an der Plattform-/I/O-Grenze
+- [x] `std::io::{Read, Write, Error}` → eigener `io`-Trait-Satz im Kern — `corefs-core` verwendet ausschliesslich `CoreFsResult<T>` / `CoreFsError`; kein `std::io`-Import; `BlockDevice`-Trait gibt `CoreFsResult` zurück; `std::error::Error`-Impl hinter `cfg(feature = "std")`
 - [~] Abhängigkeiten auf `default-features = false` umstellen (serde mit `default-features = false, features = ["derive", "alloc"]` bereits zentral; bincode/lz4_flex/chacha20poly1305 noch im main crate)
 - [x] `trait Clock` + `trait Rng` als Plattform-Abstraktionen einführen (siehe `corefs-core::platform`); zusätzlich `SystemClock`-Default-Impl unter `std`-Feature
 - [x] Feature `std` für std-Bequemlichkeiten — Default = no_std; `Timestamp::now()`, `Inode::new`/`touch_*`, `VolumeDescriptor::from_config`, `From<SystemTime>`/`Into<SystemTime>` hinter `std`-Feature; `*_at(now)`-APIs auch ohne `std` verfügbar
 - [ ] CI-Build für Custom-Target `x86_64-anyos` (no_std) grün
 - [~] CI-Build für `x86_64-unknown-linux-gnu` grün (lokal verifiziert; CI-Hook folgt)
-- [x] Alle Tests auf Linux weiterhin grün — Workspace-Summe ≈ 789 Tests (413 main + 252 corefs-core + 29 cli + 65 tools + 7 std + 9 fuse-proto/adapter + Doctests). Im strikten `no_std + alloc`-Modus laufen 248 Tests grün (`cargo test -p corefs-core --no-default-features`) — Beweis, dass die kritischen FS-Bausteine kernel-tauglich sind.
+- [x] Alle Tests auf Linux weiterhin grün — Workspace-Summe ≈ 845 Tests (375 main + 344 corefs-core + 31 cli + 66 tools + 7 std + 18 fuse-proto/adapter + Doctests). Im strikten `no_std + alloc`-Modus laufen 344 Tests grün (`cargo test -p corefs-core --no-default-features`) — Beweis, dass die kritischen FS-Bausteine kernel-tauglich sind.
 
 ### 5.3 Tool-Logik extrahieren nach `corefs-tools`
 
@@ -438,11 +439,11 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 
 ### 5.4 FUSE-Crates (AnyOS-Wire)
 
-- [ ] `corefs-fuse-proto`: Request-/Reply-Enums (Lookup, Getattr, Setattr, Read, Write, Readdir, Create, Mkdir, Unlink, Rmdir, Rename, Symlink, Readlink, Open, Release, Flush, Fsync, Statfs, …)
-- [ ] `corefs-fuse-proto`: Wire-Kodierung (bincode), Versions-Handshake, Session-Header
-- [ ] `corefs-fuse-adapter`: CoreFs-API → Request/Reply, plattformneutral, async-frei
-- [ ] `corefs-fuse-adapter`: Transport-Trait (Send Request / Receive Reply) für austauschbare Backends (Linux `/dev/fuse` später, AnyOS-Syscall jetzt)
-- [ ] Unit-Tests für Wire-Round-Trip (Linux-Host-Tests reichen)
+- [x] `corefs-fuse-proto`: Request-/Reply-Enums — 20 Varianten (Init, Destroy, Lookup, Getattr, Setattr, Read, Write, Readdir, Create, Mkdir, Unlink, Rmdir, Rename, Symlink, Readlink, Open, Release, Flush, Fsync, Statfs)
+- [x] `corefs-fuse-proto`: Wire-Kodierung (bincode legacy, no_std-kompatibel), `PROTOCOL_VERSION` (1.0), `FrameHeader` mit `Unique`-ID, `ReplyPayload::Ok`/`Err` mit errno
+- [x] `corefs-fuse-adapter`: `FuseHandler`-Trait (single dispatch), `HandlerResult` → `ReplyPayload`-Konvertierung, plattformneutral, async-frei
+- [x] `corefs-fuse-adapter`: `Transport`-Trait (`recv_request`/`send_reply`) für austauschbare Backends; `SessionLoop` mit Destroy-Termination und Unique-ID-Mirroring
+- [x] Unit-Tests für Wire-Round-Trip — 10 Round-Trip-Tests in `corefs-fuse-proto`, 6 SessionLoop-Tests in `corefs-fuse-adapter`
 
 ### 5.5 AnyOS — Kernel-Treiber-Pfad (direkter CoreFS-Treiber)
 

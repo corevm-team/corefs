@@ -1549,3 +1549,11 @@ fn validate_path(path: &str) -> CoreFsResult<()> {
 #[cfg(test)]
 #[path = "app_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "concurrency_tests.rs"]
+mod concurrency_tests;
+
+#[cfg(test)]
+#[path = "fault_injection_tests.rs"]
+mod fault_injection_tests;
