@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp, mit AnyOS-Kernel-Treiber, AnyOS-CLI-Tools und FUSE-IPC-Grundgerüst  
 **Build-Status:** stabil (corefs workspace grün; AnyOS-Kernel + `corefsd` bauen für `x86_64-anyos` / `x86_64-anyos-user`)  
-**Test-Status:** corefs-workspace `866/866` grün; corefs-core no-default-features `334/334` grün; corefs-core std `346/346` grün  
+**Test-Status:** corefs-workspace `872/872` grün (inkl. 6 neue FUSE-Handler-E2E-Tests in `tests/fuse_handler_e2e.rs`); corefs-core no-default-features `334/334` grün; corefs-core std `346/346` grün  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -478,6 +478,7 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [x] Blocking Request/Reply im Kernel — `FuseSession::enqueue_and_wait` mit `waiters: BTreeMap<Unique, tid>`, wake via `scheduler::wake_thread`; `deliver_reply` / `close` wecken wartende Threads; 3 neue Unit-Tests
 - [x] `fuse_call`-Helper (Kernel) — serialisiert `corefs_fuse_proto::Request` via bincode-legacy, ruft `enqueue_and_wait`, dekodiert `ReplyPayload`; `FuseCallError` + POSIX-errno→`FsError`-Mapping; 2 neue Unit-Tests gegen Mock-Session
 - [x] FUSE-Filesystem als `FsType::Fuse` im VFS — `fs_id=9` an allen Dispatch-Sites (open/read/write/close/decref/read_dir/stat_inner/delete/mkdir); FUSE `u64` ↔ VFS `u32` via per-Mount `kernel::fs::fuse::inode_map::InodeMap`; FileHandle wird in `OpenFile.parent_cluster`/`seek_cache_offset` geparkt. `statfs` bleibt TODO.
+- [x] VFS-Dispatch für Setattr/Rmdir/Rename/Symlink/Readlink — `vfs::set_mode`/`set_owner` reichen `PartialAttr` ans FUSE-Backend; `vfs::truncate` nutzt `Setattr { size: Some(0) }`; `vfs::rename` unterstützt same-mount FUSE-Rename; `vfs::delete` wählt zur Laufzeit `Rmdir` vs. `Unlink` anhand des `Attr.kind` aus einem Lookup; `vfs::create_symlink`/`readlink` bedienen FUSE-Mounts direkt via `Request::Symlink`/`Request::Readlink`. Kernel-Build für `x86_64-anyos.json` bleibt clean.
 - [~] Crash-Handling: Daemon-Absturz → sauberer Unmount / EIO für offene Handles — `FuseSession::close` weckt wartende Threads mit `SessionClosed`; `devfs_write` auf geschlossener Session liefert jetzt `None` (→ EIO upward) statt silent drop; `DevFuseTransport` schließt `/dev/fuse`-fd im Drop. SIGTERM/SIGINT-Handler bleiben offen (kein POSIX-Signal-API in `anyos_std`).
 - [x] Hello-World-Test-FS-Daemon zur Validierung (unabhängig von CoreFS) — `bin/fusedemo/` bietet einen readonly `/hello.txt` FUSE-Daemon ohne `corefs-core`-Dep.
 - [x] Protokoll-Abstraktion so gewählt, dass späterer Linux-FUSE-Wire parallel einhängbar ist — der `/dev/fuse`-Transport ist bytestrom-agnostisch, der Wire-Decoder lebt im Daemon
@@ -487,11 +488,12 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 - [x] Binary `anyos/bin/corefsd/` anlegen — linkt `corefs-core` + `corefs-fuse-adapter` + `corefs-fuse-proto`, fährt `SessionLoop` über `DevFuseTransport`
 - [x] Linkt `corefs-core` + `corefs-fuse-adapter` + `corefs-fuse-proto`
 - [x] Daemon registriert sich beim Kernel-FUSE-Subsystem — `DevFuseTransport::open()` auf `/dev/fuse`; Fallback-Demo-Loop wenn das Device nicht verfügbar
-- [x] Event-Loop: Request → `corefs-core` → Reply — IPC-Pfad vollständig (bincode-legacy über `/dev/fuse`); `bin/corefsd/src/handler.rs::CoreFsHandler` besitzt eine `OdfDeviceSession` und übersetzt Init/Destroy/Getattr/Lookup/Readdir/Open/Release/Read/Write/Create/Mkdir/Unlink/Statfs in `PersistedState`-Zugriffe; `--device` + `--capacity` wählen das Block-Device (fallback: Stub-Handler, der nur Init/Destroy beantwortet).
+- [x] Event-Loop: Request → `corefs-core` → Reply — IPC-Pfad vollständig (bincode-legacy über `/dev/fuse`); `bin/corefsd/src/handler.rs::CoreFsHandler` besitzt eine `OdfDeviceSession` und übersetzt Init/Destroy/Getattr/Lookup/Readdir/Open/Release/Read/Write/Create/Mkdir/Unlink/Statfs/Flush/Fsync in `PersistedState`-Zugriffe; `--device` + `--capacity` wählen das Block-Device (fallback: Stub-Handler, der nur Init/Destroy beantwortet).
+- [x] Mutations-Handler Setattr/Rmdir/Rename/Symlink/Readlink — ENOSYS-Stubs ersetzt durch echte `PersistedState`-Mutationen: `op_setattr` wendet mode/uid/gid/size (extend/shrink der `BlockRecord`-Bytes)/mtime per `PartialAttr` an; `op_rmdir` prüft Nicht-Leere über `path.starts_with(child_prefix)` und liefert ENOTEMPTY (39); `op_rename` rewrited Quell-Pfad plus alle `old/`-Deszendenten; `op_symlink` legt einen `InodeKind::Symlink` mit UTF-8-Target im `BlockRecord` an; `op_readlink` dekodiert die Bytes als String. 7 neue Handler-Unit-Tests. Parallel dazu 6 host-runnable E2E-Tests in `tests/fuse_handler_e2e.rs`, die dieselben Mutation-Flows gegen eine frische `OdfDeviceSession` fahren.
 - [x] Block-Device-Zugriff via AnyOS-Syscalls → `BlockDevice`-Impl (im Daemon; via `libcorefs-tools::block_device::AnyOsBlockDevice` wiederverwendet, `OdfDeviceSession::open` + `format_new_at` mit Fallback)
 - [x] Proto erweitert um `Unlink`/`Mkdir`/`Create` (Request+Reply) — additiv, 3 neue Round-Trip-Tests; `corefs-fuse-proto/Cargo.toml` pinnt serde+bincode inline, damit die Crate als Path-Dep aus dem AnyOS-Workspace konsumierbar ist
 - [~] Sauberes Shutdown bei Unmount-Signal — `Drop` auf `DevFuseTransport` schließt `/dev/fuse`, Startup-Failure-Pfade exitieren mit Code 1. Echte Signal-Handler offen (kein API in `anyos_std`).
-- [~] End-to-End-Test: Userspace-Mount, Datei schreiben/lesen, Unmount — Host-E2E `corefs-tools/tests/e2e_corefs.rs` deckt mkfs/fsck/scrub-Roundtrip ab; kernel-level Userspace-Mount-Test bleibt offen (fehlt QEMU-Harness).
+- [~] End-to-End-Test: Userspace-Mount, Datei schreiben/lesen, Unmount — Host-E2E `corefs-tools/tests/e2e_corefs.rs` deckt mkfs/fsck/scrub-Roundtrip ab; zusätzlich deckt `tests/fuse_handler_e2e.rs` alle Mutation-Ops (Create/Write/Read/Unlink/Mkdir/Rmdir/Rename/Setattr/Symlink/Readlink) gegen eine `OdfDeviceSession` ab; kernel-level Userspace-Mount-Test (QEMU-Harness mit echtem FUSE-Mount) bleibt offen.
 
 ### 5.8 AnyOS — Tool-Apps
 
