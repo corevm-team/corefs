@@ -975,3 +975,7 @@ fn now_secs() -> i64 {
 #[cfg(test)]
 #[path = "native_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "native_characterization_tests.rs"]
+mod char_tests;

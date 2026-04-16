@@ -1561,3 +1561,7 @@ mod fault_injection_tests;
 #[cfg(test)]
 #[path = "stress_tests.rs"]
 mod stress_tests;
+
+#[cfg(test)]
+#[path = "content_roundtrip_characterization_tests.rs"]
+mod content_roundtrip_char_tests;

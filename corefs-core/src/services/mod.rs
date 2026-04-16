@@ -25,3 +25,6 @@ pub mod security;
 pub mod semantic;
 pub mod sync;
 pub mod versioning;
+
+#[cfg(test)]
+mod pipeline_characterization_tests;

@@ -1017,3 +1017,7 @@ fn required_blocks(size: usize, block_size: usize) -> u64 {
 #[cfg(test)]
 #[path = "block_store_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "block_store_characterization_tests.rs"]
+mod char_tests;
