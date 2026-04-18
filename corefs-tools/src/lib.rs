@@ -50,6 +50,7 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::broken_intra_doc_links)]
 
+pub mod backup;
 pub mod defrag;
 pub mod dump;
 pub mod error;

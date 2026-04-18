@@ -44,7 +44,7 @@ use corefs_tools::mkfs::{FormatImageOptions, LayoutMode};
 use corefs_tools::mount_check::{self, MountStatus};
 use corefs_tools::scrub::ScrubMode;
 use corefs_tools::snapshot::CreateOptions;
-use corefs_tools::{ToolsError, defrag, dump, fsck, mkfs, repair, scrub, snapshot};
+use corefs_tools::{ToolsError, backup, defrag, dump, fsck, mkfs, repair, scrub, snapshot};
 use std::io::Write;
 
 /// Outcome of the mount-gate check.
@@ -131,6 +131,7 @@ pub fn dispatch<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -
         "dump-superblock" => run_dump_superblock(&args[1..], out, err),
         "dump-inode" => run_dump_inode(&args[1..], out, err),
         "snapshot" => run_snapshot(&args[1..], out, err),
+        "backup" => run_backup(&args[1..], out, err),
         "defrag" => run_defrag(&args[1..], out, err),
         other => {
             let _ = writeln!(err, "corefs-cli: unknown subcommand: {other}");
@@ -311,6 +312,62 @@ fn run_snapshot<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -
     }
 }
 
+fn run_backup<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> ExitStatus {
+    if args.is_empty() {
+        return usage_err(err, "backup: missing subcommand (dump|restore)");
+    }
+    match args[0].as_str() {
+        "dump" => {
+            let positional = match collect_positional(
+                &args[1..],
+                1,
+                "backup dump <path> [--output <stream>] [--since <snapshot-id>]",
+            ) {
+                Ok(v) => v,
+                Err(msg) => return usage_err(err, &msg),
+            };
+            let out_path = parse_string(&args[1..], "--output").map(std::path::PathBuf::from);
+            let since = parse_string(&args[1..], "--since")
+                .map(|s| s.parse::<u64>())
+                .transpose();
+            let since = match since {
+                Ok(v) => v,
+                Err(e) => return usage_err(err, &format!("--since must be u64: {e}")),
+            };
+            let json = has_flag(&args[1..], "--json");
+            finish(
+                backup::dump(
+                    std::path::Path::new(&positional[0]),
+                    out_path.as_deref(),
+                    since,
+                ),
+                out,
+                err,
+                json,
+            )
+        }
+        "restore" => {
+            let positional = match collect_positional(
+                &args[1..],
+                1,
+                "backup restore <path> [--input <stream>]",
+            ) {
+                Ok(v) => v,
+                Err(msg) => return usage_err(err, &msg),
+            };
+            let in_path = parse_string(&args[1..], "--input").map(std::path::PathBuf::from);
+            let json = has_flag(&args[1..], "--json");
+            finish(
+                backup::restore(std::path::Path::new(&positional[0]), in_path.as_deref()),
+                out,
+                err,
+                json,
+            )
+        }
+        other => usage_err(err, &format!("backup: unknown subcommand '{other}' (use dump|restore)")),
+    }
+}
+
 fn run_defrag<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> ExitStatus {
     let positional = match collect_positional(args, 1, "defrag <path>") {
         Ok(v) => v,
@@ -454,6 +511,12 @@ SUBCOMMANDS:
 
     defrag <path> [--json]
         Defragment the block store.
+
+    backup dump <path> [--output <stream>] [--since <snapshot-id>] [--json]
+    backup restore <path> [--input <stream>] [--json]
+        Stream-based backup/export. `--since` makes dumps incremental
+        against a known snapshot. `--output`/`--input` default to
+        stdout/stdin if omitted.
 
     help
         Show this message.
