@@ -8,7 +8,7 @@
 
 **Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp, mit AnyOS-Kernel-Treiber, AnyOS-CLI-Tools und FUSE-IPC-Grundgerüst  
 **Build-Status:** stabil (corefs workspace grün; AnyOS-Kernel + `corefsd` bauen für `x86_64-anyos` / `x86_64-anyos-user`)  
-**Test-Status:** corefs-workspace `872/872` grün (inkl. 6 neue FUSE-Handler-E2E-Tests in `tests/fuse_handler_e2e.rs`); corefs-core no-default-features `334/334` grün; corefs-core std `346/346` grün  
+**Test-Status:** corefs-workspace `979/979` grün (inkl. neue Backup/Keystore-Testsuiten: 14 Backup-Tests in `corefs-core/storage/backup_tests.rs`, 15 Keystore-Tests in `corefs-core/security/keystore_tests.rs`, SHA256/HKDF-RFC-Vektortests, 5 Backup-Host-Tests + 8 Keys-Host-Tests in `corefs-tools`); corefs-core no-default-features `377/377` grün; corefs-core std `421/421` grün  
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
 
 ## Bereits umgesetzt
@@ -40,6 +40,8 @@ In beschreibenden Abschnitten (z. B. Architekturüberblick) markieren Top-Level-
 
 ### Kernfunktionen im Prototyp
 
+- [x] Stream-basiertes Backup/Export-Format (`corefs-core::storage::backup`, no_std + alloc): full- und inkrementelle Dumps auf `PersistedState`-Ebene, frame-basiertes Wire-Format mit Magic "COREFSBK", Version-Gating, CRC32C-Trailer, `BlobProvider`-Trait für aktive Datei-Inhalte; Host-Tool `corefs-cli backup dump|restore` mit `--since`/`--output`/`--input`-Flags; Doku: `doc/backup.md`
+- [x] Produktives Key-Management (`corefs-core::security::keystore`, no_std + alloc, feature-gated `crypto`): pure-Rust SHA-256 + HMAC-SHA256 (FIPS-180-4, RFC-4231-verifiziert), HKDF-SHA256 (RFC-5869-verifiziert), Keystore mit AEAD-wrapped Volume-Key unter Master-Key, HKDF-basierte Per-File-Key-Ableitung aus InodeId, Master-Key-Rotation ohne File-Re-Encryption, persistente `KeystoreFile` mit Magic "COREFSKS"; Host-Tool `corefs-cli keys init|rotate|verify`; Doku: `doc/key-management.md`
 - [x] Formatierung eines CoreFS-Volumes im Userspace-Modell
 - [x] Persistenz eines mehrsegmentigen binären CoreFS-Volume-Images mit Segmenttabelle, redundanten Superblocks, Generation Countern, Clean/Unclean-Markierung und binären Segment-Frames für Fachsegmente
 - [x] spezialisierte Binärlayouts für Inode-, Journal- und Snapshot-Segmente innerhalb des Volume-Images
