@@ -69,6 +69,7 @@ fn file_inode(id: u64, path: &str, size: usize) -> Inode {
         created_at: Timestamp::EPOCH,
         modified_at: Timestamp::EPOCH,
         changed_at: Timestamp::EPOCH,
+        accessed_at: Timestamp::EPOCH,
         metadata: FileMetadata::default(),
     }
 }
@@ -240,6 +241,7 @@ fn char_save_load_preserves_inode_metadata() {
         created_at: Timestamp::from_secs(1_700_000_100),
         modified_at: Timestamp::from_secs(1_700_000_200),
         changed_at: Timestamp::from_secs(1_700_000_300),
+        accessed_at: Timestamp::from_secs(1_700_000_250),
         metadata: meta,
     };
     state.active_inodes.push(inode);

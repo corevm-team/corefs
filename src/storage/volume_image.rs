@@ -814,6 +814,10 @@ fn decode_inodes_payload(bytes: &[u8]) -> Result<Vec<Inode>, String> {
             created_at,
             modified_at,
             changed_at,
+            // Legacy volume-image format does not encode atime. Seed
+            // with modified_at as a best-effort initial value so the
+            // field is well-defined going forward.
+            accessed_at: modified_at,
             metadata,
         });
     }

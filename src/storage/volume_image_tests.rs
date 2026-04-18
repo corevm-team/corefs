@@ -432,6 +432,7 @@ fn save_to_device_rejects_insufficient_capacity() {
             created_at: std::time::SystemTime::UNIX_EPOCH.into(),
             modified_at: std::time::SystemTime::UNIX_EPOCH.into(),
             changed_at: std::time::SystemTime::UNIX_EPOCH.into(),
+            accessed_at: std::time::SystemTime::UNIX_EPOCH.into(),
             metadata: crate::domain::metadata::FileMetadata::default(),
         };
         state.active_inodes.push(inode);
@@ -652,6 +653,7 @@ fn incremental_persist_writes_only_changed_metadata_segment() {
         created_at: std::time::SystemTime::now().into(),
         modified_at: std::time::SystemTime::now().into(),
         changed_at: std::time::SystemTime::now().into(),
+        accessed_at: std::time::SystemTime::now().into(),
         metadata: crate::domain::metadata::FileMetadata::default(),
     });
 
@@ -705,6 +707,7 @@ fn incremental_persist_falls_back_to_full_on_size_change() {
         created_at: std::time::SystemTime::now().into(),
         modified_at: std::time::SystemTime::now().into(),
         changed_at: std::time::SystemTime::now().into(),
+        accessed_at: std::time::SystemTime::now().into(),
         metadata: crate::domain::metadata::FileMetadata::default(),
     });
 
@@ -731,6 +734,7 @@ fn incremental_persist_bytes_written_is_much_less_than_full() {
         created_at: std::time::SystemTime::now().into(),
         modified_at: std::time::SystemTime::now().into(),
         changed_at: std::time::SystemTime::now().into(),
+        accessed_at: std::time::SystemTime::now().into(),
         metadata: crate::domain::metadata::FileMetadata::default(),
     });
     state.block_records = vec![crate::storage::block_store::BlockRecord {

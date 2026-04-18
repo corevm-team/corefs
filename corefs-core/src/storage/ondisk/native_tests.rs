@@ -62,6 +62,7 @@ fn sample_inode(id: u64, path: &str, kind: InodeKind, size: usize) -> Inode {
         created_at: t(0),
         modified_at: t(10),
         changed_at: t(20),
+        accessed_at: t(15),
         metadata: FileMetadata::default(),
     }
 }
@@ -318,6 +319,7 @@ fn encryption_flag_propagates_to_on_disk_inode() {
         created_at: t(0),
         modified_at: t(0),
         changed_at: t(0),
+        accessed_at: t(0),
         metadata: meta,
     });
     save_state_native(&mut dev, &state).unwrap();

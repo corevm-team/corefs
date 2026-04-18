@@ -39,6 +39,15 @@ pub struct Inode {
     /// POSIX `ctime` — updated on any inode change: content changes,
     /// metadata changes (chown/chmod), or rename.
     pub changed_at: Timestamp,
+    /// POSIX `atime` — updated on read access (relatime-semantic is
+    /// left to higher layers). Kept separately so setattr/read paths
+    /// can mutate access time without touching mtime/ctime.
+    ///
+    /// Wire-Compat: alte bincode-Persisted-States kennen dieses Feld
+    /// nicht — `#[serde(default)]` liefert für sie `Timestamp::EPOCH`,
+    /// damit Volumes aus vorigen Versionen weiterhin lesbar sind.
+    #[serde(default)]
+    pub accessed_at: Timestamp,
     pub metadata: FileMetadata,
 }
 
@@ -64,6 +73,7 @@ impl Inode {
             created_at: now,
             modified_at: now,
             changed_at: now,
+            accessed_at: now,
             metadata,
         }
     }
@@ -98,6 +108,18 @@ impl Inode {
     #[cfg(feature = "std")]
     pub fn touch_changed(&mut self) {
         self.touch_changed_at(Timestamp::now());
+    }
+
+    /// Setzt den Access-Zeitstempel (`atime`). Ändert weder `mtime`
+    /// noch `ctime` — Access ist ein reiner Lese-Touch.
+    pub fn touch_accessed_at(&mut self, now: Timestamp) {
+        self.accessed_at = now;
+    }
+
+    /// Setzt den Access-Zeitstempel auf die aktuelle Systemzeit.
+    #[cfg(feature = "std")]
+    pub fn touch_accessed(&mut self) {
+        self.touch_accessed_at(Timestamp::now());
     }
 }
 

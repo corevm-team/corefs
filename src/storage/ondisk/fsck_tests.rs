@@ -72,6 +72,7 @@ fn clean_native_volume_has_no_errors() {
         created_at: (UNIX_EPOCH + std::time::Duration::from_secs(1)).into(),
         modified_at: (UNIX_EPOCH + std::time::Duration::from_secs(2)).into(),
         changed_at: (UNIX_EPOCH + std::time::Duration::from_secs(3)).into(),
+        accessed_at: (UNIX_EPOCH + std::time::Duration::from_secs(2)).into(),
         metadata: FileMetadata::default(),
     });
     state.block_records.push(BlockRecord {

@@ -17,6 +17,7 @@ fn inode(id: u64, kind: InodeKind, path: &str, size: usize) -> Inode {
         created_at: now,
         modified_at: now,
         changed_at: now,
+        accessed_at: now,
         metadata: FileMetadata::default(),
     }
 }

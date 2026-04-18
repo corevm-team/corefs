@@ -132,6 +132,7 @@ fn synthetic_state(files: usize, payload: usize) -> PersistedState {
             created_at: now,
             modified_at: now,
             changed_at: now,
+            accessed_at: now,
             metadata: FileMetadata::default(),
         });
         state.block_records.push(BlockRecord {
