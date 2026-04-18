@@ -10,6 +10,7 @@
 //! im main `corefs` crate (bzw. wandern langfristig in `corefs-std`).
 
 pub mod allocator;
+pub mod backup;
 pub mod block_device;
 pub mod block_store;
 pub mod catalog;
