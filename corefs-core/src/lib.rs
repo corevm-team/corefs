@@ -47,6 +47,8 @@ pub mod platform;
 pub mod config;
 pub mod domain;
 pub mod error;
+#[cfg(feature = "crypto")]
+pub mod security;
 pub mod services;
 pub mod storage;
 
