@@ -123,6 +123,32 @@ pub fn save_state_native(
     // Build fresh bitmaps — we rewrite the layout from scratch each save.
     let mut block_bitmap = Bitmap::new(geom.total_blocks);
     mark_reserved_blocks(&mut block_bitmap, &geom)?;
+
+    // Mark every block currently claimed by a `BlockStore` data extent as
+    // reserved, so the per-inode Attr-Block/Index-Block allocator below
+    // doesn't hand those blocks back out and overwrite file contents.
+    //
+    // Without this, `mkfs-corefs-host --populate` (which writes file
+    // bytes via `BlockStore::write_at` first, then calls
+    // `save_state_native` to persist the resulting records) ends up with
+    // Attr-Blocks being allocated right on top of the data extents — the
+    // file reads then surface `ATTR_BLOCK_MAGIC` (0xA771_B10C) instead
+    // of the original bytes.  See
+    // anyOS memory/corefs-blockstore-attr-collision.md for the repro.
+    for rec in &state.block_records {
+        for ext in &rec.extents {
+            for i in 0..u64::from(ext.length_blocks) {
+                let block = ext.physical_block + i;
+                if block < geom.total_blocks {
+                    // `set` returns Ok(true) if the bit was already set.
+                    // We treat "already set" as fine (reserved regions
+                    // and dedup'd extents can legitimately overlap).
+                    let _ = block_bitmap.set(block)?;
+                }
+            }
+        }
+    }
+
     let mut inode_bitmap = Bitmap::new(geom.inode_count);
     // Reserve only the slots that carry real data — slot 0 (blob legacy)
     // and slot 1 (ancillary).  Slots 2..FIRST_USER_INODE_SLOT stay free
