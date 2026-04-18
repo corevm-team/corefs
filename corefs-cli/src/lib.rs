@@ -44,7 +44,7 @@ use corefs_tools::mkfs::{FormatImageOptions, LayoutMode};
 use corefs_tools::mount_check::{self, MountStatus};
 use corefs_tools::scrub::ScrubMode;
 use corefs_tools::snapshot::CreateOptions;
-use corefs_tools::{ToolsError, backup, defrag, dump, fsck, mkfs, repair, scrub, snapshot};
+use corefs_tools::{ToolsError, backup, defrag, dump, fsck, keys, mkfs, repair, scrub, snapshot};
 use std::io::Write;
 
 /// Outcome of the mount-gate check.
@@ -132,6 +132,7 @@ pub fn dispatch<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -
         "dump-inode" => run_dump_inode(&args[1..], out, err),
         "snapshot" => run_snapshot(&args[1..], out, err),
         "backup" => run_backup(&args[1..], out, err),
+        "keys" => run_keys(&args[1..], out, err),
         "defrag" => run_defrag(&args[1..], out, err),
         other => {
             let _ = writeln!(err, "corefs-cli: unknown subcommand: {other}");
@@ -368,6 +369,97 @@ fn run_backup<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> 
     }
 }
 
+fn run_keys<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> ExitStatus {
+    if args.is_empty() {
+        return usage_err(err, "keys: missing subcommand (init|rotate|verify)");
+    }
+    match args[0].as_str() {
+        "init" => {
+            let positional = match collect_positional(
+                &args[1..],
+                1,
+                "keys init <keystore-path> --master-key <path> --volume-uuid <hex>",
+            ) {
+                Ok(v) => v,
+                Err(msg) => return usage_err(err, &msg),
+            };
+            let mk = match parse_string(&args[1..], "--master-key") {
+                Some(v) => v,
+                None => return usage_err(err, "keys init: --master-key is required"),
+            };
+            let uuid = match parse_string(&args[1..], "--volume-uuid") {
+                Some(v) => v,
+                None => return usage_err(err, "keys init: --volume-uuid is required"),
+            };
+            let json = has_flag(&args[1..], "--json");
+            finish(
+                keys::init(
+                    std::path::Path::new(&positional[0]),
+                    std::path::Path::new(&mk),
+                    &uuid,
+                ),
+                out,
+                err,
+                json,
+            )
+        }
+        "rotate" => {
+            let positional = match collect_positional(
+                &args[1..],
+                1,
+                "keys rotate <keystore-path> --old-master <path> --new-master <path>",
+            ) {
+                Ok(v) => v,
+                Err(msg) => return usage_err(err, &msg),
+            };
+            let old_mk = match parse_string(&args[1..], "--old-master") {
+                Some(v) => v,
+                None => return usage_err(err, "keys rotate: --old-master is required"),
+            };
+            let new_mk = match parse_string(&args[1..], "--new-master") {
+                Some(v) => v,
+                None => return usage_err(err, "keys rotate: --new-master is required"),
+            };
+            let json = has_flag(&args[1..], "--json");
+            finish(
+                keys::rotate(
+                    std::path::Path::new(&positional[0]),
+                    std::path::Path::new(&old_mk),
+                    std::path::Path::new(&new_mk),
+                ),
+                out,
+                err,
+                json,
+            )
+        }
+        "verify" => {
+            let positional = match collect_positional(
+                &args[1..],
+                1,
+                "keys verify <keystore-path> --master-key <path>",
+            ) {
+                Ok(v) => v,
+                Err(msg) => return usage_err(err, &msg),
+            };
+            let mk = match parse_string(&args[1..], "--master-key") {
+                Some(v) => v,
+                None => return usage_err(err, "keys verify: --master-key is required"),
+            };
+            let json = has_flag(&args[1..], "--json");
+            finish(
+                keys::verify(
+                    std::path::Path::new(&positional[0]),
+                    std::path::Path::new(&mk),
+                ),
+                out,
+                err,
+                json,
+            )
+        }
+        other => usage_err(err, &format!("keys: unknown subcommand '{other}' (use init|rotate|verify)")),
+    }
+}
+
 fn run_defrag<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> ExitStatus {
     let positional = match collect_positional(args, 1, "defrag <path>") {
         Ok(v) => v,
@@ -517,6 +609,12 @@ SUBCOMMANDS:
         Stream-based backup/export. `--since` makes dumps incremental
         against a known snapshot. `--output`/`--input` default to
         stdout/stdin if omitted.
+
+    keys init <keystore-path> --master-key <path> --volume-uuid <hex> [--json]
+    keys rotate <keystore-path> --old-master <path> --new-master <path> [--json]
+    keys verify <keystore-path> --master-key <path> [--json]
+        Keystore management: HKDF-based per-file key derivation with a
+        AEAD-wrapped volume key persisted outside the volume.
 
     help
         Show this message.

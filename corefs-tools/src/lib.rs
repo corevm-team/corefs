@@ -55,6 +55,7 @@ pub mod defrag;
 pub mod dump;
 pub mod error;
 pub mod fsck;
+pub mod keys;
 pub mod mkfs;
 pub mod mount_check;
 pub mod repair;
