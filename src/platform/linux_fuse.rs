@@ -488,10 +488,28 @@ impl Filesystem for CoreFsFuseMount {
 
 // ── Read-write FUSE mount ────────────────────────────────────────────────────
 
-/// When a sequential write causes the uncommitted buffer to exceed this size the
-/// buffer is flushed to the service and cleared, keeping peak RAM proportional to
-/// the threshold rather than to the full file size.
-const STREAM_FLUSH_THRESHOLD: usize = 32 * 1024 * 1024; // 32 MiB
+/// When the uncommitted per-handle write buffer reaches this size it is flushed
+/// to the service and cleared, keeping peak RAM proportional to the threshold
+/// rather than to the full file size.
+///
+/// Raising this reduces the number of `extend_file` calls during streaming
+/// writes, which matters because the current [`BlockStore::append_to_inode`]
+/// implementation is O(existing bytes) per call (read-modify-write).  Smaller
+/// thresholds turn a sequential write into a quadratic operation.
+///
+/// Can be overridden at runtime via `COREFS_STREAM_FLUSH_MIB` (unit: MiB).
+const STREAM_FLUSH_THRESHOLD: usize = 64 * 1024 * 1024; // 64 MiB
+
+/// Returns the effective streaming-flush threshold in bytes, honouring the
+/// `COREFS_STREAM_FLUSH_MIB` env var when it parses to a positive integer.
+fn stream_flush_threshold() -> usize {
+    std::env::var("COREFS_STREAM_FLUSH_MIB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .map(|mib| mib.saturating_mul(1024 * 1024))
+        .unwrap_or(STREAM_FLUSH_THRESHOLD)
+}
 
 // ── Virtual node INO space ────────────────────────────────────────────────────
 // Real CoreFS InodeIds are small sequential numbers; virtual nodes use the top
@@ -1314,18 +1332,36 @@ impl CoreFsFuseMountRw {
         }
     }
 
+    /// Prepares the in-memory state for a mutation.
+    ///
+    /// Pre-P1 behaviour used to persist the image up to twice from here: once
+    /// to record the unclean-shutdown flag and once to anchor the new WAL
+    /// transaction on disk before the operation proper ran.  That turned every
+    /// `create`/`mkdir`/`unlink`/... into a 3×-full-image-rewrite, which is
+    /// the dominant cause of the Phase-0 slowdown factors.
+    ///
+    /// P1 removes those eager persists.  Crash safety is preserved because
+    /// neither the unclean-shutdown flag nor the pending-WAL transaction are
+    /// visible on disk until the next explicit checkpoint ([`persist`]):
+    ///
+    /// * If the daemon crashes before any checkpoint runs, the on-disk image
+    ///   is still the one from the previous clean shutdown — no recovery is
+    ///   required because nothing from this session ever reached the disk.
+    /// * Once a checkpoint runs (triggered by `fsync`, unmount, or an
+    ///   explicit sync), the unclean-shutdown flag and the accumulated WAL
+    ///   entries hit the disk together in one atomic image rewrite.  A crash
+    ///   between checkpoints loses unfsynced data (the POSIX contract).
     fn ensure_mutation_session(&mut self, label: &str) -> CoreFsResult<()> {
         if !self.service.had_unclean_shutdown() {
             self.service.mark_unclean_shutdown();
-            self.persist()?;
         }
         if !self.service.has_pending_transaction() {
             let transaction_id = self.service.begin_write_transaction(label);
             let wal = VolumeWal::new(transaction_id, label);
             self.service.set_pending_wal(wal.clone());
             self.pending_wal = Some(wal);
-            self.persist()?;
         }
+        self.dirty = true;
         Ok(())
     }
 
@@ -1340,9 +1376,16 @@ impl CoreFsFuseMountRw {
         Ok(())
     }
 
+    /// Records a WAL operation and marks the volume dirty.
+    ///
+    /// Pre-P1 this used to call `persist()` immediately after each WAL
+    /// record, so every metadata mutation rewrote the whole image on disk.
+    /// Post-P1 the persist is deferred to the next checkpoint point — see
+    /// [`ensure_mutation_session`] for the crash-safety argument.
     fn record_wal_operation_and_save(&mut self, operation: WalOperation) -> CoreFsResult<()> {
         self.record_wal_operation(operation)?;
-        self.persist()
+        self.dirty = true;
+        Ok(())
     }
 
     fn open_file_handle(&mut self, ino: u64, flags: i32) -> CoreFsResult<u64> {
@@ -1452,6 +1495,22 @@ impl CoreFsFuseMountRw {
         let write_end = write_start.saturating_add(data.len());
 
         // --- Phase 1: read handle state with a shared borrow (no &mut self needed) ---
+        //
+        // Pre-P1 the streaming trigger compared the *logical file size* against
+        // the threshold (`logical_end + data.len() > THRESHOLD`).  Once the file
+        // grew past the threshold, every subsequent sequential write — even a
+        // tiny one — triggered a buffer flush, and each flush called
+        // `append_to_inode` which is O(existing_bytes).  That turned a
+        // sequential 128 MiB write into a quadratic read-modify-write loop
+        // (~15 GiB of RAM traffic for a 1-MiB-chunked workload).  Phase 0
+        // measured 25 MiB/s; removing the per-op persist then exposed the
+        // full O(n²) as ~0.6 MiB/s.
+        //
+        // The correct metric is the *buffer* size: flush when the uncommitted
+        // per-handle buffer would exceed the threshold, independent of how
+        // much of the file is already on the service side.  That bounds
+        // `extend_file` calls to `file_size / threshold`.
+        let flush_threshold = stream_flush_threshold();
         let (is_streaming_flush, needs_mutation_session) = {
             let handle = self
                 .open_files
@@ -1464,8 +1523,10 @@ impl CoreFsFuseMountRw {
             }
             let logical_end = handle.committed_size + handle.data.len();
             let is_sequential = write_start == logical_end;
-            let would_exceed = logical_end + data.len() > STREAM_FLUSH_THRESHOLD;
-            let streaming = is_sequential && would_exceed && write_start >= handle.committed_size;
+            let buffer_would_exceed = handle.data.len() + data.len() > flush_threshold;
+            let streaming = is_sequential
+                && buffer_would_exceed
+                && write_start >= handle.committed_size;
             let needs_session = streaming && handle.committed_size == 0;
             (streaming, needs_session)
         };
@@ -1581,9 +1642,16 @@ impl CoreFsFuseMountRw {
             })?;
         }
         // For non-zero writes: the data is in the service and will be committed
-        // atomically by the image save; no WAL entry required.
+        // atomically by the next checkpoint; no WAL entry required.
+        //
+        // P1: we intentionally do NOT persist here.  Pre-P1 every handle
+        // flush rewrote the whole image, which is why sequential writes
+        // maxed out at ~25 MiB/s in the Phase-0 baseline.  Post-P1 the
+        // checkpoint runs only at fsync / unmount / background timer, so
+        // the handle buffer hits the service (in-memory) and the next
+        // persist coalesces many writes into one atomic image save.
 
-        self.persist()?;
+        self.dirty = true;
 
         // Sync node.data once from the service so subsequent opens seed correct content.
         // For large streaming files node.data is not kept in RAM — the service blob
@@ -2382,20 +2450,19 @@ impl Filesystem for CoreFsFuseMountRw {
         _lock_owner: u64,
         reply: ReplyEmpty,
     ) {
+        // `flush` is called on every `close(2)`.  POSIX does not guarantee
+        // durability on close — only `fsync(2)` does — so P1 reduces this to
+        // pushing the uncommitted handle buffer into the in-memory service.
+        // The actual on-disk checkpoint is deferred to `fsync` / unmount /
+        // the background checkpoint timer.  This keeps `echo foo > file`
+        // (which implicitly calls close) from rewriting the whole image.
         self.process_online_requests();
 
         if self.flush_file_handle(_fh).is_err() {
             reply.error(EIO);
             return;
         }
-        if self.dirty || self.service.had_unclean_shutdown() {
-            match self.persist() {
-                Ok(()) => reply.ok(),
-                Err(error) => reply.error(persist_errno(&error)),
-            }
-        } else {
-            reply.ok();
-        }
+        reply.ok();
     }
 
     fn fsync(
