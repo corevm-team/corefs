@@ -980,16 +980,22 @@ impl CoreFsFuseMountRw {
                 let state = self.service.persisted_state();
                 let block_bytes = self.service.read_all_block_bytes();
 
-                // The volume image grows over time (new inodes, new
-                // extents, WAL entries).  FileImageDevice does not grow
-                // implicitly; the `..._and_grow` variant gives us a hook
-                // that is called after the image has been built (so we
-                // know the exact required length without building twice)
-                // but before the segment writes happen.
-                //
-                // `BlockDevice::resize` was added as part of this phase
-                // so the closure can grow the file through the trait
-                // without downcasting.
+                // Phase 1e/1f status: the `*_partial_*` entry point
+                // and the dirty-inode tracking it depends on are
+                // wired up as a library primitive, but the FUSE hot
+                // path stays on the full-build entry point for now.
+                // The Phase-1f bench showed that routing fsync
+                // through the partial path is a net regression on
+                // the current segment-build pipeline, because
+                // `split_blocks_partial` still materialises a
+                // contiguous DATA `Vec<u8>` — copying from the
+                // cached DATA payload instead of the service-side
+                // block store, but at roughly the same memcpy cost.
+                // The real win requires a sparse-range DATA emitter
+                // that can reuse the cached buffer by reference and
+                // only patch the dirty slice on the device.  That is
+                // a separate Phase-2 architectural change (see
+                // PERFORMANCE_LOG.md).
                 let _report =
                     crate::storage::volume_image::persist_to_device_incremental_with_bytes_and_grow(
                         dev,
@@ -997,11 +1003,6 @@ impl CoreFsFuseMountRw {
                         &block_bytes,
                         cache,
                         |dev, needed| {
-                            // Overshoot the required size by 25 % (rounded
-                            // to the sector) so we amortise the resize cost
-                            // over many checkpoints.  The file only ever
-                            // grows, and the overshoot is bounded by the
-                            // peak volume size.
                             use crate::storage::block_device::BlockDevice as _;
                             let sector_size = dev.sector_size() as u64;
                             let target = needed.saturating_mul(5) / 4;
@@ -1009,6 +1010,12 @@ impl CoreFsFuseMountRw {
                             dev.resize(aligned)
                         },
                     )?;
+
+                // Drain the dirty set every checkpoint so future
+                // wake-ups for the partial path (once it is faster
+                // than the full path) start from a clean slate.
+                let _ = self.service.take_dirty_inodes();
+
                 Ok(())
             }
             FuseBacking::Device { device, cache } => {

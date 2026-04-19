@@ -240,7 +240,13 @@ fn save_volume_image_inner(
             },
             path,
         )?,
-        serialize_segment(*b"BLKD", &BlockDescriptorSegment { descriptors }, path)?,
+        serialize_segment(
+            *b"BLKD",
+            &BlockDescriptorSegment {
+                descriptors: descriptors.clone(),
+            },
+            path,
+        )?,
         serialize_bytes_segment(*b"DATA", &block_data, path)?,
     ];
 
@@ -673,6 +679,79 @@ fn split_blocks(
     }
 
     (descriptors, data)
+}
+
+/// P3b-b partial variant of [`split_blocks`].
+///
+/// For each block record we need a source of bytes to go into the DATA
+/// segment.  In the partial path that source can be one of three:
+///
+/// 1. `dirty_bytes` — the caller materialised fresh content for this
+///    inode since the last persist.
+/// 2. `cache.cached_bytes_for(inode)` — the inode was unchanged and its
+///    bytes still live in the cached DATA payload.
+/// 3. Nothing — the inode is neither dirty nor cached.  That can
+///    happen e.g. on the very first persist after mount, or when the
+///    cache was invalidated.  Signaled by returning `None` so the
+///    caller falls back to the full build path (which reads every
+///    inode via `read_all_block_bytes`).
+///
+/// The hot-path win is case (2): for a 128 MiB seq.bin that has not
+/// been touched since the last checkpoint, `cached_bytes_for` returns
+/// a slice into the cached DATA payload and we `extend_from_slice` it
+/// into the new DATA without ever reading the service-side block
+/// store.  That eliminates the O(volume) `read_all_block_bytes` clone
+/// that dominated the post-P3 fsync_warm profile.
+fn split_blocks_partial(
+    block_records: &[BlockRecord],
+    block_size: usize,
+    dirty_bytes: &HashMap<InodeId, Vec<u8>>,
+    cache: &DeviceImageCache,
+) -> Option<(Vec<BlockDescriptor>, Vec<u8>)> {
+    let _ = block_size; // parity with split_blocks; retained for future per-record sanity checks
+    let mut descriptors = Vec::with_capacity(block_records.len());
+    let mut data: Vec<u8> = Vec::new();
+
+    for record in block_records {
+        let offset = data.len() as u64;
+        let bytes_slice: Option<&[u8]> = if let Some(fresh) = dirty_bytes.get(&record.inode) {
+            Some(fresh.as_slice())
+        } else {
+            cache.cached_bytes_for(record.inode)
+        };
+
+        let length = bytes_slice.map(|b| b.len() as u64).unwrap_or(0);
+
+        // If neither cache nor dirty_bytes has this inode, the only
+        // safe choice is to bail out and let the caller rebuild from
+        // scratch.  An empty DATA region for a non-zero-size inode
+        // would silently corrupt the image.
+        if length == 0 && record.logical_size > 0 && !record.extents.is_empty() {
+            return None;
+        }
+
+        let device_block = record.first_physical_block();
+        let allocated_blocks = if length == 0 {
+            record.logical_size
+        } else {
+            record.total_blocks().max(1)
+        };
+
+        if let Some(bytes) = bytes_slice {
+            data.extend_from_slice(bytes);
+        }
+
+        descriptors.push(BlockDescriptor {
+            inode: record.inode,
+            checksum: u64::from(record.content_crc),
+            device_block,
+            allocated_blocks,
+            offset,
+            length,
+        });
+    }
+
+    Some((descriptors, data))
 }
 
 fn join_blocks(descriptors: Vec<BlockDescriptor>, data: &[u8]) -> CoreFsResult<Vec<BlockRecord>> {
@@ -2201,6 +2280,38 @@ struct BuiltImage {
     entries: Vec<SegmentEntry>,
     /// Complete image as contiguous bytes, padded to sector size.
     bytes: Vec<u8>,
+    /// Per-inode DATA descriptors (offset + length) from the layout this
+    /// build produced.  Captured so `DeviceImageCache` can later hand
+    /// them to `split_blocks_partial` for the P3b-b fast path: unchanged
+    /// inodes are served from the cached DATA payload at the cached
+    /// offset + length, and only dirty inodes need fresh bytes.
+    block_descriptors: Vec<BlockDescriptor>,
+}
+
+/// Builds an in-memory image from the persisted state, re-using the
+/// cached DATA payload for inodes whose content has not changed.
+///
+/// Returns `None` if any inode cannot be served from either
+/// `dirty_bytes` or the cache — in that case the caller should fall
+/// back to [`build_image_with_bytes`] (the full-materialisation path).
+fn build_image_with_partial(
+    state: &PersistedState,
+    sector_size: usize,
+    capacity: u64,
+    dirty_bytes: &HashMap<InodeId, Vec<u8>>,
+    cache: &DeviceImageCache,
+) -> CoreFsResult<Option<BuiltImage>> {
+    let label = "<device>";
+    let path = Path::new(label);
+    let Some((descriptors, block_data)) = split_blocks_partial(
+        &state.block_records,
+        state.volume.block_size,
+        dirty_bytes,
+        cache,
+    ) else {
+        return Ok(None);
+    };
+    build_image_inner(state, sector_size, capacity, path, descriptors, block_data).map(Some)
 }
 
 /// Builds an in-memory image from the persisted state.  Does not perform I/O.
@@ -2302,7 +2413,13 @@ fn build_image_inner(
             },
             path,
         )?,
-        serialize_segment(*b"BLKD", &BlockDescriptorSegment { descriptors }, path)?,
+        serialize_segment(
+            *b"BLKD",
+            &BlockDescriptorSegment {
+                descriptors: descriptors.clone(),
+            },
+            path,
+        )?,
         serialize_bytes_segment(*b"DATA", &block_data, path)?,
     ];
 
@@ -2362,6 +2479,7 @@ fn build_image_inner(
         segments,
         entries,
         bytes,
+        block_descriptors: descriptors,
     })
 }
 
@@ -2459,6 +2577,13 @@ pub fn load_from_device_with_bytes(
 pub struct DeviceImageCache {
     /// Map segment kind -> (offset on device, last-written payload bytes).
     segments: HashMap<[u8; 4], (u64, Vec<u8>)>,
+    /// Per-inode DATA descriptors from the last build (offset+length
+    /// within the cached DATA payload, per inode).  Drives the P3b-b
+    /// partial-rebuild fast path in `split_blocks_partial`: unchanged
+    /// inodes are served straight from the cached DATA payload slice
+    /// [cached_offset, cached_offset+length).  Empty when no DATA
+    /// segment has ever been built through this cache.
+    data_descriptors: Vec<BlockDescriptor>,
 }
 
 impl DeviceImageCache {
@@ -2469,7 +2594,30 @@ impl DeviceImageCache {
             .zip(built.entries.iter())
             .map(|(seg, entry)| (seg.kind, (entry.offset, seg.payload.clone())))
             .collect();
-        Self { segments }
+        Self {
+            segments,
+            data_descriptors: built.block_descriptors.clone(),
+        }
+    }
+
+    /// Look up the cached DATA payload bytes for `inode`, if any.
+    ///
+    /// Returns a slice into the cached DATA segment's payload without
+    /// copying — the caller is expected to either `extend_from_slice`
+    /// the slice into a fresh output buffer (common case) or, once the
+    /// DATA-reuse zero-copy path lands, reuse it directly.
+    fn cached_bytes_for(&self, inode: InodeId) -> Option<&[u8]> {
+        let desc = self
+            .data_descriptors
+            .iter()
+            .find(|d| d.inode == inode)?;
+        let data = &self.segments.get(b"DATA")?.1;
+        let start = desc.offset as usize;
+        let end = start.checked_add(desc.length as usize)?;
+        if end > data.len() {
+            return None;
+        }
+        Some(&data[start..end])
     }
 }
 
@@ -2492,6 +2640,55 @@ pub fn persist_to_device_incremental_with_bytes(
     persist_to_device_incremental_with_bytes_and_grow(device, state, block_bytes, cache, |_, _| {
         Ok(())
     })
+}
+
+/// P3b-b partial persist.
+///
+/// Uses the cached DATA segment to serve inodes whose content is
+/// unchanged since the last checkpoint, and only materialises fresh
+/// bytes for the inodes in `dirty_bytes`.  Falls back transparently to
+/// [`persist_to_device_incremental_with_bytes_and_grow`] when:
+///
+/// - the cache is empty (first persist of this session), or
+/// - some inode is present in `state.block_records` but missing from
+///   both `dirty_bytes` and the cache (layout mismatch).
+///
+/// In the fallback case the caller's `full_bytes` closure is invoked
+/// to materialise the complete block-bytes map; this keeps the partial
+/// path cheap in the common case while preserving correctness when
+/// assumptions break.
+pub fn persist_to_device_incremental_partial_with_bytes_and_grow<F, G>(
+    device: &mut dyn BlockDevice,
+    state: &PersistedState,
+    dirty_bytes: &HashMap<InodeId, Vec<u8>>,
+    full_bytes: F,
+    cache: &mut Option<DeviceImageCache>,
+    grow: G,
+) -> CoreFsResult<PersistReport>
+where
+    F: FnOnce() -> HashMap<InodeId, Vec<u8>>,
+    G: FnOnce(&mut dyn BlockDevice, u64) -> CoreFsResult<()>,
+{
+    let sector_size = device.sector_size() as usize;
+    let upper_bound = device.capacity().max(1 << 32);
+
+    // Try the partial build.  Requires a cache to be able to reuse
+    // unchanged inode bytes.
+    if let Some(cache_ref) = cache.as_ref() {
+        if let Some(built) =
+            build_image_with_partial(state, sector_size, upper_bound, dirty_bytes, cache_ref)?
+        {
+            let needed = built.bytes.len() as u64;
+            if needed > device.capacity() {
+                grow(device, needed)?;
+            }
+            return persist_built_image_incremental(device, built, cache);
+        }
+    }
+
+    // Fallback: materialise every inode and take the normal path.
+    let full = full_bytes();
+    persist_to_device_incremental_with_bytes_and_grow(device, state, &full, cache, grow)
 }
 
 /// Variant of [`persist_to_device_incremental_with_bytes`] that invites
@@ -2884,7 +3081,13 @@ pub fn build_volume_image_bytes(state: &PersistedState) -> CoreFsResult<Vec<u8>>
             },
             path,
         )?,
-        serialize_segment(*b"BLKD", &BlockDescriptorSegment { descriptors }, path)?,
+        serialize_segment(
+            *b"BLKD",
+            &BlockDescriptorSegment {
+                descriptors: descriptors.clone(),
+            },
+            path,
+        )?,
         serialize_bytes_segment(*b"DATA", &block_data, path)?,
     ];
 

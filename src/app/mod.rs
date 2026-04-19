@@ -1450,6 +1450,29 @@ impl CoreFsService {
         }
     }
 
+    /// Like [`Self::read_all_block_bytes`] but restricted to the inodes in
+    /// `dirty`.  Used by the P3b-b partial persist path to materialise
+    /// only the inodes whose block content has actually changed since
+    /// the last checkpoint.
+    pub fn read_dirty_block_bytes(
+        &self,
+        dirty: &std::collections::HashSet<crate::domain::inode::InodeId>,
+    ) -> std::collections::HashMap<crate::domain::inode::InodeId, Vec<u8>> {
+        let mut out = std::collections::HashMap::with_capacity(dirty.len());
+        for path in self.catalog.list_paths() {
+            let Some(inode) = self.catalog.get(&path) else {
+                continue;
+            };
+            if !dirty.contains(&inode.id) {
+                continue;
+            }
+            if let Some(record) = self.blocks.read(inode.id) {
+                out.insert(inode.id, record.bytes);
+            }
+        }
+        out
+    }
+
     /// Returns a map of `InodeId → raw stored bytes` for every inode that has
     /// a block record in the compat device.  Used by code paths (e.g. FUSE) that
     /// need to materialise file content without going through the full read pipeline.
