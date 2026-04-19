@@ -28,21 +28,27 @@ const MAGIC: &[u8; 8] = b"COREFS01";
 const FORMAT_VERSION: u32 = 7;
 /// Alignment of segments within the volume image.
 ///
-/// Phase-2 change: bumped from 64 bytes to 4096 bytes.  With 64-byte
-/// alignment every small growth of a metadata segment (a 200-byte
-/// inode added to AINO, say) shifted the offset of every subsequent
-/// segment, which invalidated the incremental-persist fast path and
-/// forced a full image rewrite on every checkpoint.  At 4096-byte
-/// alignment a typical mutation grows a metadata segment by less than
-/// one alignment unit, so segment offsets stay stable for ~10–20
-/// consecutive checkpoints — long enough for the per-segment
-/// prefix-suffix write path to dominate.
+/// Phase-2 bumped from 64 to 4096 bytes.  Phase-3 bumps again to 64 KiB
+/// because 4 KiB still shifted the DATA segment on every fsync under
+/// workloads that grow per-file metadata rapidly (versioning keeps
+/// the full pre-write content for every mutation, so the VERS
+/// segment grows by the file size on each write — 4 KiB per create
+/// in the fsync bench, which is exactly a 4 KiB slot and therefore
+/// shifts every iteration).  At 64 KiB alignment a typical
+/// write-heavy workload stays on the same segment layout for an
+/// order of magnitude more checkpoints, and DATA — the only segment
+/// whose rewrite is expensive — keeps a stable offset far longer.
+///
+/// Space overhead: worst case ≈ `SEGMENT_ALIGNMENT × segment_count`
+/// of zero-padded tail per image, i.e. ~1 MiB for the current 15
+/// segments.  Compared to the typical DATA segment (MiB-to-GiB range)
+/// this is negligible.
 ///
 /// The on-disk format is unchanged: the superblock carries the
 /// alignment value, directory entries carry explicit offsets, and
 /// readers accept any power-of-two alignment.  Old images (written
-/// with the 64-byte constant) continue to load.
-const SEGMENT_ALIGNMENT: usize = 4096;
+/// with 64 or 4096 alignment) continue to load.
+const SEGMENT_ALIGNMENT: usize = 64 * 1024;
 const SEGMENT_ENTRY_SIZE: usize = 24;
 const HEADER_SIZE: usize = 16;
 const SUPERBLOCK_SIZE: usize = 56;
@@ -2312,8 +2318,21 @@ struct BuiltImage {
     segments: Vec<SegmentPayload>,
     /// Final byte offsets and lengths for each segment.
     entries: Vec<SegmentEntry>,
-    /// Complete image as contiguous bytes, padded to sector size.
-    bytes: Vec<u8>,
+    /// Padded image size in bytes.  Also the target device length.
+    padded_size: usize,
+    /// Full image bytes — only materialised when we are going to take
+    /// the `write_full_image` path (no cache yet, or first mount).  The
+    /// incremental persist path reuses `segments` + the freshly-built
+    /// header (see [`build_image_header_bytes`]) directly and does not
+    /// touch this field, which saves a 128 MiB-class allocation + copy
+    /// on every fsync of a large volume.
+    bytes: Option<Vec<u8>>,
+    /// Header region (magic + format version + segment count +
+    /// directory entries, padded to the first segment's offset).  The
+    /// incremental persist path writes this to device offset 0 so the
+    /// on-disk directory stays consistent with the new segment
+    /// offsets + lengths.
+    header: Vec<u8>,
     /// Per-inode DATA descriptors (offset + length) from the layout this
     /// build produced.  Captured so `DeviceImageCache` can later hand
     /// them to `split_blocks_partial` for the P3b-b fast path: unchanged
@@ -2497,34 +2516,65 @@ fn build_image_inner(
     segments[0].payload = superblock_bytes.clone();
     segments[1].payload = superblock_bytes;
 
-    let mut bytes = vec![0u8; padded_size];
-    bytes[..8].copy_from_slice(MAGIC);
-    bytes[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
-    bytes[12..16].copy_from_slice(&(segment_count as u32).to_le_bytes());
-    bytes[directory_offset..directory_offset + directory_length].copy_from_slice(&directory_bytes);
-
-    for (entry, segment) in entries.iter().zip(segments.iter()) {
-        let start = entry.offset as usize;
-        let end = start + segment.payload.len();
-        bytes[start..end].copy_from_slice(&segment.payload);
+    // Header: magic + format version + segment count + directory
+    // entries.  The first segment's offset is the upper bound of this
+    // region (we pad with zeros up to that offset).
+    let header_len = entries
+        .first()
+        .map(|e| e.offset as usize)
+        .unwrap_or(directory_offset + directory_length);
+    let mut header = vec![0u8; header_len];
+    header[..8].copy_from_slice(MAGIC);
+    header[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    header[12..16].copy_from_slice(&(segment_count as u32).to_le_bytes());
+    if directory_offset + directory_length <= header.len() {
+        header[directory_offset..directory_offset + directory_length]
+            .copy_from_slice(&directory_bytes);
     }
 
+    // The full-image `bytes` buffer is only needed when the persist
+    // path is going to call `write_full_image`.  Callers that go
+    // through `persist_built_image_incremental` ignore this field,
+    // so we defer its materialisation via
+    // `BuiltImage::materialise_full_bytes` at `write_full_image` time.
     Ok(BuiltImage {
         segments,
         entries,
-        bytes,
+        padded_size,
+        bytes: None,
+        header,
         block_descriptors: descriptors,
     })
 }
 
+impl BuiltImage {
+    /// Lazily materialise `bytes` — only needed for the full-image
+    /// write path.  Incremental persists avoid this altogether.
+    fn materialise_full_bytes(&mut self) {
+        if self.bytes.is_some() {
+            return;
+        }
+        let mut bytes = vec![0u8; self.padded_size];
+        bytes[..self.header.len()].copy_from_slice(&self.header);
+        for (entry, segment) in self.entries.iter().zip(self.segments.iter()) {
+            let start = entry.offset as usize;
+            let end = start + segment.payload.len();
+            bytes[start..end].copy_from_slice(&segment.payload);
+        }
+        self.bytes = Some(bytes);
+    }
+}
+
 /// Writes a fully built image to the device sector-by-sector and syncs.
-fn write_full_image(device: &mut dyn BlockDevice, built: &BuiltImage) -> CoreFsResult<()> {
+fn write_full_image(device: &mut dyn BlockDevice, built: &mut BuiltImage) -> CoreFsResult<()> {
+    built.materialise_full_bytes();
+    let full_bytes = built.bytes.as_ref().expect("materialised above");
     let sector_size = device.sector_size() as usize;
-    let padded_size = built.bytes.len();
+    let padded_size = full_bytes.len();
     let mut write_offset = 0u64;
     while write_offset < padded_size as u64 {
         let chunk_end = (write_offset as usize + sector_size).min(padded_size);
-        device.write_at(write_offset, &built.bytes[write_offset as usize..chunk_end])?;
+        device.write_at(write_offset, &full_bytes[write_offset as usize..chunk_end])?;
         write_offset = chunk_end as u64;
     }
     device.sync()?;
@@ -2537,8 +2587,8 @@ fn write_full_image(device: &mut dyn BlockDevice, built: &BuiltImage) -> CoreFsR
 /// path), then written sector-aligned to the device.  The device must be
 /// large enough to hold the entire image.
 pub fn save_to_device(device: &mut dyn BlockDevice, state: &PersistedState) -> CoreFsResult<()> {
-    let built = build_image(state, device.sector_size() as usize, device.capacity())?;
-    write_full_image(device, &built)
+    let mut built = build_image(state, device.sector_size() as usize, device.capacity())?;
+    write_full_image(device, &mut built)
 }
 
 /// Like [`save_to_device`] but includes file bytes in the DATA segment.
@@ -2547,8 +2597,8 @@ pub fn save_to_device_with_bytes(
     state: &PersistedState,
     block_bytes: &HashMap<InodeId, Vec<u8>>,
 ) -> CoreFsResult<()> {
-    let built = build_image_with_bytes(state, device.sector_size() as usize, device.capacity(), block_bytes)?;
-    write_full_image(device, &built)
+    let mut built = build_image_with_bytes(state, device.sector_size() as usize, device.capacity(), block_bytes)?;
+    write_full_image(device, &mut built)
 }
 
 /// Like [`load_from_device`] but also returns the raw bytes for each
@@ -2712,7 +2762,7 @@ where
         if let Some(built) =
             build_image_with_partial(state, sector_size, upper_bound, dirty_bytes, cache_ref)?
         {
-            let needed = built.bytes.len() as u64;
+            let needed = built.padded_size as u64;
             if needed > device.capacity() {
                 grow(device, needed)?;
             }
@@ -2754,7 +2804,7 @@ where
     let upper_bound = device.capacity().max(1 << 32);
     let built = build_image_with_bytes(state, sector_size, upper_bound, block_bytes)?;
 
-    let needed = built.bytes.len() as u64;
+    let needed = built.padded_size as u64;
     if needed > device.capacity() {
         grow(device, needed)?;
     }
@@ -2782,7 +2832,7 @@ pub fn persist_to_device_incremental(
 
 fn persist_built_image_incremental(
     device: &mut dyn BlockDevice,
-    built: BuiltImage,
+    mut built: BuiltImage,
     cache: &mut Option<DeviceImageCache>,
 ) -> CoreFsResult<PersistReport> {
 
@@ -2803,12 +2853,18 @@ fn persist_built_image_incremental(
     let can_incremental = cache.is_some();
 
     if !can_incremental {
-        write_full_image(device, &built)?;
+        write_full_image(device, &mut built)?;
+        let bytes_written = built
+            .bytes
+            .as_ref()
+            .map(|b| b.len() as u64)
+            .unwrap_or(built.padded_size as u64);
+        let segments_written = built.segments.len();
         *cache = Some(DeviceImageCache::from_built(&built));
         return Ok(PersistReport {
             incremental: false,
-            segments_written: built.segments.len(),
-            bytes_written: built.bytes.len() as u64,
+            segments_written,
+            bytes_written,
         });
     }
 
@@ -2826,13 +2882,9 @@ fn persist_built_image_incremental(
     // The superblock itself lives inside the SUPR segment and is
     // refreshed by the segment loop below (SUPR always changes because
     // of the generation counter).
-    if let Some(first_entry) = built.entries.first() {
-        let header_end = first_entry.offset as usize;
-        if header_end > 0 && header_end <= built.bytes.len() {
-            let header_slice = &built.bytes[..header_end];
-            write_segment_rmw(device, 0, header_slice, sector_size)?;
-            bytes_written += header_slice.len() as u64;
-        }
+    if !built.header.is_empty() {
+        write_segment_rmw(device, 0, &built.header, sector_size)?;
+        bytes_written += built.header.len() as u64;
     }
 
     for (segment, entry) in built.segments.iter().zip(built.entries.iter()) {
@@ -2873,6 +2925,61 @@ fn persist_built_image_incremental(
         // Requires offset equality: if the segment shifted, the old
         // prefix bytes live at the *old* on-disk location and we
         // cannot skip writing them at the new location.
+        let _offset_match = cached_offset == entry.offset;
+        let _prefix_match = new_len > cached_len && segment.payload.starts_with(cached_bytes);
+        // Phase-3 append-only fast path: every segment produced by
+        // `serialize_bytes_segment` / `encode_segment_frame` carries a
+        // 24-byte frame header (kind + reserved + payload_length +
+        // checksum) followed by the payload bytes.  For an append-only
+        // growth the header always differs (the length field changes,
+        // and for content-derived segments the checksum too), but the
+        // payload *body* is a true prefix of the new body.  Detect
+        // that case and write:
+        //   - the 24-byte header at `offset`
+        //   - the appended body suffix at `offset + 24 + cached_body_len`
+        // skipping the big unchanged body in between.
+        //
+        // This is the optimisation that makes fsync-warm scale on a
+        // volume with a large, mostly-unchanged DATA segment: we avoid
+        // pushing the entire 128 MiB body back to disk just because
+        // the length field in the frame header grew by a few bytes.
+        let offset_ok = cached_offset == entry.offset;
+        let both_have_frame = cached_len >= SEGMENT_FRAME_SIZE
+            && new_len >= SEGMENT_FRAME_SIZE
+            && new_len > cached_len;
+        let body_prefix_ok = both_have_frame
+            && segment.payload[SEGMENT_FRAME_SIZE..cached_len]
+                == cached_bytes[SEGMENT_FRAME_SIZE..cached_len];
+        if offset_ok && both_have_frame && body_prefix_ok {
+            // Write the new frame header in place.
+            write_segment_rmw(
+                device,
+                entry.offset,
+                &segment.payload[..SEGMENT_FRAME_SIZE],
+                sector_size,
+            )?;
+            // Write only the appended body suffix.
+            let suffix_start = cached_len;
+            let suffix = &segment.payload[suffix_start..];
+            let suffix_offset = entry
+                .offset
+                .checked_add(suffix_start as u64)
+                .ok_or_else(|| CoreFsError::State("segment suffix offset overflow".to_string()))?;
+            write_segment_rmw(device, suffix_offset, suffix, sector_size)?;
+            if let Some(entry_mut) = cache_ref.segments.get_mut(&segment.kind) {
+                entry_mut.0 = entry.offset;
+                entry_mut.1 = segment.payload.clone();
+            }
+            segments_written += 1;
+            // Frame header (24 B) + appended suffix bytes.
+            bytes_written += (SEGMENT_FRAME_SIZE + suffix.len()) as u64;
+            continue;
+        }
+
+        // Legacy whole-prefix match — still used for raw segments
+        // (SUPR/SUP2) and for segments where the frame carve-out
+        // happens to disagree, e.g. if cache was populated by a
+        // different code path.
         if cached_offset == entry.offset
             && new_len > cached_len
             && segment.payload.starts_with(cached_bytes)

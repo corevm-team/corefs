@@ -25,12 +25,12 @@ const MAGIC: &[u8; 8] = b"COREFS01";
 const FORMAT_VERSION: u32 = 7;
 const HEADER_SIZE: usize = 16;
 const SEGMENT_ENTRY_SIZE: usize = 24;
-/// Matches [`crate::storage::volume_image::SEGMENT_ALIGNMENT`] since
-/// Phase 2 — see the comment there for the rationale.  Volume images
-/// are now written with 4 KiB-aligned segments, and `image_end`
-/// computations in this module must round up to the same boundary or
-/// the journal region could overlap the image tail.
-const SEGMENT_ALIGNMENT: usize = 4096;
+/// Matches [`crate::storage::volume_image::SEGMENT_ALIGNMENT`].
+/// Phase 3 bumped this to 64 KiB to absorb metadata-segment growth
+/// (VERS grows by a file's worth of bytes per write) without
+/// shifting the DATA segment's on-disk offset; see volume_image.rs
+/// for the rationale.
+const SEGMENT_ALIGNMENT: usize = 64 * 1024;
 const SUPERBLOCK_SIZE: usize = 56;
 
 /// Size of the reserved device-journal region in bytes.

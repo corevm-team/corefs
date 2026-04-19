@@ -977,8 +977,21 @@ impl CoreFsFuseMountRw {
                     *device = Some(FileImageDevice::open(path_ref, false)?);
                 }
                 let dev = device.as_mut().expect("device opened just above");
+                let _trace = std::env::var("COREFS_PERF_TRACE").is_ok();
+                let _t0 = std::time::Instant::now();
                 let state = self.service.persisted_state();
+                let _t_state = _t0.elapsed();
+                let _t1 = std::time::Instant::now();
                 let block_bytes = self.service.read_all_block_bytes();
+                let _t_bytes = _t1.elapsed();
+                if _trace {
+                    let total: usize = block_bytes.values().map(|v| v.len()).sum();
+                    eprintln!(
+                        "[fsync] state={:?} read_all_bytes={:?} inodes={} total={} KiB",
+                        _t_state, _t_bytes, block_bytes.len(), total / 1024
+                    );
+                }
+                let _t_persist = std::time::Instant::now();
 
                 // Phase 1e/1f status: the `*_partial_*` entry point
                 // and the dirty-inode tracking it depends on are
@@ -1010,12 +1023,11 @@ impl CoreFsFuseMountRw {
                             dev.resize(aligned)
                         },
                     )?;
+                if _trace {
+                    eprintln!("[fsync] persist_device={:?} report={:?}", _t_persist.elapsed(), _report);
+                }
 
-                // Drain the dirty set every checkpoint so future
-                // wake-ups for the partial path (once it is faster
-                // than the full path) start from a clean slate.
                 let _ = self.service.take_dirty_inodes();
-
                 Ok(())
             }
             FuseBacking::Device { device, cache } => {
