@@ -226,3 +226,69 @@ erst nach P2/P3 sinnvoll.
   - `COREFS_BIN`, `WORK`, `FILES`, `PAYLOAD`, `SEQ_MIB`, `FSYNC_N`,
     `RAND_MIB`, `RAND_OPS`, `IMG_SIZE_MIB`, `THREADS`, `STEP_TIMEOUT`
 
+---
+
+## Phase 1b — 2026-04-19 (P2: echte Append-API im BlockStore)
+
+Umgesetzt:
+
+- **P2 — Fast-Path in `BlockStore::append_to_inode`** — für plain (nicht
+  komprimierte/verschlüsselte) Records wird jetzt ein **neuer Extent**
+  an `BlockRecord.extents` angehängt.  Bisheriger Read-Modify-Write
+  (existing + extra zusammenkopieren und das Ganze neu schreiben) wird
+  nur noch für Records mit `flags != 0` benutzt — die Crypto-/Compress-
+  Pipeline per-Extent ist Folge-Arbeit.  CRC32C wird inkrementell
+  weitergeführt (die vorhandene `Crc32c::update(seed, data)`-API
+  unterstützt das nativ).
+- **Append-Log-Micro-Bench** im `corefs-benchmark-vs-ext4.sh` ergänzt,
+  weil der bestehende 128-MiB-seq-write-Workload den P2-Pfad nur einmal
+  trifft und die Verbesserung untergeht.  Der neue Workload
+  `append_log_2000x1KiB` schreibt 2000 × 1 KiB in dieselbe Datei —
+  genau das Muster, das pre-P2 quadratisch skalierte.
+- **Noise-Floor** im Compare-Script: Workloads < 10 ms werden nach
+  absoluter ms-Differenz (> 3 ms) klassifiziert, nicht prozentual.  Das
+  hatte vorher zu Falsch-Regressions bei `stat_ls_200` (4 → 5 ms =
+  –25 %) geführt.
+- **Baseline `perf-history/baseline.tsv` promotet auf p2-Stand
+  (2026-04-19)**.  Drei Back-to-back-Läufe bestätigen Stabilität der
+  meisten Workloads; `fsync_50x4096B` zeigt nachweisbaren Run-to-Run-Jitter
+  (2 – 4 ops/s mit gelegentlichen Ausreissern nach unten unter System-
+  Last).  Das kommt daher, dass jeder fsync aktuell das ganze Image-File
+  neu schreibt; Disk-I/O-Scheduling auf dem Host-ext4 dominiert dann.
+  Saubere Behebung erst mit P3 (incremental save + group-commit).
+
+### Ergebnisse nach Phase 1b
+
+Zahlen aus `perf-history/2026-04-19_072652_p2-run2.tsv`, gleicher NVMe,
+gleicher Host.
+
+| Workload                    | Phase 1 (vor P2) | Phase 1b (nach P2) | ext4 | CoreFS/ext4 | Anmerkung |
+|-----------------------------|-----------------:|-------------------:|-----:|------------:|-----------|
+| create 200 × 4 KiB          |        2631 ops/s|          2127 ops/s| 5555 |       2.6×  | stabil im Band |
+| read 200 × 4 KiB            |        3333 ops/s|          4081 ops/s| 6060 |       1.5×  | +22 % |
+| stat (ls -la) 200           |            4 ms  |              5 ms  |   5 ms|     parity  | noise-floor |
+| seq write 128 MiB           |         76 MiB/s |          67 MiB/s  |   659 MiB/s|  9.8× | P3-gebunden |
+| seq read 128 MiB            |       1438 MiB/s |        1075 MiB/s  |  5333 MiB/s|  4.9× | Jitter |
+| fsync 50 × 4 KiB            |          2 ops/s |           4 ops/s  |   416 ops/s |104×  | P3-gebunden |
+| rand 4K 70r/30w, 500 ops    |         556 ops/s|          627 ops/s |  14285 ops/s| 23× | +13 % |
+| delete 200 × 4 KiB          |           47 ms  |            26 ms   |    14 ms  |     1.9× | besser |
+| **append_log 2000 × 1 KiB** |  (nicht gemessen) | **5524 ops/s**     | 54054 ops/s|    9.8× | **neu, P2-spezifisch** |
+
+Der `append_log`-Workload ist der direkte P2-Test und zeigt den
+Unterschied klar: ohne die neue Fast-Path wäre jeder der 2000 Appends
+O(file_size)-Read-Modify-Write, also quadratisch über den Loop
+(~2 GiB RAM-Traffic).  Mit P2 bleibt jeder Append O(append_size).
+
+### Was P2 NICHT gefixt hat
+
+- **seq_write 128 MiB** — dominiert vom Full-Image-Save am Abschluss-
+  `fsync`.  P2 spart nur eine interne Kopie beim zweiten Streaming-Flush,
+  aber ext4 bleibt 10× voraus.  Das ist Phase-2-P3 (incremental save).
+- **fsync-heavy** — jeder Einzel-fsync rewriteet das ganze Image, egal
+  wie wenig geändert wurde.  Phase-2-P3.
+- **Multi-Extent-Dedup** — nach einem Append schreibt das Update den
+  alten Dedup-Eintrag zurück, setzt aber keinen neuen für den
+  kombinierten Content-CRC.  Künftige identische Writes dedupen nicht
+  gegen Multi-Extent-Records.  Akzeptabel — echte Multi-Extent-Dedup ist
+  Scope P2b, nicht Phase-1.
+
