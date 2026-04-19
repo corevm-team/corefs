@@ -211,12 +211,12 @@ pub fn save_state_native(
     let mut deleted_slots = 0usize;
     for inode in &state.active_inodes {
         let rec = records_by_inode.get(&inode.id).copied();
-        write_inode_from_record(device, &mut alloc, &geom, inode, rec, false)?;
+        let _ = write_inode_from_record(device, &mut alloc, &geom, inode, rec, false)?;
         active_slots += 1;
     }
     for inode in &state.deleted_inodes {
         let rec = records_by_inode.get(&inode.id).copied();
-        write_inode_from_record(device, &mut alloc, &geom, inode, rec, true)?;
+        let _ = write_inode_from_record(device, &mut alloc, &geom, inode, rec, true)?;
         deleted_slots += 1;
     }
 
@@ -328,7 +328,7 @@ pub fn load_state_native(device: &dyn BlockDevice) -> CoreFsResult<PersistedStat
         // Reconstruct a BlockRecord (metadata-only) from on-disk extents.
         // Data remains on the device — no bytes loaded into RAM.
         if on_disk.size_bytes > 0 || !on_disk.extents.is_empty() {
-            use crate::storage::block_store::{ExtentRef, EXTENT_COMPRESSED, EXTENT_ENCRYPTED};
+            use crate::storage::block_store::{EXTENT_COMPRESSED, EXTENT_ENCRYPTED, ExtentRef};
             let extent_refs: Vec<ExtentRef> = on_disk
                 .extents
                 .iter()
@@ -399,6 +399,57 @@ pub struct IncrementalSaveReport {
     pub fell_back_to_full_save: bool,
 }
 
+/// Mapping from a domain inode ID to its native on-disk inode slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InodeSlotMapping {
+    /// Domain-level inode ID stored in the on-disk inode.
+    pub inode: InodeId,
+    /// Native inode-table slot containing that domain inode.
+    pub slot: u64,
+}
+
+/// Dirty incremental save report including slot-index maintenance data.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DirtyIncrementalSaveReport {
+    /// Traditional incremental save counters and resulting generation.
+    pub incremental: IncrementalSaveReport,
+    /// Slots assigned or confirmed for dirty inodes written by this save.
+    pub assigned_slots: Vec<InodeSlotMapping>,
+    /// Slots released for hard-removed inodes.
+    pub removed_slots: Vec<InodeSlotMapping>,
+}
+
+/// Build a mount-time domain-inode to native-slot index.
+pub fn load_native_inode_slot_index(
+    device: &dyn BlockDevice,
+) -> CoreFsResult<Vec<InodeSlotMapping>> {
+    let sb = super::volume::read_sb_with_fallbacks(device)?;
+    if sb.layout_mode != LAYOUT_MODE_NATIVE {
+        return Ok(Vec::new());
+    }
+    let geom = sb.geometry();
+    let ibm_bytes = device.read_at(
+        geom.inode_bitmap_start * BLOCK_SIZE,
+        geom.inode_bitmap_blocks * BLOCK_SIZE,
+    )?;
+    let ibm = Bitmap::from_bytes(ibm_bytes, geom.inode_count)?;
+    let mut out = Vec::new();
+    for slot in FIRST_USER_INODE_SLOT..geom.inode_count {
+        if !ibm.is_set(slot)? {
+            continue;
+        }
+        let on_disk = read_inode_at_slot(device, &geom, slot)?;
+        if on_disk.kind == OnDiskKind::Unused {
+            continue;
+        }
+        out.push(InodeSlotMapping {
+            inode: InodeId(on_disk.domain_inode_id),
+            slot,
+        });
+    }
+    Ok(out)
+}
+
 /// Persist `state` by rewriting only the inode slots whose content or
 /// deletion status has changed since the last save.
 ///
@@ -453,8 +504,7 @@ pub fn save_state_native_incremental(
         slot: u64,
         on_disk: OnDiskInode,
     }
-    let mut existing: HashMap<u64, ExistingSlot> =
-        HashMap::new();
+    let mut existing: HashMap<u64, ExistingSlot> = HashMap::new();
     for slot in FIRST_USER_INODE_SLOT..geom.inode_count {
         if !ibm.is_set(slot)? {
             continue;
@@ -551,7 +601,7 @@ pub fn save_state_native_incremental(
             report.updated += 1;
         } else {
             // CREATE: take a fresh slot.
-            write_inode_from_record(
+            let _ = write_inode_from_record(
                 device,
                 &mut alloc,
                 &geom,
@@ -611,24 +661,49 @@ pub fn save_state_native_incremental_dirty(
     dirty_inode_ids: &[InodeId],
     removed_inode_ids: &[InodeId],
 ) -> CoreFsResult<IncrementalSaveReport> {
+    save_state_native_incremental_dirty_with_slots(
+        device,
+        state,
+        dirty_inode_ids,
+        removed_inode_ids,
+        &[],
+    )
+    .map(|report| report.incremental)
+}
+
+/// Persist only a known set of changed inodes using caller-provided slot hints.
+pub fn save_state_native_incremental_dirty_with_slots(
+    device: &mut dyn BlockDevice,
+    state: &PersistedState,
+    dirty_inode_ids: &[InodeId],
+    removed_inode_ids: &[InodeId],
+    slot_hints: &[InodeSlotMapping],
+) -> CoreFsResult<DirtyIncrementalSaveReport> {
     if dirty_inode_ids.is_empty() && removed_inode_ids.is_empty() {
         let sb = super::volume::read_sb_with_fallbacks(device)?;
-        return Ok(IncrementalSaveReport {
-            generation: sb.generation,
-            ..IncrementalSaveReport::default()
+        return Ok(DirtyIncrementalSaveReport {
+            incremental: IncrementalSaveReport {
+                generation: sb.generation,
+                ..IncrementalSaveReport::default()
+            },
+            ..DirtyIncrementalSaveReport::default()
         });
     }
 
     let sb = super::volume::read_sb_with_fallbacks(device)?;
     if sb.layout_mode != LAYOUT_MODE_NATIVE {
         let r = save_state_native(device, state)?;
-        return Ok(IncrementalSaveReport {
-            generation: r.generation,
-            created: r.active_slots + r.deleted_slots,
-            updated: 0,
-            removed: 0,
-            unchanged: 0,
-            fell_back_to_full_save: true,
+        return Ok(DirtyIncrementalSaveReport {
+            incremental: IncrementalSaveReport {
+                generation: r.generation,
+                created: r.active_slots + r.deleted_slots,
+                updated: 0,
+                removed: 0,
+                unchanged: 0,
+                fell_back_to_full_save: true,
+            },
+            assigned_slots: load_native_inode_slot_index(device)?,
+            removed_slots: Vec::new(),
         });
     }
     let geom = sb.geometry();
@@ -659,6 +734,28 @@ pub fn save_state_native_incremental_dirty(
     }
 
     let mut existing: HashMap<u64, ExistingSlot> = HashMap::new();
+    for hint in slot_hints {
+        if !targets.contains_key(&hint.inode.0) {
+            continue;
+        }
+        if hint.slot < FIRST_USER_INODE_SLOT || hint.slot >= geom.inode_count {
+            continue;
+        }
+        if !ibm.is_set(hint.slot)? {
+            continue;
+        }
+        let on_disk = read_inode_at_slot(device, &geom, hint.slot)?;
+        if on_disk.kind == OnDiskKind::Unused || on_disk.domain_inode_id != hint.inode.0 {
+            continue;
+        }
+        existing.insert(
+            hint.inode.0,
+            ExistingSlot {
+                slot: hint.slot,
+                on_disk,
+            },
+        );
+    }
     for slot in FIRST_USER_INODE_SLOT..geom.inode_count {
         if existing.len() >= targets.len() {
             break;
@@ -668,6 +765,9 @@ pub fn save_state_native_incremental_dirty(
         }
         let on_disk = read_inode_at_slot(device, &geom, slot)?;
         if on_disk.kind == OnDiskKind::Unused {
+            continue;
+        }
+        if existing.contains_key(&on_disk.domain_inode_id) {
             continue;
         }
         if targets.contains_key(&on_disk.domain_inode_id) {
@@ -733,6 +833,8 @@ pub fn save_state_native_incremental_dirty(
     }
 
     let mut report = IncrementalSaveReport::default();
+    let mut assigned_slots: Vec<InodeSlotMapping> = Vec::new();
+    let mut removed_slots: Vec<InodeSlotMapping> = Vec::new();
 
     for id in removed_inode_ids {
         if desired.contains_key(&id.0) {
@@ -741,6 +843,10 @@ pub fn save_state_native_incremental_dirty(
         if let Some(cur) = existing.get(&id.0) {
             release_slot(device, &mut alloc, &geom, cur.slot, &cur.on_disk)?;
             report.removed += 1;
+            removed_slots.push(InodeSlotMapping {
+                inode: *id,
+                slot: cur.slot,
+            });
         }
     }
 
@@ -760,8 +866,12 @@ pub fn save_state_native_incremental_dirty(
                 want.deleted,
             )?;
             report.updated += 1;
+            assigned_slots.push(InodeSlotMapping {
+                inode: *id,
+                slot: cur.slot,
+            });
         } else {
-            write_inode_from_record(
+            let slot = write_inode_from_record(
                 device,
                 &mut alloc,
                 &geom,
@@ -770,6 +880,7 @@ pub fn save_state_native_incremental_dirty(
                 want.deleted,
             )?;
             report.created += 1;
+            assigned_slots.push(InodeSlotMapping { inode: *id, slot });
         }
     }
 
@@ -803,7 +914,11 @@ pub fn save_state_native_incremental_dirty(
     device.sync()?;
 
     report.generation = sb.generation;
-    Ok(report)
+    Ok(DirtyIncrementalSaveReport {
+        incremental: report,
+        assigned_slots,
+        removed_slots,
+    })
 }
 
 fn free_inode_payload(alloc: &mut OndiskAllocator, on_disk: &OnDiskInode) -> CoreFsResult<()> {
@@ -978,7 +1093,13 @@ fn write_inode_record_from_record_at(
     let (on_disk_extents, _index_block_addr, size_bytes, data_crc, blocks_alloc) =
         if let Some(rec) = rec {
             if rec.extents.is_empty() {
-                (Vec::new(), 0u64, rec.logical_size, rec.content_crc as u64, 0u64)
+                (
+                    Vec::new(),
+                    0u64,
+                    rec.logical_size,
+                    rec.content_crc as u64,
+                    0u64,
+                )
             } else {
                 let mut on_disk_extents: Vec<Extent> = Vec::new();
                 let mut total_blocks = 0u64;
@@ -997,7 +1118,13 @@ fn write_inode_record_from_record_at(
                 if on_disk_extents.len() > super::inode::MAX_INLINE_EXTENTS {
                     on_disk_extents.truncate(super::inode::MAX_INLINE_EXTENTS);
                 }
-                (on_disk_extents, 0u64, rec.logical_size, rec.content_crc as u64, total_blocks)
+                (
+                    on_disk_extents,
+                    0u64,
+                    rec.logical_size,
+                    rec.content_crc as u64,
+                    total_blocks,
+                )
             }
         } else {
             (Vec::new(), 0u64, 0u64, 0u64, 0u64)
@@ -1178,13 +1305,20 @@ fn write_inode_from_record(
     inode: &Inode,
     rec: Option<&crate::storage::block_store::BlockRecord>,
     deleted: bool,
-) -> CoreFsResult<()> {
+) -> CoreFsResult<u64> {
     // If the record has populated extents (data already on device), use them.
     // Otherwise fall back to allocate_and_write_content with empty content.
     let (on_disk_extents, index_block_addr, flags_has_index, size_bytes, data_crc, blocks_alloc) =
         if let Some(rec) = rec {
             if rec.extents.is_empty() {
-                (Vec::new(), 0u64, false, rec.logical_size, rec.content_crc as u64, 0u64)
+                (
+                    Vec::new(),
+                    0u64,
+                    false,
+                    rec.logical_size,
+                    rec.content_crc as u64,
+                    0u64,
+                )
             } else {
                 // Map ExtentRef → Extent and mark blocks used in the allocator.
                 let mut on_disk_extents: Vec<Extent> = Vec::new();
@@ -1205,7 +1339,14 @@ fn write_inode_from_record(
                 if on_disk_extents.len() > super::inode::MAX_INLINE_EXTENTS {
                     on_disk_extents.truncate(super::inode::MAX_INLINE_EXTENTS);
                 }
-                (on_disk_extents, 0u64, false, rec.logical_size, rec.content_crc as u64, total_blocks)
+                (
+                    on_disk_extents,
+                    0u64,
+                    false,
+                    rec.logical_size,
+                    rec.content_crc as u64,
+                    total_blocks,
+                )
             }
         } else {
             (Vec::new(), 0u64, false, 0u64, 0u64, 0u64)
@@ -1261,13 +1402,18 @@ fn write_inode_from_record(
         changed_at: systime_to_secs(inode.changed_at),
         accessed_at: systime_to_secs(inode.accessed_at),
         generation: 1,
-        extents: if flags_has_index { Vec::new() } else { on_disk_extents },
+        extents: if flags_has_index {
+            Vec::new()
+        } else {
+            on_disk_extents
+        },
         index_block_addr,
         xattr_block_addr: attr_block_addr,
         domain_inode_id: inode.id.0,
         data_crc,
     };
-    write_inode_at_slot(device, geom, slot, &on_disk)
+    write_inode_at_slot(device, geom, slot, &on_disk)?;
+    Ok(slot)
 }
 
 /// Allocate extents for `content` and write the bytes.  Returns (inline

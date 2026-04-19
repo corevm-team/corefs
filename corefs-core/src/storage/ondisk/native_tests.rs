@@ -13,6 +13,7 @@ use crate::storage::block_store::{AllocatorPolicy, BlockRecord, BlockStore};
 use crate::storage::ondisk::layout::BLOCK_SIZE;
 use crate::storage::ondisk::volume::{FormatOptions, format_device};
 use crate::storage::persisted_state::PersistedState;
+use alloc::string::ToString;
 
 fn fresh_device(blocks: u64) -> MemoryDevice {
     MemoryDevice::new(blocks * BLOCK_SIZE, 4096).unwrap()
@@ -456,6 +457,44 @@ fn dirty_incremental_persists_metadata_only_update() {
     assert_eq!(loaded.active_inodes.len(), 1);
     assert_eq!(loaded.active_inodes[0].path, "/renamed");
     assert_eq!(loaded.active_inodes[0].metadata.mode, 0o600);
+}
+
+#[test]
+fn dirty_incremental_uses_and_reports_slot_hints() {
+    let mut dev = fresh_device(4096);
+    format_device(&mut dev, &default_options()).unwrap();
+    let mut state = empty_state();
+    state
+        .active_inodes
+        .push(sample_inode(1, "/f1", InodeKind::File, 0));
+    save_state_native(&mut dev, &state).unwrap();
+
+    let slot_index = load_native_inode_slot_index(&dev).unwrap();
+    assert_eq!(slot_index.len(), 1);
+    assert_eq!(slot_index[0].inode, InodeId(1));
+
+    state.active_inodes[0].metadata.mode = 0o600;
+    state.active_inodes[0].touch_changed_at(Timestamp::EPOCH);
+    let report = save_state_native_incremental_dirty_with_slots(
+        &mut dev,
+        &state,
+        &[InodeId(1)],
+        &[],
+        &slot_index,
+    )
+    .unwrap();
+    assert_eq!(report.incremental.updated, 1);
+    assert_eq!(
+        report.assigned_slots,
+        alloc::vec![InodeSlotMapping {
+            inode: InodeId(1),
+            slot: slot_index[0].slot,
+        }]
+    );
+    assert!(report.removed_slots.is_empty());
+
+    let reloaded_index = load_native_inode_slot_index(&dev).unwrap();
+    assert_eq!(reloaded_index, slot_index);
 }
 
 #[test]
