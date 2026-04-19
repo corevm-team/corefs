@@ -203,6 +203,26 @@ os.fsync(fd); os.close(fd)
   local rm_ms=$(( (t1-t0)/1000000 ))
   record "$fs" "delete_${FILES}_small" "$rm_ms" "-"
 
+  # W9b large-directory stress: create many empty files in one dir.
+  # Pre-Phase-3c the FUSE mount sorted every directory's child list
+  # on every create (O(N²) over N files in a single dir).  The fix
+  # replaces the Vec<String> + sort+dedup with a BTreeSet<String>,
+  # turning create/unlink into O(log m) per op.  This workload shows
+  # the before/after: 5000 empty files in one dir exercises the
+  # large-m path directly.
+  mkdir -p "$dir/bigdir"
+  t0=$(date +%s%N)
+  timeout "$STEP_TIMEOUT" python3 -c "
+import os
+for i in range(5000):
+    open('$dir/bigdir/f'+str(i), 'wb').close()
+" || true
+  t1=$(date +%s%N)
+  local bigdir_ms=$(( (t1-t0)/1000000 ))
+  record "$fs" "bigdir_create_5000" "$bigdir_ms" \
+    "$(( 5000 * 1000 / (bigdir_ms>0?bigdir_ms:1) )) ops/s"
+  rm -rf "$dir/bigdir"
+
   # W9 append-heavy (log-style): many small appends to the same file.
   # Exercises the fast-path in BlockStore::append_to_inode — pre-P2 this
   # was O(existing_bytes) per call (quadratic over the whole loop), so
