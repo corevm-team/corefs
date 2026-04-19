@@ -113,6 +113,27 @@ for i in range($FILES):
   local stat_ms=$(( (t1-t0)/1000000 ))
   record "$fs" "stat_ls_${FILES}" "$stat_ms" "-"
 
+  # W3b fsync-heavy on a cold (small) volume.  Runs before seq_write so
+  # the on-disk image is still compact — the P3 incremental-save path
+  # is most visible here because each checkpoint only serializes
+  # metadata + the tiny new block, not a stale 128 MiB DATA segment.
+  mkdir -p "$dir/fsync-cold"
+  t0=$(date +%s%N)
+  timeout "$STEP_TIMEOUT" python3 -c "
+import os
+payload = b'c'*$PAYLOAD
+for i in range($FSYNC_N):
+    fd = os.open('$dir/fsync-cold/f'+str(i), os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o644)
+    os.write(fd, payload)
+    os.fsync(fd)
+    os.close(fd)
+" || true
+  t1=$(date +%s%N)
+  local fsync_cold_ms=$(( (t1-t0)/1000000 ))
+  record "$fs" "fsync_cold_${FSYNC_N}x${PAYLOAD}B" "$fsync_cold_ms" \
+    "$(( FSYNC_N * 1000 / (fsync_cold_ms>0?fsync_cold_ms:1) )) ops/s"
+  rm -rf "$dir/fsync-cold"
+
   # W4 sequential write
   t0=$(date +%s%N)
   timeout "$STEP_TIMEOUT" dd if=/dev/zero of="$dir/seq.bin" \
