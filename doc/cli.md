@@ -1,104 +1,137 @@
 # CLI-Referenz
 
-Alle CLI-Kommandos sind in [src/cli.rs](../src/cli.rs) implementiert. Start immer über `cargo run -- <kommando>` oder über das Binary nach `cargo build --release`:
+Implementation: [src/cli.rs](../src/cli.rs). Start über `cargo run -- <kommando>` oder nach `cargo build --release` über das Binary:
 
 ```bash
 ./target/release/corefs <kommando> [argumente]
 ```
 
+Status: ✅ ~30 Kommandos produktiv. Offene Lücken siehe Ende.
+
 ## Grundoperationen
 
 | Kommando | Argumente | Zweck |
 |---|---|---|
-| `mkfs` | — | Formatiert ein Volume (In-Memory-Modell) |
-| `status` | — | Zeigt Volume-Info, File-Count, Snapshot-Count, Fragmentierung |
+| `mkfs` | — | Formatiert Volume (In-Memory-Modell) |
+| `status` | — | Volume-Info, File-Count, Snapshot-Count, Fragmentierung |
 | `ls` | — | Listet alle Dateipfade |
-| `snapshot [name]` | optional: Name (Default `manual`) | Erstellt einen Snapshot |
-| `scrub` | — | Checksummen-Scrubbing über alle aktiven Blöcke |
+| `scrub` | — | CRC32C-Scrubbing über aktive Blöcke |
 
 ## Dateioperationen
 
 | Kommando | Argumente | Zweck |
 |---|---|---|
-| `write <path> <payload>` | Pfad, Payload-String | Schreibt Datei (neu oder überschreiben) |
-| `read <path>` | Pfad | Gibt Dateiinhalt aus |
-| `delete <path> [--secure]` | Pfad, optional `--secure` | Soft-Delete oder Secure-Delete mit Nulling |
-| `restore <path>` | Pfad | Stellt gelöschte Datei wieder her |
+| `write <path> <payload>` | Pfad, Payload-String | Anlegen oder überschreiben |
+| `read <path>` | Pfad | Inhalt ausgeben (transparent Decrypt/Decompress) |
+| `delete <path> [--secure]` | Pfad, optional `--secure` | Soft-Delete oder Secure-Erase |
+| `restore <path>` | Pfad | Soft-gelöschte Datei wiederherstellen |
+
+## Snapshots & Versionierung
+
+| Kommando | Argumente | Zweck |
+|---|---|---|
+| `snapshot [name]` | opt. Name | Voll-Snapshot |
+| `snapshot-list` | — | Alle Snapshots auflisten |
+| `snapshot-restore <id>` | Snapshot-ID | Restore mit Per-Pfad-Skip-Report |
+| `snapshot-diff <a_id> <b_id>` | zwei IDs | added/removed/modified/unchanged |
+| `snapshot-delete <id>` | ID | Snapshot entfernen |
 
 ## Speicheroptimierung
 
 | Kommando | Argumente | Zweck |
 |---|---|---|
-| `defrag` | — | Defragmentierung auf Live-Instance |
-| `optimize` | — | Combined: Defrag + Heat-Reallocation |
-| `defrag-image <path>` | Image-Pfad | Defragmentierung auf gespeichertem Image |
-| `optimize-image <path>` | Image-Pfad | Combined Optimization auf Image |
+| `defrag` | — | Defragmentierung (live) |
+| `optimize` | — | Defrag + Heat-Reallocation |
+| `dedup` | — | Expliziter Dedup-Pass |
+| `defrag-image <path>` | Image | Offline-Defrag |
+| `optimize-image <path>` | Image | Offline-Optimize |
 
 ## Image-Persistenz
 
 | Kommando | Argumente | Zweck |
 |---|---|---|
-| `save-image <path>` | Image-Pfad | Speichert Volume im mehrsegmentigen Format |
-| `load-image <path>` | Image-Pfad | Lädt Image von Disk, zeigt Stats |
-| `mkfs-image <path> [--demo]` | Image-Pfad, optional `--demo` | Erstellt neues Image (mit Demo-Inhalt, wenn `--demo`) |
-| `fsck-image <path> [--repair]` | Image-Pfad, optional `--repair` | Prüft oder repariert Image (mehrstufig) |
+| `mkfs-image <path> [--demo]` | Image, opt. `--demo` | Neues Image anlegen |
+| `save-image <path>` | Image | Aktuelles Volume speichern |
+| `load-image <path>` | Image | Laden + Recovery, Stats |
+| `fsck-image <path>` | Image | Read-only Integritätscheck |
+| `repair-image <path> [--aggressive]` | Image | Mehrstufige Reparatur |
+| `inspect-image <path>` | Image | Detailliertes Segment-/Superblock-Dump |
 
 ## FUSE-Mount (Linux)
 
 | Kommando | Argumente | Zweck |
 |---|---|---|
-| `mount-image <img> <mnt>` | Image, Mount-Point | Read-only-Mount |
-| `mount-image-rw <img> <mnt>` | Image, Mount-Point | Read-write-Mount mit Writeback |
-| `diagnose-mount <img> <mnt> [--create]` | Image, Mount-Point, optional `--create` | Prüft Mount-Voraussetzungen |
+| `mount-image <img> <mnt>` | Image, Mount | Read-Write-Mount |
+| `mount-image-ro <img> <mnt>` | Image, Mount | Read-Only-Mount |
+| `umount <mnt>` | Mount | Sauberer Unmount |
+| `diagnose-mount <img> <mnt> [--create]` | Image, Mount | Voraussetzungscheck |
 
-Details zu Mount-Modi und Virtual Overlays (Snapshots, Time-Travel) in [fuse-integration.md](fuse-integration.md).
+Overlays (`.snapshots/`, `file@timestamp`) siehe [fuse-integration.md](fuse-integration.md).
 
-## Blockgeräte (Linux)
+## Blockgeräte (Linux, root)
 
 | Kommando | Argumente | Zweck |
 |---|---|---|
-| `probe-device <dev>` | Device-Pfad (z.B. `/dev/sdb1`) | Analysiert Kapazität, Sektorgröße, R/O-Status, Mount-Status |
-| `mkfs-device <dev> [--skip-check]` | Device, opt. `--skip-check` | Formatiert Device; automatischer Fake-Stick-Sanity-Check (außer `--skip-check`) |
+| `probe-device <dev>` | Device | Kapazität / Mount-Status / R/O |
+| `mkfs-device <dev> [--skip-check]` | Device | Formatieren (mit Fake-Stick-Sanity-Check) |
 | `fsck-device <dev>` | Device | Read-only-Prüfung |
-| `mount-device-rw <dev> <mnt>` | Device, Mount-Point | FUSE-Mount direkt vom Blockgerät |
-| `verify-device <dev> --destructive [--chunks N] [--chunk-size B]` | Device, zwingend `--destructive`, optional `--chunks`, `--chunk-size` | Vollständiger Kapazitäts-Verifikations-Scan (Fake-Stick-Detection) |
+| `mount-device-rw <dev> <mnt>` | Device, Mount | Direkter FUSE-Mount mit On-Demand-I/O |
+| `verify-device <dev> --destructive [--chunks N] [--chunk-size B]` | Device, `--destructive` verpflichtend | Kapazitäts-Verifikations-Scan |
 
-Details zum Block-Device-Workflow in [block-devices.md](block-devices.md).
+Details: [block-devices.md](block-devices.md).
 
 ## Performance & Diagnose
 
 | Kommando | Argumente | Zweck |
 |---|---|---|
-| `benchmark [--profile P] [--files N] [--payload B] [--snapshots N] [--saves N]` | Alle optional | Führt Benchmark aus, zeigt Durchsatz und Ops/s |
-| `benchmark-log <path> [--profile P] [...]` | Log-Pfad + Profile/Parameter | Wie `benchmark`, appendet Ergebnis an Markdown-Log |
+| `benchmark [--profile P] [--files N] [--payload B] [--snapshots N] [--saves N] [--log FILE]` | alle optional | Vollsuite / Single-Run inkl. Markdown-Log |
+| `benchmark-once <suite>` | Suite | Einmaliger Run eines benannten Profils |
 
-**Verfügbare Profile** (siehe [performance.md](performance.md)):
-- `balanced`
-- `small-files`
-- `metadata-heavy`
-- `snapshot-heavy`
-- `persist-heavy`
+Verfügbare Profile: `dev`, `ci`, `regression`, `storage-heavy` sowie `balanced`, `small-files`, `metadata-heavy`, `snapshot-heavy`, `persist-heavy` (siehe [performance.md](performance.md)).
+
+## Backup (via `corefs-cli`)
+
+| Kommando | Zweck |
+|---|---|
+| `corefs-cli backup dump <img> --output <bkp>` | Full-Backup |
+| `corefs-cli backup dump <img> --since <snapshot_id> --output <bkp>` | Incremental |
+| `corefs-cli backup restore <img> --input <bkp>` | Restore |
+
+Details: [backup.md](backup.md).
+
+## Key-Management (via `corefs-cli`)
+
+| Kommando | Zweck |
+|---|---|
+| `corefs-cli keys init <keystore>` | Neuer Keystore |
+| `corefs-cli keys rotate <keystore>` | Master-Key rotieren (ohne Re-Encrypt) |
+| `corefs-cli keys verify <keystore>` | Magic/Version + Probe-Unwrap |
+
+Details: [key-management.md](key-management.md).
 
 ## Exitcodes
 
 | Code | Bedeutung |
 |---|---|
 | 0 | Erfolg |
-| ≠ 0 | Siehe Fehlermeldung; typisch: `CoreFsError`-Varianten (NotFound, PolicyViolation, InvalidInput …) |
+| ≠ 0 | Fehlermeldung; typische `CoreFsError`-Varianten: `NotFound`, `PolicyViolation`, `InvalidInput`, `Integrity`, `QuotaExceeded`, `State` |
 
 ## Beispielsitzung
 
 ```bash
-# Image erstellen, Datei schreiben, Snapshot, Read
-cargo run -- mkfs-image ./demo.img
-cargo run -- write /hello.txt "Hallo Welt"
-cargo run -- snapshot initial
-cargo run -- ls
-cargo run -- read /hello.txt
-cargo run -- save-image ./demo.img
-
-# Integrität prüfen
-cargo run -- fsck-image ./demo.img
+corefs mkfs-image ./demo.img --demo
+corefs mount-image ./demo.img /tmp/mnt &
+echo "Hallo Welt" > /tmp/mnt/hello.txt
+corefs snapshot initial
+corefs snapshot-list
+corefs fsck-image ./demo.img
+umount /tmp/mnt
 ```
 
 Siehe auch [examples.md](examples.md) für vollständige End-to-End-Beispiele.
+
+## Offene Punkte / Verbesserungsbedarf
+
+- Explizite Top-Level-Kommandos für `mkdir`, `rename`, `clone` fehlen in `corefs` (sind über FUSE bedienbar).
+- `cluster`-Subkommandos sind geplant, solange `SyncService` Stub ist, noch nicht exponiert.
+- `mount-image-rw` ist historisches Alias für `mount-image`; vereinheitlichen.

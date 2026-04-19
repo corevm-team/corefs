@@ -1,6 +1,8 @@
 # Blockgeräte-Workflow
 
-CoreFS kann nicht nur aus einer Image-Datei, sondern auch **direkt von einem Blockgerät** (z. B. `/dev/sdb1`) betrieben werden. Die Abstraktion ist in [src/storage/block_device.rs](../src/storage/block_device.rs) definiert.
+Status: ✅ produktiv (Linux). Trait in `corefs-core/src/storage/block_device.rs`, Linux-Implementierung (ioctls) in `src/storage/block_device.rs`.
+
+CoreFS kann nicht nur aus einer Image-Datei, sondern auch **direkt von einem Blockgerät** (z. B. `/dev/sdb1`) betrieben werden.
 
 ## BlockDevice-Implementierungen
 

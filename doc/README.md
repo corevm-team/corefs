@@ -1,26 +1,28 @@
 # CoreFS — Dokumentation
 
-CoreFS ist ein natives, plattformneutrales Dateisystem, entwickelt in **Rust** (Edition 2024), primär als Standard-Dateisystem für das Betriebssystem **AnyOS**. Unter Linux steht eine optionale **FUSE-Integration** bereit, mit der Volumes aus Image-Dateien oder direkt von Blockgeräten gemountet werden können.
+CoreFS ist ein natives, plattformneutrales Dateisystem, entwickelt in **Rust** (Edition 2024). Primäres Zielsystem ist das eigene Betriebssystem **AnyOS**; unter Linux steht eine optionale **FUSE-Integration** sowie direkter Blockgeräte-Betrieb bereit.
 
 ## Inhaltsverzeichnis
 
 | Dokument | Inhalt |
 |---|---|
-| [overview.md](overview.md) | Projektübersicht, Ziele, Status |
-| [architecture.md](architecture.md) | Schichtenmodell, Modulbaum, Verantwortlichkeiten |
-| [cli.md](cli.md) | Vollständige CLI-Referenz aller Subkommandos |
-| [features.md](features.md) | Feature-Katalog mit Implementierungsstand |
-| [configuration.md](configuration.md) | `CoreFsConfig` und Policies |
-| [persistence-format.md](persistence-format.md) | Mehrsegmentiges On-Disk-Format |
+| [overview.md](overview.md) | Projektübersicht, Ziele, aktueller Reifegrad |
+| [architecture.md](architecture.md) | Workspace, Schichtenmodell, Modulbaum, Fassade |
+| [features.md](features.md) | Feature-Katalog mit Status und offenen Punkten |
+| [configuration.md](configuration.md) | `CoreFsConfig`, Policies (Versioning, Security, Performance, Quota) |
+| [persistence-format.md](persistence-format.md) | ODF v1 und `COREFS01`-Image-Format |
 | [block-devices.md](block-devices.md) | Block-Device-Workflow und Fake-Stick-Schutz |
-| [fuse-integration.md](fuse-integration.md) | Linux-FUSE-Adapter, Mount-Modi |
-| [anyos-integration.md](anyos-integration.md) | Einbindung als natives Dateisystem in AnyOS |
-| [snapshots-versioning.md](snapshots-versioning.md) | Snapshots, Versionierung, Time-Travel |
+| [fuse-integration.md](fuse-integration.md) | Linux-FUSE-Adapter, Mount-Modi, Overlays |
+| [anyos-integration.md](anyos-integration.md) | Einbindung in AnyOS, Kernel-API-Oberfläche |
+| [snapshots-versioning.md](snapshots-versioning.md) | Snapshots, Auto-Versionierung, Time-Travel |
 | [deduplication.md](deduplication.md) | Inline-Dedup, expliziter Dedup-Pass, Ref-Counting |
-| [integrity-recovery.md](integrity-recovery.md) | Checksummen, Journal, fsck, Recovery |
-| [security.md](security.md) | Verschlüsselung, ACL, Quotas, Secure-Delete |
-| [performance.md](performance.md) | Benchmarking-Framework und Profile |
-| [testing.md](testing.md) | Unit-, Integrations-, POSIX-, Stress-Tests |
+| [integrity-recovery.md](integrity-recovery.md) | CRC32C, Journal, WAL, fsck, Repair-Stufen |
+| [security.md](security.md) | Verschlüsselung, ACLs, Quotas, Secure-Delete |
+| [key-management.md](key-management.md) | Master-Key, Keystore, HKDF, Rotation |
+| [backup.md](backup.md) | Backup-/Export-Stream (`COREFSBK`), Full+Incremental |
+| [performance.md](performance.md) | Benchmark-Framework, Profile, History |
+| [cli.md](cli.md) | Vollständige CLI-Referenz |
+| [testing.md](testing.md) | Unit-, Integration-, Stress-, Fault-Injection-Tests |
 | [examples.md](examples.md) | End-to-End-Beispiele |
 | [development.md](development.md) | Build, Commit-Workflow, Entwicklungsregeln |
 | [glossary.md](glossary.md) | Begriffsverzeichnis |
@@ -28,26 +30,35 @@ CoreFS ist ein natives, plattformneutrales Dateisystem, entwickelt in **Rust** (
 ## Schnelleinstieg
 
 ```bash
-# Projekt bauen
 cargo build --release
+alias corefs=./target/release/corefs
 
 # Image erstellen und mounten (Linux)
-cargo run --release -- mkfs-image ./corefs.img --demo
-cargo run --release -- mount-image-rw ./corefs.img /tmp/corefs-mnt
+corefs mkfs-image ./corefs.img --demo
+corefs mount-image ./corefs.img /tmp/corefs-mnt
 
 # Blockgerät formatieren und mounten (Linux, root)
-sudo cargo run --release -- probe-device /dev/sdb1
-sudo cargo run --release -- mkfs-device /dev/sdb1
-sudo cargo run --release -- mount-device-rw /dev/sdb1 /mnt/usb
+sudo corefs probe-device /dev/sdb1
+sudo corefs mkfs-device  /dev/sdb1
+sudo corefs mount-device-rw /dev/sdb1 /mnt/usb
 ```
 
-Weitergehende Beispiele sind in [examples.md](examples.md) dokumentiert.
+Weiterführende Beispiele: [examples.md](examples.md).
 
-## Projektdokumente im Repository-Root
+## Repository-Root-Dokumente
 
 - [README.md](../README.md) — Einstieg, Schnellüberblick
 - [PROJECT_PROGRESS.md](../PROJECT_PROGRESS.md) — aktueller Implementierungsstand
 - [features_corefs.md](../features_corefs.md) — Feature-Anforderungen
-- [corefs_brainstorming.txt](../corefs_brainstorming.txt) — Architekturideen
+- [corefs_brainstorming.txt](../corefs_brainstorming.txt) — Architektur-Ideen
 - [PERFORMANCE_LOG.md](../PERFORMANCE_LOG.md) — Benchmark-Historie
 - [CLAUDE.md](../CLAUDE.md) — Arbeitsanweisungen für Claude Code
+
+## Legende der Status-Marker
+
+| Symbol | Bedeutung |
+|---|---|
+| ✅ | produktiv / voll implementiert und getestet |
+| 🔶 | teilweise / Basis vorhanden, Verbesserungen offen |
+| ⚠️ | geplant / POC / Stub |
+| ❌ | nicht implementiert |

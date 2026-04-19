@@ -1,98 +1,119 @@
 # Snapshots & Versionierung
 
-## Snapshots
+CoreFS bietet zwei komplementäre Zeitreise-Mechanismen:
 
-Implementierung: [src/domain/snapshot.rs](../src/domain/snapshot.rs), Service in [src/app/mod.rs](../src/app/mod.rs).
+- **Automatische Versionierung** — pro Datei, transparent bei jedem Write.
+- **Snapshots** — punktgenaue, konsistente Zustandsaufnahmen des gesamten Baums oder eines Teilbaums.
 
-### Modell
+Beide sind über die FUSE-Integration direkt bedienbar.
+
+## Automatische Versionierung ✅
+
+Implementierung: `corefs-core/src/services/versioning.rs`, Orchestrierung in `CoreFsService::write_file()`.
+
+### Datenmodell
+
+```rust
+pub struct FileVersion {
+    pub version_id: u64,
+    pub path:       String,
+    pub created_at: Timestamp,
+    pub bytes:      Vec<u8>,     // unkomprimierter Snapshot des Inhalts
+}
+
+pub struct VersioningService {
+    next_version: u64,
+    versions: BTreeMap<String, Vec<FileVersion>>,
+}
+```
+
+Vor jedem `write_file` wird die alte Version über `store_version_at(path, bytes, now)` abgelegt.
+
+### Budget-Verwaltung
+
+- Konfigurierbar via `config.persistence.max_version_bytes` (Default 64 MiB).
+- `prune_to_budget(max_bytes)` entfernt älteste Versionen global, sobald das Budget überschritten ist.
+- `prune(path, keep_latest)` entfernt pro Pfad alles bis auf die neuesten N Versionen.
+
+### Abfragen
+
+- `list_versions(path)` — komplette Historie einer Datei.
+- `version_at_or_before(path, instant)` — historische Lesezugriffe.
+
+## Snapshots ✅
+
+Implementierung: `corefs-core/src/domain/snapshot.rs` + `CoreFsService::create_snapshot_scoped(...)`.
+
+### Datenmodell
 
 ```rust
 pub struct Snapshot {
-    pub id: u64,
-    pub name: String,
-    pub scope_root: String,
-    pub created_at: SystemTime,
-    pub paths: Vec<String>,
-    pub file_data: BTreeMap<String, Vec<u8>>,
+    pub id:          u64,
+    pub name:        String,
+    pub scope_root:  String,                          // "/" für Voll-Snapshot
+    pub created_at:  Timestamp,
+    pub paths:       Vec<String>,
+    pub file_data:   BTreeMap<String, Vec<u8>>,       // Inhalte (unkomprimiert)
+    pub inodes:      BTreeMap<String, SnapshotInode>, // Metadaten-Snapshot
+}
+
+pub struct SnapshotInode {
+    pub kind:             InodeKind,
+    pub size:             usize,
+    pub created_at, modified_at, changed_at: Timestamp,
+    pub metadata:         FileMetadata,
+    pub symlink_target:   Option<String>,
 }
 ```
 
-Snapshots sind **selbständig**: Sie enthalten die vollständigen Dateibytes zum Zeitpunkt der Erstellung. Dadurch sind sie unabhängig von späteren Block-Mutationen — auch nach Defrag oder Block-Reallocation bleibt der Snapshot konsistent.
+### Operationen
 
-### Erstellen und verwalten
+| Operation | Methode | Bemerkung |
+|---|---|---|
+| Voll-Snapshot | `create_snapshot(name)` | entspricht `create_snapshot_scoped(name, "/")` |
+| Scoped | `create_snapshot_scoped(name, root)` | erfasst nur Teilbaum |
+| Listen | `list_snapshots()` | |
+| Restore | `restore_snapshot(id)` | liefert `SnapshotRestoreReport` mit Per-Pfad-Skip-Liste |
+| Löschen | `delete_snapshot(id)` | |
+| Diff | `diff_snapshots(a, b)` | added · removed · modified · unchanged |
 
-```bash
-cargo run -- snapshot                # Name "manual"
-cargo run -- snapshot nightly
-cargo run -- status                  # zeigt Snapshot-Count
-```
+### On-Disk
 
-### Scoped Snapshots
+Snapshots liegen im `SNAP`-Segment des Volume-Images bzw. als Teil des `PersistedState`. Sie überleben Umounts und Neu-Mounts konsistent.
 
-Über `scope_root` lassen sich Snapshots auf einen Verzeichnis-Teilbaum beschränken. API:
+## Time-Travel via FUSE ✅
 
-```rust
-fs.create_scoped_snapshot("backup-docs", "/documents")?;
-```
+Im RW-Mount sind Snapshots und Versionen transparent zugänglich:
 
-### Snapshot-Diff
+| Pfad | Bedeutung |
+|---|---|
+| `/.snapshots/` | Verzeichnislistung aller Snapshots (virtuell) |
+| `/.snapshots/<id>-<name>/…` | Read-only Blick in einen bestimmten Snapshot |
+| `/path/to/file@2026-04-01T12:00:00Z` | Datei zum angegebenen Zeitpunkt (via `VersioningService`) |
+| `/path/to/file@v3` | Version mit explizitem `version_id` |
 
-Klassifiziert Pfade zwischen zwei Snapshots in `added / removed / modified / unchanged`.
+Schreibzugriffe auf Overlays liefern `EROFS`.
 
-### Zugriff über FUSE
-
-Im RW-Mount erscheint automatisch `/mount/.snapshots/<id>-<name>/` als Read-only-Overlay (siehe [fuse-integration.md](fuse-integration.md)).
-
-## Versionierung
-
-Implementierung: [src/services/versioning.rs](../src/services/versioning.rs).
-
-### Verhalten
-
-- Bei jedem `write_file()` wird die vorherige Version in die Historie übernommen.
-- Historie pro Datei mit monoton steigenden Versionsnummern.
-- Pruning über ein globales Byte-Budget:
-
-```rust
-VersioningPolicy {
-    keep_latest: 16,
-    auto_prune: true,
-    max_version_bytes: Some(64 * 1024 * 1024), // 64 MiB default
-    ..
-}
-```
-
-### Time-Travel
-
-Über FUSE durch `@`-Syntax im Dateinamen (siehe [fuse-integration.md](fuse-integration.md)):
-
-```
-file.txt@2026-04-13       Version vom Tag
-file.txt@2026-04-13T10:30 Version zum Zeitpunkt
-file.txt@v2               Version Nr. 2
-```
-
-Aktivierbar über `VersioningPolicy::expose_time_travel` (Default an).
-
-### Programmatische Nutzung
-
-```rust
-let versions = fs.list_versions("/a.txt")?;
-let bytes = fs.read_version("/a.txt", 2)?;
-let at = fs.read_file_at("/a.txt", timestamp)?;
-```
-
-## Restore
-
-Soft-gelöschte Dateien können wiederhergestellt werden:
+## CLI ✅
 
 ```bash
-cargo run -- delete /a.txt
-cargo run -- restore /a.txt
+corefs snapshot <name>            # Voll-Snapshot
+corefs snapshot-list
+corefs snapshot-restore <id>
+corefs snapshot-diff <a> <b>
+corefs snapshot-delete <id>
 ```
 
-Secure-Delete (Nulling der Blöcke, kein Restore möglich):
+## Tests
 
-```bash
-cargo run -- delete /a.txt --secure
-```
+- ~10 Snapshot-Tests in `src/app/app_tests.rs` (Voll/Scoped, Restore, Diff, Delete).
+- Versioning-Tests in `corefs-core/src/services/versioning_tests.rs`.
+- Time-Travel-Overlays in `src/platform/linux_fuse_tests.rs`.
+
+## Offene Punkte / Verbesserungsbedarf
+
+- **Speichereffizienz**: Snapshots pinnen heute **unkomprimierte Bytes** pro Datei. Für grosse Dateien verdoppelt sich damit der Plattenbedarf bei jedem Snapshot. Zielbild: Content-Hash + Block-Pinning gegen den `BlockStore`, CoW-Reuse.
+- **Automatische Retention-Policy**: Es existiert Byte-Budget-Pruning, aber **kein** Time-Based-Retention-Schema (z. B. "hourly=24, daily=7, weekly=4").
+- **Crash-Konsistenz bei Snapshot-Erstellung**: aktuell wird der In-Memory-Catalog serialisiert. Bei riesigen Volumes könnte eine Copy-on-Write-Capture (ohne vollständige Bytes-Kopie) effizienter sein.
+- **Snapshot-Verschlüsselung**: Snapshot-`file_data` wird wie normale Datei-Inhalte behandelt — eine eigene, pro-Snapshot verschlüsselte Ablage wäre für zusätzliche Isolation denkbar.
+- **Write-Shadow während Restore**: Ein abgebrochener `restore_snapshot` hinterlässt potenziell teilrestaurierte Dateien; ein Two-Phase-Commit wäre härter.

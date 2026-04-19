@@ -21,7 +21,13 @@
 | **Dirty/Clean-Marker** | Superblock-Flag zur Erkennung unsauberer Unmounts |
 | **Extent** | Zusammenhängender Block-Bereich für eine Datei |
 | **Fake-Stick** | USB-Stick mit gefälschter Kapazitätsangabe |
-| **FNV1a** | Schnelle Hash-Funktion; in CoreFS für Checksummen |
+| **CRC32C** | Castagnoli-Prüfsumme; in CoreFS für alle persistenten Integritätsprüfungen (Superblock, Segmente, Extents, Inodes, Backup-Frames) |
+| **FNV1a-ähnlich (Block-Hash)** | Schnelle 64-Bit-Hash-Funktion, intern im `BlockStore` zur Dedup-Lookup — **nicht** zur Integritätsgarantie |
+| **HKDF-SHA256** | Per-File-Key-Ableitung aus Volume-Key + InodeId (RFC 5869) |
+| **Keystore** | Datei mit AEAD-gewrapptem Master-Key, Magic `COREFSKS` |
+| **ODF v1** | "On-Disk Format" — natives, block-basiertes Layout (`COREFSDF`-Magic) |
+| **COREFS01** | Image-Format-Magic (Host-Image, mehrsegmentiert) |
+| **COREFSBK** | Backup-Stream-Magic |
 | **FREE** | Free-List-Segment mit Allocator-Policy |
 | **fsck** | File-System-Check mit mehrstufiger Reparatur |
 | **FUSE** | Filesystem in Userspace — Linux-Kernel-Schnittstelle |

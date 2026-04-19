@@ -1,5 +1,7 @@
 # Backup/Export-Schnittstelle
 
+Status: ✅ produktiv (Full, Incremental, Restore, 14+5 Tests).
+
 CoreFS exportiert Volumes in ein stream-basiertes Backup-Format, das sowohl
 full-Dumps als auch inkrementelle Dumps gegen einen Basis-Snapshot abdeckt.
 

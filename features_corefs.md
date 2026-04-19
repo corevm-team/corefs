@@ -1,5 +1,7 @@
 # Anforderungsliste für ein neues Filesystem
 
+> **Hinweis**: Dieses Dokument ist die **fachliche Zieldefinition** — nicht der Umsetzungsstand. Den aktuellen Implementierungsstand mit Status-Markern pro Feature liefert [doc/features.md](doc/features.md); den detaillierten Phasen-Fortschritt [PROJECT_PROGRESS.md](PROJECT_PROGRESS.md).
+
 ## 1. Zielbild
 
 Das Dateisystem soll ein modernes, performantes und fehlertolerantes Filesystem sein, das speziell auf folgende Eigenschaften ausgelegt ist:

@@ -41,7 +41,7 @@ fusermount -u /tmp/corefs-ro
 
 ```bash
 mkdir -p /tmp/corefs-rw
-corefs mount-image-rw ./demo.img /tmp/corefs-rw
+corefs mount-image ./demo.img /tmp/corefs-rw    # RW ist Default; mount-image-rw ist historisches Alias
 
 # normale Schreibzugriffe
 echo "v1" > /tmp/corefs-rw/note.txt
@@ -128,9 +128,35 @@ corefs optimize-image ./demo.img
 ## 9. Benchmarking mit Logging
 
 ```bash
-corefs benchmark --profile balanced
+corefs benchmark --profile ci
 corefs benchmark --profile snapshot-heavy --files 50 --snapshots 10
-corefs benchmark-log ./PERFORMANCE_LOG.md --profile persist-heavy
+corefs benchmark --profile regression --log ./PERFORMANCE_LOG.md
+```
+
+## 9a. Backup / Restore
+
+```bash
+# Voll
+corefs-cli backup dump ./demo.img --output ./demo.bkp --json
+
+# Inkrementell gegen Snapshot 3
+corefs-cli backup dump ./demo.img --output ./demo.bkp.inc --since 3 --json
+
+# Restore
+corefs-cli backup restore ./target.img --input ./demo.bkp --json
+```
+
+## 9b. Keystore
+
+```bash
+head -c 32 /dev/urandom > ~/.corefs/master.bin
+chmod 600 ~/.corefs/master.bin
+
+corefs-cli keys init ~/.corefs/vol1.kst \
+    --master-key ~/.corefs/master.bin \
+    --volume-uuid 0102030405060708090a0b0c0d0e0f10
+
+corefs-cli keys verify ~/.corefs/vol1.kst --master-key ~/.corefs/master.bin
 ```
 
 ## 10. End-to-End-Skript

@@ -1,78 +1,76 @@
 # Sicherheit
 
-## Verschlüsselung ruhender Daten
+Dieser Abschnitt beschreibt Verschlüsselung, Zugriffskontrolle und sicheres Löschen. Ergänzend: [key-management.md](key-management.md).
 
-Implementierung: [src/services/encryption.rs](../src/services/encryption.rs) (~6.7 KB).
+## Verschlüsselung ruhender Daten ✅
 
-- **Algorithmus**: ChaCha20-Poly1305 (AEAD)
-- **Schlüssellänge**: 256 Bit
-- **Nonce**: 12 Byte, pro Datei/Block frisch
-- **Schlüsselableitung**: `derive_key_from(secret, salt)`
+- **Algorithmus**: ChaCha20-Poly1305 (AEAD, 256-Bit-Key, 96-Bit-Nonce, 128-Bit-Tag).
+- **Implementierung**: `corefs-core/src/services/encryption.rs` (no_std-fähig, feature-gate `crypto`) und `src/services/encryption.rs` (std-Variante).
+- **Pipeline beim Schreiben**: `compress → encrypt → store`. Beim Lesen umgekehrt.
+- **Ciphertext-Layout**: `nonce[12] || ciphertext || tag[16]`.
+- **Per-File-Keys**: abgeleitet via **HKDF-SHA256** aus dem Master-Key und der `InodeId`. Pure-Rust-Implementierung (RFC-5869, FIPS-180-4-Tests).
+- **Steuerung**: Flag `FileMetadata.encrypted` pro Inode, Config-Schalter `config.security.encryption_at_rest`.
 
-### Aktivierung
+Tamper-Detection erfolgt automatisch durch den AEAD-Tag — jedes Bit-Kippen im Ciphertext schlägt beim Entschlüsseln fehl und produziert einen Fehler im FUSE-Pfad.
 
-Über [`SecurityPolicy`](configuration.md):
+## Keystore & Master-Key ✅
 
-```rust
-SecurityPolicy { encryption_at_rest: true, .. }
-```
+- Dateiformat mit Magic `"COREFSKS"`.
+- Master-Key wird **unter einer Passwort-KDF AEAD-verpackt** abgelegt.
+- Rotation des Master-Keys ist **ohne Re-Encryption** möglich — HKDF-Ableitung bleibt stabil, solange die `InodeId` unverändert ist.
 
-Bei aktiver Policy:
-- `write_file()` verschlüsselt Bytes transparent vor dem Speichern.
-- `read_file()` entschlüsselt transparent.
-- `FileMetadata::encrypted = true` wird gesetzt.
-- FUSE-Mounts (ro und rw) arbeiten mit entschlüsselten Daten.
-
-### Tamper-Detection
-
-Das AEAD-Tag authentifiziert die verschlüsselten Daten. Manipulation erkannt → `CoreFsError::State` beim Read. Siehe auch `services::security` für kombinierte Tamper-Erkennung über Checksummen + AEAD.
-
-## ACLs
-
-Implementierung: [src/domain/acl.rs](../src/domain/acl.rs).
-
-```rust
-pub enum Principal {
-    User(String),
-    Group(String),
-    Other,
-}
-
-pub struct AclEntry {
-    pub principal: Principal,
-    pub permissions: Permissions,
-}
-```
-
-Jede Datei trägt eine Liste `AclEntry`. Zugriffsprüfung durch `services::security`.
-
-## Quotas
-
-Implementierung: [src/services/quota.rs](../src/services/quota.rs) (~5.2 KB).
-
-```rust
-QuotaPolicy {
-    max_files: Some(10_000),
-    max_bytes: Some(10 * 1024 * 1024 * 1024),
-}
-```
-
-Enforcement:
-- `create_file()` → prüft `max_files`
-- `write_file()` → prüft `max_bytes`
-- Überschreitung → `CoreFsError::PolicyViolation`
-
-## Secure-Delete
+CLI:
 
 ```bash
-cargo run -- delete /secret.txt --secure
+corefs keys init      ./keystore.bin   # Neu erstellen
+corefs keys rotate    ./keystore.bin   # Master-Key rotieren
+corefs keys verify    ./keystore.bin   # Format/Integrität prüfen
 ```
 
-Überschreibt alle zugehörigen Blöcke mit Null-Bytes, entfernt Inode aus Catalog und verhindert `restore_file()`. Erst nach dem nächsten `flush` / `save-image` ist die Aktion persistent auf Disk.
+Offener Punkt (🔶): Die Passwort-KDF verwendet heute eine leichtgewichtige Ableitung, für den Produktiveinsatz ist **Argon2id** als Standard vorgesehen — der Code-Hook ist vorbereitet, der Algorithmus noch nicht verdrahtet.
 
-## Empfehlungen
+## Zugriffskontrolle
 
-- Immer beide Schichten kombinieren: **Encryption at rest** + **ACLs**.
-- Schlüsselmaterial nicht im Klartext im Image ablegen.
-- Für Blockgeräte-Setups zusätzlich externe Schlüsselverwaltung (HSM, Keyring) vorsehen.
-- Secure-Delete vor `save-image` ausführen, damit der überschriebene Zustand tatsächlich persistiert wird.
+### POSIX-Mode ✅
+
+`uid`, `gid`, `mode` werden on-disk pro Inode gespeichert und beim `getattr`/`setattr` korrekt transportiert. `chown`/`chmod` funktionieren im FUSE-Mount.
+
+### ACLs 🔶
+
+- Typen in `corefs-core/src/domain/acl.rs`: `AclEntry { principal, permissions }`, `Principal::{Unix(u32), Group(u32), Other, Extended(String)}`.
+- Speicherung ist vollständig.
+- **Enforcement**: Der Linux-FUSE-Pfad prüft heute **nur** die POSIX-Mode-Bits, nicht die erweiterten ACL-Einträge. Für strikte POSIX-ACL-Semantik muss der Entscheidungspfad in `linux_fuse.rs` um ACL-Evaluation erweitert werden.
+
+### xattr ✅ (Speicherung) / 🔶 (FUSE-Routing)
+
+- Domain-Modell: `FileMetadata.xattrs: BTreeMap<String, Vec<u8>>`.
+- On-Disk: separater `xattr_block`.
+- FUSE: noch kein vollständiges Routing der vier xattr-Ops (`getxattr`, `setxattr`, `listxattr`, `removexattr`) in die Service-Fassade.
+
+## Secure-Delete ✅
+
+- `delete --secure` (CLI) bzw. `CoreFsService::delete_file(path, secure=true)` überschreibt alle referenzierten Blöcke vor der Freigabe.
+- CoW-Shared-Blöcke werden nur freigegeben, wenn der Ref-Count auf Null fällt — ansonsten wird das Secure-Erase auf die letzte Referenz verschoben.
+- Integration mit `TRIM`/`BLKDISCARD` auf Blockgeräten.
+
+## Quotas ✅
+
+- `QuotaService` prüft `max_files` und `max_bytes` aus `config.persistence` bei jeder Create- und Write-Operation.
+- Überschreitung führt zu `CoreFsError::QuotaExceeded` → FUSE-`ENOSPC`.
+
+## Angriffsmodell & Grenzen
+
+- **Offline-Angreifer auf Image/Device**: Ohne Master-Key sind AEAD-verschlüsselte Blobs nicht lesbar. Die **Metadaten** (Pfade, Grösse, Mode, Timestamps, Tags) sind aktuell **nicht verschlüsselt** — es gibt keinen "encrypt-metadata"-Modus.
+- **Online-Angreifer mit Root**: POSIX-Mode und ACLs werden ausschliesslich im Userland-FUSE geprüft. Ein Kernel-Root kann das Image direkt lesen.
+- **Seitenkanäle**: Keine konstante-Zeit-Garantien jenseits der Krypto-Library. Keine Schutzmassnahmen gegen Timing-Angriffe auf Pfadauflösung.
+
+## Offene Punkte / Verbesserungsbedarf
+
+| Thema | Status | Empfehlung |
+|---|---|---|
+| Argon2id als Password-KDF | 🔶 | Verdrahten, Kompatibilitätsflag im Keystore ergänzen |
+| ACL-Enforcement im FUSE-Pfad | 🔶 | `check_access(inode, uid, op)` in `linux_fuse.rs` einführen |
+| Metadaten-Verschlüsselung | ⚠️ | separater Opt-In-Modus, eigener Catalog-Blob |
+| xattr-End-to-End | 🔶 | vier xattr-Ops durch die Service-Fassade routen |
+| Audit-Log / Security-Journal | ⚠️ | Hook im Journal-Service, bislang keine Signatur |
+| Key-Escrow / HSM-Integration | ⚠️ | aktuell keine externe Key-Quelle |

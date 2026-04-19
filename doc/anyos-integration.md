@@ -1,5 +1,7 @@
 # AnyOS-Integration
 
+Status: 🔶 **teilweise**. `corefs-core` kompiliert vollständig `no_std + alloc` für `x86_64-anyos`. Kernel-Treiber und Userland-Tools sind als POC vorhanden (`corefs-tools`, `corefs-fuse-adapter`, `corefs-fuse-proto`), eine produktive VFS-Integration ist in Arbeit.
+
 Dieses Dokument beschreibt, wie CoreFS als natives Dateisystem in **AnyOS** eingebunden ist. Es richtet sich an CoreFS-Entwickler, die Änderungen am Kern auf Kompatibilität mit dem AnyOS-Kernel prüfen müssen. Die umgekehrte Sicht (wie AnyOS CoreFS nutzt) findet sich in [anyos/docs/corefs.md](../../anyos/docs/corefs.md).
 
 ## Abhängigkeitsrichtung
@@ -58,6 +60,14 @@ Vor dem Tag eines neuen CoreFS-Releases:
 1. `cargo build --no-default-features --features alloc -p corefs-core` muss erfolgreich sein.
 2. Im AnyOS-Repo `cargo build -p kernel --target x86_64-anyos.json` ausführen.
 3. Alle `anyos/bin/corefs-*`- und `mkfs.corefs`/`fsck.corefs`-Tools müssen ohne API-Anpassung bauen — sonst ist ein koordiniertes Update nötig.
+
+## Offene Punkte / Verbesserungsbedarf
+
+- **Produktive VFS-Anbindung**: Der Kernel-Treiber ruft heute direkt `PersistedState`/`ondisk`-APIs; Streaming- und Cache-Integration mit dem AnyOS-VFS ist in Entwurf.
+- **IPC-Protokoll** (`corefs-fuse-proto`, `corefs-fuse-adapter`): Stub-Zustand; produktiver Transport (Kernel↔User-Daemon) fehlt.
+- **Crypto ohne SIMD**: Poly1305 benötigt auf Soft-Float-Kerneln eine Fallback-Route; alternativ Scalar-Implementierung.
+- **Kernel-CSPRNG** statt xorshift64-Platzhalter im `KernelRng`.
+- **Live-Mount / Hot-Resize**: in Planung.
 
 ## Weiterführend
 

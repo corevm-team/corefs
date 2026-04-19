@@ -1,82 +1,82 @@
 # Performance-Tooling
 
-Framework: [src/platform/performance.rs](../src/platform/performance.rs) (~12 KB). CLI-Einstieg: `benchmark`, `benchmark-log`.
+Status: ✅ Framework produktiv, 4 Profile, Markdown-Logging, JSON-History.
 
-## BenchmarkConfig
+Implementation: `src/platform/performance.rs` + `src/platform/tools.rs`. CLI: `benchmark`, `benchmark-once`.
+
+## BenchmarkProfile
 
 ```rust
-pub struct BenchmarkConfig {
-    pub profile: BenchmarkProfile,
-    pub file_count: usize,
-    pub payload_size: usize,
-    pub snapshot_count: usize,
-    pub persist_runs: usize,
+pub enum BenchmarkProfile {
+    Dev           { file_count: usize, iterations: usize },
+    Ci            { file_count: usize, iterations: usize },
+    Regression    { file_count: usize, iterations: usize },
+    StorageHeavy  { file_count: usize, file_size: usize, iterations: usize },
 }
 ```
 
-## Profile
+| Profil | files | payload | iter | Einsatzzweck |
+|---|---:|---:|---:|---|
+| `dev` | 10 | 1 KiB | 3 | schnelles Dev-Feedback |
+| `ci` | 100 | 1 KiB | 5 | CI-Pipeline |
+| `regression` | 50 | 1 KiB | 5 | Nightly-Regression |
+| `storage-heavy` | 1000 | 100 MiB | 3 | Langlauf / Storage-Stress |
 
-| Profil | files | payload | snapshots | saves | Fokus |
-|---|---:|---:|---:|---:|---|
-| `balanced` | 4 | 64 B | 1 | 1 | Ausgewogene Last |
-| `small-files` | 100 | 16 B | 1 | 1 | Viele kleine Dateien |
-| `metadata-heavy` | 200 | 0 B | 0 | 1 | Metadaten-Operationen |
-| `snapshot-heavy` | 8 | 256 B | 5 | 1 | Snapshot-intensiv |
-| `persist-heavy` | 8 | 256 B | 2 | 2 | Persistenz-Fokus |
+Zusätzlich existieren feingranulare Custom-Profile (`balanced`, `small-files`, `metadata-heavy`, `snapshot-heavy`, `persist-heavy`) für gezielte Teiltests.
+
+## Metriken (pro Suite)
+
+- `create_ms`, `read_ms`, `write_ms`
+- `snapshot_ms`, `restore_ms`
+- `save_ms` (Image-Persistenz), `incremental_save_ms`
+- `defrag_ms`, `dedup_ms`
+- `cow_clone_ms`
+- Durchsatz (MiB/s) und Ops/s
+- Incremental-Persist-Delta (Phase 1f)
 
 ## Kommandos
 
-### Einmaliger Benchmark
-
 ```bash
-cargo run --release -- benchmark --profile snapshot-heavy \
-    --files 100 --payload 512 --snapshots 5
+# Vollständige Suite
+corefs benchmark --profile ci
+
+# Einmaliger Run
+corefs benchmark-once snapshot-heavy --files 100 --payload 512 --snapshots 5
+
+# Markdown-Log appendieren
+corefs benchmark --profile regression --log PERFORMANCE_LOG.md
 ```
 
-Ausgabe:
-- `create_ms`, `read_ms`, `snapshot_ms`, `save_ms`
-- Durchsatz (MiB/s)
-- `create_ops_per_sec`, `read_ops_per_sec`
+## History & Vergleich
 
-### Mit Markdown-Log
-
-```bash
-cargo run --release -- benchmark-log ./PERFORMANCE_LOG.md --profile balanced
-```
-
-Appendet das Ergebnis als Zeile an [PERFORMANCE_LOG.md](../PERFORMANCE_LOG.md):
-
-```
-| Timestamp | Profile | Files | Payload | Snap | Saves | Create ms | Read ms | Snap ms | Save ms | MiB | Create ops/s | Read ops/s |
-```
-
-## Suites (konzeptionell)
-
-Laut [CLAUDE.md](../CLAUDE.md) vordefinierte Suites:
-- `dev`
-- `ci`
-- `regression`
-- `storage-heavy`
-
-Diese werden schrittweise ausgebaut. Benchmark-Ergebnisse sollen automatisch mit früheren Messungen vergleichbar werden (Regressions-Gate geplant).
+- Markdown-Log: [PERFORMANCE_LOG.md](../PERFORMANCE_LOG.md) — chronologische Tabelle pro Run.
+- JSON-History: `perf-history/<zeitstempel>_<profile>.tsv|json` — maschinenlesbar.
+- Beim Start eines Runs erfolgt automatischer Abgleich mit der letzten Messung desselben Profils (Delta-Ausweisung).
 
 ## FUSE-spezifische Performance-Eigenschaften
 
-- **`FUSE_WRITEBACK_CACHE`** aktiviert → Kernel puffert Writes.
-- **`max_write = 1 MiB`** → größere Batches pro FUSE-Write-Request.
-- **Streaming-Writes**: ab ≥ 32 MiB führen Zwischenflushes zu konstantem RAM-Verbrauch O(32 MiB).
-- **Handle-Level-Cache** für Read/Write.
+- `FUSE_WRITEBACK_CACHE` aktiviert → Kernel puffert Schreibvorgänge.
+- `max_write = 1 MiB` → grössere Batches pro FUSE-Write-Request.
+- **Streaming-Writes**: ab ≥ 32 MiB → Zwischenflushes, Peak-RAM O(32 MiB) statt O(File-Size).
+- **Handle-Level Read-/Write-Cache**.
 
 ## Block-Device-Performance
 
-- On-Demand Segment-I/O über [DeviceVolume](../src/storage/device_volume.rs).
-- LRU-Read-Cache + Write-Buffer.
+- On-Demand Segment-I/O über `DeviceVolume` (LRU-Read-Cache + Write-Buffer).
+- Inkrementelle Persistenz: `persist_to_device_incremental()` schreibt nur geänderte Segmente (Phase 1f). Fallback auf Full-Rewrite bei Layout-Wechseln.
 - Barrier-safe WAL im Device-Journal (256 KiB hinter dem Volume).
 
 ## Diagnose
 
 ```bash
-cargo run -- diagnose-mount ./demo.img /tmp/mnt --create
+corefs diagnose-mount ./demo.img /tmp/mnt --create
 ```
 
-Prüft Mount-Readiness (FUSE-Verfügbarkeit, Berechtigungen, Mount-Point-Status).
+Prüft Mount-Readiness (FUSE-Verfügbarkeit, Berechtigungen, Mount-Point-Status, Backend-Typ).
+
+## Offene Punkte / Verbesserungsbedarf
+
+- **Automatisches Regressions-Gate**: Vergleichs-Infrastruktur existiert, Assertion-Schwellwerte (CI-Fail bei > X % Regression) fehlen (⚠️).
+- **Flamegraphs / pprof-Integration**: nicht vorhanden.
+- **Latenz-Histogramme** statt nur Mittelwerte.
+- **Multi-Thread-Benchmarks** für nebenläufige Workloads (CoreFsService ist bereits Arc+Mutex-basiert, aber keine Benchmark-Abdeckung der Skalierung).

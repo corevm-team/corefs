@@ -1,6 +1,8 @@
 # Deduplizierung
 
-CoreFS dedupliziert Blockdaten **inline beim Schreiben** und bietet zusätzlich einen **expliziten Pass** zur Konsolidierung und Konsistenzprüfung. Kern der Implementierung ist der `BlockStore` in [corefs-core/src/storage/block_store.rs](../corefs-core/src/storage/block_store.rs).
+Status: ✅ produktiv (Inline + expliziter Pass).
+
+CoreFS dedupliziert Blockdaten **inline beim Schreiben** und bietet zusätzlich einen **expliziten Pass** zur Konsolidierung und Konsistenzprüfung. Kern der Implementierung ist der `BlockStore` in [corefs-core/src/storage/block_store.rs](../corefs-core/src/storage/block_store.rs). Ausgelöst wird der Pass über `CoreFsService::run_dedup()` bzw. `corefs dedup` (CLI).
 
 ## Datenmodell
 

@@ -3,52 +3,56 @@
 ## Build
 
 ```bash
-cargo check                # schneller Syntax-/Type-Check
-cargo build                # debug
-cargo build --release      # optimiert
-cargo fmt                  # Formatierung
-cargo clippy               # Linting
-cargo doc --open           # Rust-Doku erzeugen und öffnen
+cargo check                          # Syntax-/Type-Check
+cargo build                          # debug
+cargo build --release                # optimiert
+cargo fmt                            # Formatierung
+cargo clippy --all-targets --workspace
+cargo doc --workspace --open
+
+# Nur Kern (no_std, für AnyOS-Kompatibilitätscheck)
+cargo build -p corefs-core --no-default-features
+
+# Mit Crypto (std)
+cargo build -p corefs-core --features std
 ```
 
-## Abhängigkeiten
+## Workspace
 
-Aus [Cargo.toml](../Cargo.toml):
+Crates:
 
-```toml
-[package]
-name = "corefs"
-edition = "2024"
-
-[dependencies]
-bincode           = "1"
-chacha20poly1305  = "0.10"
-lz4_flex          = "0.11"
-serde             = "1"
-serde_json        = "1"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-fuser = "0.14"
-libc  = "0.2"
+```
+corefs                 (Root, std, Binary+Lib, Linux-FUSE)
+├── corefs-core        (no_std+alloc, Kernbibliothek)
+├── corefs-cli         (CLI-Wrapper)
+├── corefs-tools       (Host-Tools: backup, keys, mount)
+├── corefs-std         (std-Wrapper)
+├── corefs-fuse-proto  (Protocol-Stubs)
+└── corefs-fuse-adapter(IPC-Adapter)
 ```
 
-Plattformspezifische Crates ausschließlich über `cfg`-Targets. Im Kern (`domain/`, `storage/`, `services/`) sind `fuser` und `libc` verboten.
+## Dependencies (Auszug)
+
+- `corefs-core`: `serde`, `bincode 2`, `hashbrown`, optional `lz4_flex` (`compression`), optional `chacha20poly1305` (`crypto`)
+- Root `corefs`: `corefs-core{features=["std"]}`, `serde_json`, `lz4_flex[frame]`, `chacha20poly1305[getrandom]`
+- Linux-spezifisch: `fuser 0.14`, `libc 0.2` (nur `[target.'cfg(target_os="linux")'.dependencies]`)
+
+Plattformspezifische Crates ausschliesslich über `cfg`-Targets. Im Kern (`domain/`, `storage/`, `services/`) sind `fuser` und `libc` verboten.
 
 ## Entwicklungsregeln (aus CLAUDE.md)
 
 - **Sprache**: Rust, Edition 2024.
 - Struktur, Testbarkeit und Wartbarkeit haben Vorrang vor Feature-Vollständigkeit.
-- Möglichst vollständige Testabdeckung.
-- **Keine Abstraktion ohne konkreten Bedarf** — keine spekulativen Generalisierungen.
+- Möglichst vollständige Testabdeckung für vorhandene Implementierung anstreben.
+- **Keine Abstraktion ohne konkreten Bedarf**.
 - **Keine plattformspezifischen Annahmen** in `domain/` oder `storage/`.
+- Unit-Tests neben dem Modul in `*_tests.rs`; E2E-Tests in `tests/`.
 
 ## Commit-Workflow
 
-Aus [CLAUDE.md](../CLAUDE.md):
-
 ```bash
 cargo test          # muss vollständig grün sein
-git add <geänderte Dateien>
+git add <Dateien>
 git commit -m "..."
 ```
 
@@ -56,22 +60,21 @@ git commit -m "..."
 
 ## Projektdokumente aktualisieren
 
-Bei relevanten Änderungen:
-
-| Datei | Was aktualisieren |
+| Datei | Anlass |
 |---|---|
-| [PROJECT_PROGRESS.md](../PROJECT_PROGRESS.md) | Umsetzungsstand, neue Features |
-| [features_corefs.md](../features_corefs.md) | Anforderungen / neue Features |
-| [PERFORMANCE_LOG.md](../PERFORMANCE_LOG.md) | automatisch via `benchmark-log` |
-| `doc/` | Wenn sich Architektur, CLI oder Verhalten ändert |
+| [PROJECT_PROGRESS.md](../PROJECT_PROGRESS.md) | Umsetzungsstand, neue Features / Phasen |
+| [features_corefs.md](../features_corefs.md) | Anforderungen / Feature-Wünsche |
+| [PERFORMANCE_LOG.md](../PERFORMANCE_LOG.md) | automatisch via `benchmark` mit `--log` |
+| `doc/` | Verhalten, Architektur, CLI, Format |
 
-## Neuer Service / neues Modul
+## Neuer Service / neues Modul (corefs-core)
 
-1. Neue Datei unter `src/services/<name>.rs` anlegen.
-2. In [src/services/mod.rs](../src/services/mod.rs) registrieren.
-3. Service in [src/app/mod.rs](../src/app/mod.rs) einbinden, falls extern sichtbar.
-4. Unit-Tests in der selben Datei (`#[cfg(test)] mod tests`).
-5. `cargo test` → grün → Commit.
+1. Datei unter `corefs-core/src/services/<name>.rs` anlegen — `no_std + alloc`, über `platform::Clock`/`Rng` abstrahieren.
+2. In `corefs-core/src/services/mod.rs` registrieren.
+3. Test-Modul neben dem Modul (`<name>_tests.rs`).
+4. Bei Bedarf `std`-Wrapper unter `src/services/<name>.rs` (Root-Crate) anlegen.
+5. `CoreFsService` (`src/app/mod.rs`) erweitern, falls Fassaden-sichtbar.
+6. `cargo test` → grün → Commit.
 
 ## Neues CLI-Kommando
 
@@ -82,7 +85,7 @@ Bei relevanten Änderungen:
 
 ## Plattform-Adapter
 
-Alles plattformspezifische gehört in `src/platform/`:
+Alles plattformspezifische gehört in `src/platform/` bzw. `corefs-*-adapter`-Crates:
 
 ```rust
 #[cfg(target_os = "linux")]
@@ -90,6 +93,10 @@ mod linux_fuse;
 ```
 
 Im Kern niemals `#[cfg(target_os = ...)]` verwenden.
+
+## Bekannte Architektur-Drift
+
+Siehe [architecture.md](architecture.md) — der Top-Level `src/domain/` ist Re-Export + std-Erweiterung, nicht vollständig eigenständig. Bei neuen Arbeiten an Domain-Typen immer zuerst in `corefs-core::domain` ergänzen, dann ggf. lokal re-exportieren.
 
 ## Referenzdateien
 

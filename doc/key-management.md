@@ -1,5 +1,7 @@
 # Produktives Key-Management
 
+Status: ✅ Keystore, HKDF, SHA-256 produktiv · 🔶 Passphrase-KDF (Argon2) noch nicht verdrahtet · 🔶 Volume-Key-Rotation (mit File-Re-Encryption) nicht implementiert · ⚠️ TPM/HSM offen.
+
 CoreFS trennt zwischen **Master-Key** (außerhalb des Volumes, unter Kontrolle
 des Operators) und **Volume-Key** (im Keystore, AEAD-gewrappt). Per-File-Keys
 werden deterministisch aus dem Volume-Key abgeleitet.

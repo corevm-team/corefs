@@ -1,129 +1,137 @@
 # Architektur
 
+CoreFS ist als **Cargo-Workspace** mit klarer Schichten- und Crate-Trennung aufgebaut. Plattformneutralität und `no_std`-Fähigkeit des Kerns sind leitend.
+
+## Workspace-Struktur
+
+| Crate | Rolle | Umgebung |
+|---|---|---|
+| `corefs-core` | Kernbibliothek: Domain, Storage, Services, Security | `no_std + alloc`, Feature-Gates `std`, `crypto`, `compression` |
+| `corefs` (Root) | Komposition, Image-Persistenz, FUSE, CLI | `std`, Linux-Dependencies target-gated |
+| `corefs-cli` | Externe CLI-Oberfläche / Skripte | `std` |
+| `corefs-tools` | Host-Tools für AnyOS (Backup, Keys, Mount) | `std` |
+| `corefs-std` | `std`-Wrapper-Crate | `std` |
+| `corefs-fuse-proto` | Protokoll-Definitionen für Kernel-Daemon-IPC | `no_std`, POC |
+| `corefs-fuse-adapter` | Adapter zwischen FUSE und IPC | `std`, POC |
+
+`corefs-core` kompiliert gegen `x86_64-anyos` (Custom Target, siehe `vendor/`). Plattformcode (FUSE, `libc`, `fuser`) ist ausschliesslich über `[target.'cfg(target_os = "linux")'.dependencies]` eingebunden.
+
 ## Schichtenmodell
 
-CoreFS folgt strikt einem Schichtenmodell — Abhängigkeiten verlaufen **ausschließlich von außen nach innen**.
-
 ```
-┌────────────────────────────────────────────────────────┐
-│  cli.rs / main.rs                  (Einstiegspunkte)   │
-├────────────────────────────────────────────────────────┤
-│  app/                              (Orchestrierung)    │
-│     CoreFsService (zentrale Fassade)                   │
-├────────────────────────────────────────────────────────┤
-│  platform/      (OPTIONAL, Plattformadapter)           │
-│     linux_fuse, diagnostics, performance, tools        │
-├────────────────────────────────────────────────────────┤
-│  services/                         (Fachlogik)         │
-│     journal, versioning, integrity, recovery,          │
-│     compression, encryption, quota, security,          │
-│     hot_paths, indexing, metadata, sync                │
-├────────────────────────────────────────────────────────┤
-│  storage/                          (Persistenz)        │
-│     block_device, block_store, catalog, allocator,     │
-│     volume_image, device_volume, volume_session,       │
-│     volume_wal                                         │
-├────────────────────────────────────────────────────────┤
-│  domain/                           (reine Typen)       │
-│     inode, metadata, snapshot, volume, acl             │
-└────────────────────────────────────────────────────────┘
-  querschnitt: config.rs, error.rs
+┌─────────────────────────────────────────────────┐
+│ platform/   FUSE, Runtime, Performance,          │
+│             Diagnostics, Online-CTL              │  (optional, OS-spezifisch)
+├─────────────────────────────────────────────────┤
+│ app/        CoreFsService (Fassade)              │
+│             Orchestriert alle Services           │
+├─────────────────────────────────────────────────┤
+│ services/   Journal, Versioning, Integrity,      │
+│             Compression, Encryption, Recovery,   │
+│             Quota, Hot-Paths, Indexing …         │
+├─────────────────────────────────────────────────┤
+│ storage/    Volume-Image, Block-Device,          │
+│             BlockStore (CoW, Dedup), Catalog,    │
+│             Allocator, WAL, ondisk/ (ODF v1)     │
+├─────────────────────────────────────────────────┤
+│ domain/     Inode, Metadata, Snapshot,           │
+│             Volume, ACL, Timestamp               │
+└─────────────────────────────────────────────────┘
 ```
 
-Plattformspezifische Abhängigkeiten (`fuser`, `libc`) sind ausschließlich über `[target.'cfg(target_os = "linux")'.dependencies]` in [Cargo.toml](../Cargo.toml) eingebunden.
+Abhängigkeiten fliessen nur von aussen nach innen. Der `domain`-Layer kennt keine Plattform- oder Storage-Abhängigkeiten.
 
-## Modulbaum
+## Modulbaum (wesentliche Dateien)
+
+### `corefs-core`
+
+```
+corefs-core/src/
+├── lib.rs, platform.rs, config.rs, error.rs, bincode_compat.rs
+├── domain/
+│   ├── inode.rs         InodeId, InodeKind, Inode
+│   ├── metadata.rs      FileMetadata (uid/gid/mode/tags/xattrs/encrypted/compressed)
+│   ├── snapshot.rs      Snapshot, SnapshotInode
+│   ├── volume.rs        VolumeDescriptor
+│   └── acl.rs           AclEntry, Principal
+├── security/            (Feature-Gate `crypto`)
+│   ├── sha256.rs        Pure-Rust SHA-256 (FIPS-180-4)
+│   ├── hkdf.rs          HKDF-SHA256 (RFC-5869)
+│   └── keystore.rs      KeystoreFile (Magic "COREFSKS")
+├── services/
+│   ├── journal.rs, versioning.rs, recovery.rs,
+│   ├── encryption.rs, compression.rs,
+│   ├── quota.rs, metadata.rs, indexing.rs,
+│   ├── security.rs, sync.rs, semantic.rs, hot_paths.rs
+└── storage/
+    ├── allocator.rs, block_device.rs, block_store.rs,
+    ├── catalog.rs, backup.rs (Magic "COREFSBK"),
+    ├── persisted_state.rs,
+    ├── volume_image.rs, device_volume.rs,
+    ├── volume_session.rs, volume_wal.rs
+    └── ondisk/          ODF v1 (39 Module)
+        ├── layout.rs, superblock.rs, inode.rs, extent_tree.rs,
+        ├── journal.rs, fsck.rs, fsck_repair.rs, scrub.rs,
+        ├── grouped.rs, journaled.rs, native.rs, tiering.rs,
+        ├── refcount.rs, checksum.rs, xattr.rs, attr_block.rs,
+        ├── dir_entry.rs, reader.rs, session.rs,
+        ├── multi_group_allocator.rs, allocated.rs, resize.rs …
+```
+
+### Root-Crate `corefs`
 
 ```
 src/
-├── lib.rs                    Crate-Root, Re-exports
-├── main.rs                   Binary-Einstieg (delegiert an cli::run)
-├── cli.rs                    CLI-Dispatcher (~30 Subkommandos)
-├── config.rs                 CoreFsConfig und Policies
-├── error.rs                  CoreFsError enum, CoreFsResult<T>
-│
-├── domain/
-│   ├── mod.rs
-│   ├── inode.rs              Inode, InodeId, InodeKind
-│   ├── metadata.rs           FileMetadata (Permissions, Tags, Classification)
-│   ├── snapshot.rs           Snapshot (id, name, paths, file_data)
-│   ├── volume.rs             VolumeDescriptor
-│   └── acl.rs                AclEntry, Principal
-│
+├── lib.rs, main.rs, cli.rs, config.rs, error.rs
+├── domain/             Re-Exports + std-Erweiterungen
 ├── storage/
-│   ├── mod.rs
-│   ├── allocator.rs          InodeAllocator (Bitset-basiert)
-│   ├── block_device.rs       BlockDevice-Trait + File/Raw/Memory-Devices
-│   ├── block_store.rs        Extent-Mgmt, CoW mit ref_count, Defrag
-│   ├── catalog.rs            Active/Deleted Inode-Maps, Quota-Stats
-│   ├── device_volume.rs      On-Demand Segment-I/O + Cache
-│   ├── volume_image.rs       Mehrsegmentiges binäres Format
-│   ├── volume_session.rs     Session-Lifecycle (format, open, flush)
-│   └── volume_wal.rs         Extent-/Device-Block-adressierte WAL
-│
+│   ├── block_device.rs (FileImageDevice, RawBlockDevice mit libc-ioctls)
+│   ├── device_volume.rs, volume_image.rs,
+│   ├── volume_session.rs, volume_wal.rs
 ├── services/
-│   ├── mod.rs
-│   ├── journal.rs            Transaktionales Journal
-│   ├── versioning.rs         Auto-Versionierung mit Byte-Budget
-│   ├── integrity.rs          Scrubbing, fsck, Image-Reparatur
-│   ├── recovery.rs           Crash-Recovery, WAL-Replay
-│   ├── compression.rs        LZ4-Kompression (frame format)
-│   ├── encryption.rs         ChaCha20-Poly1305 AEAD
-│   ├── quota.rs              max_files / max_bytes Enforcement
-│   ├── security.rs           Tamper-Detection
-│   ├── hot_paths.rs          Zugriffszähler für Heat-Reallocation
-│   ├── indexing.rs           Datei-Indexierung
-│   ├── metadata.rs           Tag-/Attribute-Verwaltung
-│   └── sync.rs               Sync-Status-Tracking
-│
-├── platform/
-│   ├── mod.rs
-│   ├── runtime.rs            RuntimeIntegrationBlueprint (generisch)
-│   ├── tools.rs              ToolRegistry
-│   ├── performance.rs        BenchmarkConfig, Profile
-│   ├── diagnostics.rs        FUSE-Mount-Diagnose
-│   └── linux_fuse.rs         Linux-FUSE-Adapter
-│
-└── app/
-    ├── mod.rs                CoreFsService (Fassade)
-    ├── types.rs              FsStats, AdminReport, SnapshotRestoreReport
-    ├── pathing.rs            Pfad-Validierung
-    ├── selectors.rs          Inode-Selektoren
-    └── tests.rs              App-Layer-Integrationstests
+│   ├── encryption.rs, compression.rs, integrity.rs
+├── app/
+│   ├── mod.rs          CoreFsService (zentrale Fassade)
+│   ├── types.rs, pathing.rs, selectors.rs
+└── platform/
+    ├── linux_fuse.rs   FUSE v31 (lookup/getattr/read/write/…)
+    ├── diagnostics.rs, performance.rs, tools.rs,
+    ├── runtime.rs, online_ctl.rs
+    └── windows/        (leerer Stub)
 ```
 
-## Verantwortlichkeiten der Schichten
+## Verantwortlichkeiten pro Schicht
 
-### `domain/` — reine Domänenobjekte
-Keine I/O, keine Geschäftslogik. Nur fachliche Typen und Invarianten. Ziel: vollständig unabhängig von Plattform und Persistenz.
+| Schicht | Aufgaben | Tabu |
+|---|---|---|
+| `domain/` | Typen, Invarianten, reine Logik | `std`, FS-I/O, Plattform-APIs |
+| `storage/` | Persistenz, Blockallokation, ODF, WAL, Image | Fachregeln, Plattform-APIs |
+| `services/` | Querschnittsdienste | Direktes Image-I/O (delegiert) |
+| `app/` | Orchestrierung, Transaktionsgrenzen, Fassade | Plattform-I/O-Primitive |
+| `platform/` | OS-Adapter | Fachlogik |
 
-### `storage/` — Persistenz
-Blockallokation, Catalog, Volume-Image, WAL. Kennt das On-Disk-Format. Siehe [persistence-format.md](persistence-format.md).
+## Service-Fassade
 
-Wichtige Komponenten:
-- **BlockDevice-Trait**: Abstrahiert sektoraligned I/O über `FileImageDevice`, `RawBlockDevice`, `MemoryDevice`.
-- **BlockStore**: Extent-Management mit Copy-on-Write über Blob-Referenzzählung.
-- **VolumeImage**: Mehrsegmentiges Format mit redundanten Superblocks.
-- **DeviceVolume**: On-Demand Segment-I/O direkt von Blockgeräten (mit Read-Cache und Write-Buffer).
+`CoreFsService` (`src/app/mod.rs`) hält alle Services und exponiert etwa 100 Operationen:
 
-### `services/` — fachliche Services
-Funktionsmodule ohne direkte Persistenz-Kenntnisse. Operieren über `domain/` und `storage/`.
+- **Dateien**: `create_file`, `read_file`, `write_file`, `truncate`, `delete_file`
+- **Verzeichnisse**: `create_directory`, `delete_directory`, `list_paths`, `list_directory`
+- **Symlinks**: `create_symlink`, `resolve_symlink`
+- **Metadaten**: `set_owner`, `set_mode`, `get_inode`, `touch`
+- **Snapshots**: `create_snapshot(_scoped)`, `list_snapshots`, `restore_snapshot`, `delete_snapshot`, `diff_snapshots`
+- **CoW**: `clone_file`, `clone_tree`, `expunge_file`
+- **Wartung**: `defragment`, `optimize_storage`, `run_dedup`, `scrub`
+- **Persistenz**: `format`, `load_from_image`, `save_image_to_path`, `checkpoint`
+- **Reporting**: `admin_report`, `fragmentation_report`
 
-### `platform/` — optionale Plattformadapter
-Linux-FUSE, Performance-Tooling, Diagnose-Hilfen. Nicht zwingend für Kernfunktionen.
+Jede Write-Operation durchläuft die Pipeline **Compression → Encryption → Store** und aktualisiert Quota-, Journal-, Versioning- und Hot-Path-Services konsistent.
 
-### `app/` — Orchestrierung
-`CoreFsService` ist die zentrale Fassade, die Services koordiniert und eine stabile API für CLI und Plattformadapter bereitstellt.
+## Bekannte Abweichungen vom Idealbild
 
-## Wichtige Querschnittstypen
+Gegenüber den Regeln in `CLAUDE.md`:
 
-- [`CoreFsConfig`](../src/config.rs) — Konfiguration und Policies (Versioning, Security, Performance, Quota). Siehe [configuration.md](configuration.md).
-- [`CoreFsError`](../src/error.rs) — gemeinsames Error-Enum mit Varianten `AlreadyExists`, `InvalidCommand`, `InvalidInput`, `NotFound`, `PolicyViolation`, `State`.
-- `CoreFsResult<T>` — Typalias `Result<T, CoreFsError>`.
+- Der Top-Level `src/domain/` ist **Re-Export und std-Erweiterung** der `corefs-core::domain`-Typen — keine vollständig eigenständige Schicht. Pragmatisch, aber nicht strikt.
+- `storage/ondisk/` enthält an wenigen Stellen domain-Referenzen; die Inversion ist nicht überall streng.
+- `services/compression` ist feature-gated und zieht via `lz4_flex::frame` indirekt `std` nach. Reine `no_std`-Builds müssen es weglassen.
 
-## Prinzipien
-
-1. **Keine plattformspezifischen Annahmen** in `domain/` oder `storage/`.
-2. **Keine Abstraktion ohne konkreten Bedarf** — keine spekulativen Generalisierungen.
-3. **Testbarkeit und Wartbarkeit** haben Vorrang vor Feature-Vollständigkeit.
-4. **Fremdsysteme** (FUSE, Kernel-VFS) nur über Plattformadapter — niemals im Kern.
+Siehe auch [persistence-format.md](persistence-format.md), [fuse-integration.md](fuse-integration.md), [anyos-integration.md](anyos-integration.md).

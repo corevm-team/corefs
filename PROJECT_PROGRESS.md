@@ -4,12 +4,45 @@
 
 `CoreFS` ist ein in Rust entwickeltes, plattformneutrales Dateisystemprojekt mit Fokus auf den nativen Einsatz als Standard-Dateisystem des eigenen Betriebssystems. Das Repository enthält aktuell ein strukturiertes, kompilierbares Grundsystem mit klarer Modultrennung, CLI-Einstiegspunkt, Service-Schichten, Volume-Persistenzpfad, Integritätswerkzeugen, Linux-FUSE-Testadapter, Performance-Tooling und einer breiten Testsuite.
 
-## Aktueller Status
+## Aktueller Status (Stand 2026-04)
 
-**Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp, mit AnyOS-Kernel-Treiber, AnyOS-CLI-Tools und FUSE-IPC-Grundgerüst  
-**Build-Status:** stabil (corefs workspace grün; AnyOS-Kernel + `corefsd` bauen für `x86_64-anyos` / `x86_64-anyos-user`)  
-**Test-Status:** corefs-workspace `979/979` grün (inkl. neue Backup/Keystore-Testsuiten: 14 Backup-Tests in `corefs-core/storage/backup_tests.rs`, 15 Keystore-Tests in `corefs-core/security/keystore_tests.rs`, SHA256/HKDF-RFC-Vektortests, 5 Backup-Host-Tests + 8 Keys-Host-Tests in `corefs-tools`); corefs-core no-default-features `377/377` grün; corefs-core std `421/421` grün  
+**Projektphase:** Architektur-, Kern-, Persistenz-, Volume-Layout-, Replay-, Integritäts-, Linux-FUSE- und Performance-Prototyp, mit AnyOS-Kernel-Treiber, AnyOS-CLI-Tools und FUSE-IPC-Grundgerüst
+**Build-Status:** stabil (corefs workspace grün; AnyOS-Kernel + `corefsd` bauen für `x86_64-anyos` / `x86_64-anyos-user`)
+**Test-Status:** corefs-workspace `979/979` grün (Backup: 14 Kern + 5 Host, Keystore: 15 inkl. SHA256/HKDF-RFC-Vektoren, Keys-Host: 8; Concurrency 10, Fault-Injection 10, Stress 10 auf App-Ebene; ODF 303)
+**no_std-Status:** `cargo build -p corefs-core --no-default-features` grün; `x86_64-anyos`-Zieltarget baut
 **Ausrichtung:** plattformneutral, nicht Linux-zentriert
+
+### Kompakte Gesamtübersicht (aus Ist-Analyse)
+
+| Bereich | Status |
+|---|---|
+| Domain-Modell (Inode / ACL / Metadata / Snapshot / Volume) | ✅ 100 % |
+| ODF v1 (Superblock, Bitmap, Inode-Tabelle, Extent-Tree, Journal, fsck, Repair, Scrub, Tiering, Refcount) | ✅ 100 % |
+| Volume-Image `COREFS01` v7 (mehrsegmentig, redundant, repairable) | ✅ 100 % |
+| Block-Devices (File, Raw via ioctls, Memory) + Device-Journal + On-Demand-I/O + inkrementeller Persist | ✅ 100 % |
+| Journal / WAL / Crash-Recovery | ✅ 100 % |
+| Compression (LZ4-Frame, ≥ 64 B) | ✅ 100 % |
+| Encryption (ChaCha20-Poly1305 + HKDF-SHA256 Per-File-Keys) | ✅ 100 % |
+| Keystore (`COREFSKS`) + Master-Key-Rotation | ✅ 100 % · 🔶 Argon2id als Passwort-KDF noch nicht verdrahtet |
+| Snapshots (voll + scoped) + Restore + Diff | ✅ 100 % · 🔶 Speichereffizienz (Byte-Kopien statt Block-Pinning) |
+| Automatische Versionierung + Budget-Pruning + Time-Travel | ✅ 100 % |
+| Deduplizierung (Inline + expliziter Pass) | ✅ 100 % |
+| Backup/Export (`COREFSBK`, full + incremental) | ✅ 100 % |
+| FUSE v31 (RO + RW, Overlays, Streaming-Writes) | ✅ 100 % · 🔶 xattr-Ops vollständig routen, ❌ `link` (Hardlinks), ⚠️ `flock`/POSIX-Locks |
+| ACLs (Storage) | ✅ 100 % · 🔶 Enforcement im FUSE-Pfad (aktuell nur POSIX-Mode) |
+| Quotas | ✅ 100 % |
+| Secure-Delete + TRIM | ✅ 100 % |
+| Performance-Framework (4 Profile, JSON-History, Markdown-Log) | ✅ 100 % · 🔶 Regressions-Gate (Schwellwert-Assertions) |
+| AnyOS-Kerneltreiber | 🔶 POC (read-/write-Pfad in `anyos/kernel/src/fs/corefs/driver.rs`; produktive Cache- und Journal-Integration offen) |
+| AnyOS-Userspace-Daemon `corefsd` + `/dev/fuse`-Transport | 🔶 funktional, Signal-Handler offen |
+| Cluster / Replikation | ⚠️ `SyncService` Stub |
+| Semantic-Indexing | ⚠️ POC, keine produktiven Queries |
+| Tiering (Hot/Cold) | 🔶 Layout implementiert, Migrations-Policies nicht aktiv |
+| Multi-Group-Allocator | 🔶 Layout aktiviert, 1 `TODO` in `grouped.rs` (Block-Reservierung) |
+| Online-Tools (Scrub / Snapshot / Defrag via IPC) | 🔶 Daemon bedient; CLI `--online`-Dispatch fehlt |
+| Hardlinks | ❌ `link_count` reserviert |
+| Windows-Adapter | ❌ Stub-Verzeichnis |
+| Linux-FUSE-Wire-Kompatibilität (Variante a) | ⚠️ geplant nach Bedarf (5.10) |
 
 ## Bereits umgesetzt
 
@@ -545,7 +578,7 @@ Crate angelegt als Workspace-Member, std-basiert (depends on main `corefs` crate
 
 ## Wichtige Hinweise
 
-- Das Projekt ist aktuell ein strukturierter, getesteter Kern-, Persistenz- und Volume-Layout-Prototyp und noch kein produktionsreifes Dateisystem.
+- Das Projekt ist aktuell ein strukturierter, getesteter Kern-, Persistenz- und Volume-Layout-Prototyp mit produktiv nutzbaren Kernfunktionen, aber (noch) kein produktionsreifes Dateisystem. Die vollständige Feature-Matrix und pro-Bereich-Verbesserungsbedarf liegt in [doc/features.md](doc/features.md).
 - Der Linux-Mountpfad unterstützt read-only und read-write; der RW-Pfad nutzt Dirty/Clean-Markierung, transaktionales Journal-Writeback, persistente physische Volume-Allokation, freie Extent-Wiederverwendung, ein persistentes `FREE`-Segment mit Allocator-Policy, aktive Defragmentierung, ein integriertes extent- und device-blockadressiertes Pending-WAL im Volume sowie virtuelle Read-only-Overlays für Snapshot-Browsing (`.snapshots/`) und Time-Travel (`file@<spec>`), ist aber noch kein vollständiges produktionsnahes Device-WAL mit Hintergrund-Compaction oder Copy-on-Write-Moves.
 - Die virtuellen FUSE-Overlays belegen INO-Bereiche im oberen `u64`-Raum (ab `u64::MAX/4` abwärts für dynamische Knoten, `u64::MAX/2+1_000_000` für Snapshot-Root-Dirs, `u64::MAX-1` für `.snapshots/`) und sind vollständig write-protected (EROFS bei jeder Mutation).
 - Performance-Messungen werden jetzt über `benchmark` und `benchmark-log` reproduzierbar ausführbar.

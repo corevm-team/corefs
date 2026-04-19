@@ -1,48 +1,53 @@
 # Tests
 
-Gesamtstand aktuell: **283 / 283 Unit-Tests grün**.
+Gesamtstand: **~979 Tests grün** (Unit + Integration + E2E + Stress + Fault-Injection + Concurrency).
 
-## Unit-Tests (in `src/`)
-
-Alle Module tragen ihre Tests inline (`#[cfg(test)] mod tests { ... }`). Ausführung:
+## Ausführung
 
 ```bash
 cargo test                            # alle Tests
 cargo test <modulname>                # gezielt
 cargo test -- --nocapture             # mit stdout
-cargo test --release                  # optimiert
+cargo test --release                  # optimiert (Stress/Perf-Tests)
 ```
 
-### Testverteilung nach Schicht
+Alle Module tragen ihre Tests inline (`mod <name>_tests;`) bzw. in separaten `*_tests.rs`-Dateien neben dem Modul.
 
-| Schicht | Module | ~Anzahl | Schwerpunkte |
-|---|---|---:|---|
-| Storage | `block_device.rs` | 60 | Alignment, Memory/File-Devices, TRIM, R/O |
-| Storage | `block_store.rs` | 21 | CoW, Dedup, Defrag, Hot-Path |
-| Storage | `volume_image.rs` | 12 | Format, Superblock, Segmenttabellen, Reparatur |
-| Storage | `allocator`, `catalog`, `volume_wal`, `volume_session` | 10 | WAL-Ops, Session-Lifecycle |
-| App | `mod.rs`, `tests.rs` | 75 | Datei-Ops, Snapshots, Klonen, Encryption |
-| Platform | `linux_fuse.rs` | 27 | Caching, Snapshots, Time-Travel |
-| Platform | `performance`, `diagnostics`, `runtime`, `tools` | 11 | Benchmark-Profile, Diagnose |
-| Services | `encryption`, `compression`, `security` | 10 | ChaCha20, LZ4, Tamper |
-| Services | `integrity`, `recovery`, `journal` | 12 | Scrubbing, fsck, Replay |
-| Services | `versioning`, `metadata`, `quota` | 7 | Version-Pruning, Quota |
-| Services | sonstige | 4 | je Basistest |
-| Domain | alle | 4 | je Basistest |
-| CLI/Config | `cli`, `config`, `error` | 7 | Kommandozeile, Konfig |
+## Testverteilung (Überblick, 83 Testmodule)
 
-### Gut abgedeckte Bereiche
+| Schicht | Fokus | Beispiele |
+|---|---|---|
+| **Domain** | Struct-Roundtrips, Invarianten | `inode_tests`, `metadata_tests`, `snapshot_tests`, `acl_tests`, `volume_tests` |
+| **Storage (Block)** | CoW, Allocator, Catalog, WAL | `block_device_tests`, `block_store_tests`, `block_store_characterization_tests`, `allocator_tests`, `catalog_tests`, `volume_wal_tests`, `volume_session_tests` |
+| **Storage (Image)** | Format, Reparatur, Backup | `volume_image_tests`, `backup_tests` (14) |
+| **Storage (ODF)** | Superblock, Inode, Extent, Journal, fsck | 30+ Module in `ondisk/` |
+| **Services** | Journal, Versioning, Encryption, Compression, Recovery, Quota, Hot-Paths, Indexing, Semantic | 12 Module |
+| **App** | End-to-End über `CoreFsService`, Concurrency, Stress, Fault-Injection | `app_tests` (75), `concurrency_tests` (10), `fault_injection_tests` (10), `stress_tests` (10), `content_roundtrip_characterization_tests` |
+| **Platform** | FUSE, Performance, Runtime, Diagnostics, Tools | `linux_fuse_tests` (27), `performance_tests`, `diagnostics_tests`, `runtime_tests`, `tools_tests` |
+| **CLI / Config / Error** | Parsing, Validation | `cli_tests`, `config_tests`, `error_tests` |
+| **Security** | SHA-256, HMAC, HKDF, Keystore | NIST-, RFC-4231-, RFC-5869-Vektoren (15 Tests) |
 
-- **Copy-on-Write & Blob-Sharing** (~9 Tests)
-- **Snapshot-Lifecycle** (~15 Tests)
-- **Encryption-Pipeline** (~6 Tests)
-- **Integritäts- & Recovery-Pfade** (~12 Tests)
-- **Block-Device-Abstraktion** (~60 Tests)
-- **FUSE-Integration** (~27 Tests)
+## Schwerpunkte
+
+- **CoW & Blob-Sharing** — Ref-Counting, Materialisierung, Shrink.
+- **Snapshot-Lifecycle** — create / restore / diff / delete, scoped + voll.
+- **Encryption-Pipeline** — Roundtrips, Tamper-Detection, Compression×Encryption-Reihenfolge.
+- **Integrität** — CRC32C, Superblock-Fallback, Segment-Directory-Reconstruction.
+- **Block-Device** — Alignment, TRIM, R/O-Erkennung, Fake-Stick-Simulation.
+- **FUSE** — Caching, Snapshot-Overlays, Time-Travel, Streaming-Writes, Race-freie Handles.
+- **Backup** — full/incremental Roundtrip, CRC-Detection, truncated-stream, volume-id-stability.
+
+## Concurrency, Fault-Injection, Stress
+
+| Kategorie | Tests | Abdeckung |
+|---|---|---|
+| Concurrency | `src/app/concurrency_tests.rs` (10) | Send/Sync-Bounds, Arc+Mutex-Serialisierung, Snapshot-Isolation, Worker-Thread-Handoff |
+| Fault-Injection | `src/app/fault_injection_tests.rs` (10) | ENOSPC-Recovery, Power-Loss-Simulation, Silent-Corruption-Detection |
+| Stress | `src/app/stress_tests.rs` (10) | 2000 Dateien, 300 Verzeichnistiefen, Snapshot-Churn, Clone-Kaskaden, Dedup-Druck |
 
 ## Externe Test-Suiten
 
-Verzeichnis: [scripts/testing/](../scripts/testing/). Vollständige Referenz: [scripts/testing/TESTING.md](../scripts/testing/TESTING.md).
+Verzeichnis: [scripts/testing/](../scripts/testing/).
 
 ### pjdfstest (POSIX-Compliance)
 
@@ -52,23 +57,25 @@ Verzeichnis: [scripts/testing/](../scripts/testing/). Vollständige Referenz: [s
 
 Prüft: `chmod`, `chown`, `link`, `symlink`, `mkdir`, `rmdir`, `open`, `rename`, `unlink`, `truncate`, `utimensat`.
 
+Hinweis: `link`-Tests zeigen erwartungsgemäss Fails, da Hardlinks nicht implementiert sind.
+
 ### xfstests (Kernel-FS-Standard)
 
 ```bash
 sudo ./scripts/testing/run-xfstests.sh
 ```
 
-Prüft Gruppen: `generic/quick`, `generic/posix`, `generic/perms`, `generic/attr`, `generic/rw`, `generic/auto`.
+Gruppen: `generic/quick`, `generic/posix`, `generic/perms`, `generic/attr`, `generic/rw`, `generic/auto`.
 
-### Stresstest
+### Eigener Stresstest
 
 ```bash
 ./scripts/testing/run-stress.sh --workers 8 --duration 300
 ```
 
-Parallele Workloads: File-Ops, Dir-Ops, Link/Rename, Concurrent Append. Anschließend automatisch `fsck`.
+Parallele Workloads: File-Ops, Dir-Ops, Rename, Concurrent Append. Anschliessend automatisch `fsck`.
 
-### Alle Suiten
+### Gesamtlauf
 
 ```bash
 ./scripts/testing/run-all.sh                    # komplett
@@ -83,19 +90,18 @@ Parallele Workloads: File-Ops, Dir-Ops, Link/Rename, Concurrent Append. Anschlie
 ./scripts/testing/install-test-suites.sh
 ```
 
-Klont pjdfstest und xfstests nach `scripts/testing/suites/` und baut sie lokal.
-
 ## Integrationsszenarien
 
-- [scripts/corefs-e2e-linux-rw.sh](../scripts/corefs-e2e-linux-rw.sh) — End-to-End: `mkfs-image` → RW-Mount → Shell-Ops → optional ZIP-Workload → Unmount → Revalidierung.
+- [tests/fuse_handler_e2e.rs](../tests/fuse_handler_e2e.rs) — End-to-End Rust-Test: mount + Shell-Ops + unzip + Unmount + Revalidierung.
+- [scripts/corefs-e2e-linux-rw.sh](../scripts/corefs-e2e-linux-rw.sh) — gleicher Ablauf als Shell-Skript.
 
-## Lücken (P0 / P1)
+## Offene Punkte / Verbesserungsbedarf
 
-Status aktuell:
-- **P0 Concurrency**: 0 Multi-Thread-Tests. Race-Conditions unter CoW-Materialisierung, parallele Snapshots, Ref-Count-Mutationen — nicht abgedeckt.
-- **P0 Fault-Injection**: 0 Tests. ENOSPC-Recovery, partielle I/O-Fehler, Bit-Rot, Journal-Korruption, Power-Loss — nicht simuliert.
-- **P0 Stress & Skalierung**: 10k+ Dateien/Dir, 100+ MB Writes, tiefe Bäume (500+), Langläufer — nicht gemessen.
-- **P1 Performance-Regression-Gate**: Benchmarks existieren, aber keine Assertions / Schwellwerte.
+- **Performance-Regression-Gate** (P1): Benchmark-History existiert, automatisches Fail bei Schwellwert-Überschreitung fehlt.
+- **Coverage-Messung**: nicht integriert (z. B. `cargo-llvm-cov`).
+- **Mutations-Testing**: nicht vorhanden.
+- **xfstests vollständige Suite**: aktuell nur kuratierte Gruppen; generic-Voll-Run benötigt Hardlinks.
+- **Multi-Volume-Szenarien**: keine dedizierten Tests für parallel gemountete Volumes.
 
 ## Commit-Regel
 
