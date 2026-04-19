@@ -26,7 +26,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAGIC: &[u8; 8] = b"COREFS01";
 const FORMAT_VERSION: u32 = 7;
-const SEGMENT_ALIGNMENT: usize = 64;
+/// Alignment of segments within the volume image.
+///
+/// Phase-2 change: bumped from 64 bytes to 4096 bytes.  With 64-byte
+/// alignment every small growth of a metadata segment (a 200-byte
+/// inode added to AINO, say) shifted the offset of every subsequent
+/// segment, which invalidated the incremental-persist fast path and
+/// forced a full image rewrite on every checkpoint.  At 4096-byte
+/// alignment a typical mutation grows a metadata segment by less than
+/// one alignment unit, so segment offsets stay stable for ~10–20
+/// consecutive checkpoints — long enough for the per-segment
+/// prefix-suffix write path to dominate.
+///
+/// The on-disk format is unchanged: the superblock carries the
+/// alignment value, directory entries carry explicit offsets, and
+/// readers accept any power-of-two alignment.  Old images (written
+/// with the 64-byte constant) continue to load.
+const SEGMENT_ALIGNMENT: usize = 4096;
 const SEGMENT_ENTRY_SIZE: usize = 24;
 const HEADER_SIZE: usize = 16;
 const SUPERBLOCK_SIZE: usize = 56;
@@ -318,9 +334,17 @@ pub fn load_volume_image(path: impl AsRef<Path>) -> CoreFsResult<PersistedState>
     let entries = inspected.entries;
     let superblock = inspected.superblock;
 
-    if superblock.alignment as usize != SEGMENT_ALIGNMENT {
+    // Accept any power-of-two alignment the image was written with.
+    // The directory entries carry per-segment offsets explicitly, so
+    // the alignment constant only affects where future writes pad to
+    // — not how we read the existing layout.  Rejecting an old image
+    // because it used a different alignment would break the upgrade
+    // path from pre-Phase-2 volumes (which all used
+    // SEGMENT_ALIGNMENT = 64).
+    let aln = superblock.alignment as usize;
+    if aln == 0 || aln & (aln - 1) != 0 {
         return Err(CoreFsError::State(format!(
-            "unsupported CoreFS volume image alignment {} in {}",
+            "invalid CoreFS volume image alignment {} in {}",
             superblock.alignment,
             path.display()
         )));
@@ -354,9 +378,17 @@ pub fn load_volume_image_with_bytes(
     let entries = inspected.entries;
     let superblock = inspected.superblock;
 
-    if superblock.alignment as usize != SEGMENT_ALIGNMENT {
+    // Accept any power-of-two alignment the image was written with.
+    // The directory entries carry per-segment offsets explicitly, so
+    // the alignment constant only affects where future writes pad to
+    // — not how we read the existing layout.  Rejecting an old image
+    // because it used a different alignment would break the upgrade
+    // path from pre-Phase-2 volumes (which all used
+    // SEGMENT_ALIGNMENT = 64).
+    let aln = superblock.alignment as usize;
+    if aln == 0 || aln & (aln - 1) != 0 {
         return Err(CoreFsError::State(format!(
-            "unsupported CoreFS volume image alignment {} in {}",
+            "invalid CoreFS volume image alignment {} in {}",
             superblock.alignment,
             path.display()
         )));
@@ -2176,10 +2208,12 @@ fn is_valid_superblock(
     expected_payload_checksum: u64,
     expected_segment_count: usize,
 ) -> bool {
+    let aln = superblock.alignment as usize;
     superblock.directory_checksum == expected_directory_checksum
         && superblock.payload_checksum == expected_payload_checksum
         && superblock.format_version == FORMAT_VERSION
-        && superblock.alignment as usize == SEGMENT_ALIGNMENT
+        && aln > 0
+        && aln & (aln - 1) == 0
         && superblock.segment_count as usize == expected_segment_count
 }
 
@@ -2752,18 +2786,21 @@ fn persist_built_image_incremental(
     cache: &mut Option<DeviceImageCache>,
 ) -> CoreFsResult<PersistReport> {
 
-    // Determine if we can do an in-place incremental update.
-    let can_incremental = cache.as_ref().is_some_and(|c| {
-        built
-            .segments
-            .iter()
-            .zip(built.entries.iter())
-            .all(|(seg, entry)| {
-                c.segments.get(&seg.kind).is_some_and(|(off, cached)| {
-                    cached.len() == seg.payload.len() && *off == entry.offset
-                })
-            })
-    });
+    // Phase-2 relaxation: the incremental path is valid whenever we
+    // have a cache at all.  Per-segment logic below handles all three
+    // cases:
+    //
+    //   * offset + length + bytes identical → skip write
+    //   * offset identical, cached bytes are a prefix of new bytes
+    //     → write only the appended suffix at offset + cached_len
+    //   * otherwise → rewrite the whole segment at its new on-disk
+    //     offset (the old location becomes stale garbage but readers
+    //     follow the directory, which we refresh below)
+    //
+    // The image header (magic + directory) is always rewritten so the
+    // on-disk directory stays consistent with the new segment offsets
+    // and lengths.
+    let can_incremental = cache.is_some();
 
     if !can_incremental {
         write_full_image(device, &built)?;
@@ -2780,17 +2817,90 @@ fn persist_built_image_incremental(
     let mut bytes_written = 0u64;
     let sector_size = device.sector_size() as u64;
 
-    for (segment, entry) in built.segments.iter().zip(built.entries.iter()) {
-        let cached_entry = cache_ref
-            .segments
-            .get_mut(&segment.kind)
-            .expect("every segment is present in cache");
-        if cached_entry.1 != segment.payload {
-            write_segment_rmw(device, entry.offset, &segment.payload, sector_size)?;
-            cached_entry.1 = segment.payload.clone();
-            segments_written += 1;
-            bytes_written += segment.payload.len() as u64;
+    // Phase-2: the directory entries carry per-segment lengths, so a
+    // length change on any segment requires the on-disk directory to
+    // be refreshed.  The entire image header (magic + format version +
+    // directory) lives in the bytes before the first segment's
+    // offset — write that prefix once per incremental call.
+    //
+    // The superblock itself lives inside the SUPR segment and is
+    // refreshed by the segment loop below (SUPR always changes because
+    // of the generation counter).
+    if let Some(first_entry) = built.entries.first() {
+        let header_end = first_entry.offset as usize;
+        if header_end > 0 && header_end <= built.bytes.len() {
+            let header_slice = &built.bytes[..header_end];
+            write_segment_rmw(device, 0, header_slice, sector_size)?;
+            bytes_written += header_slice.len() as u64;
         }
+    }
+
+    for (segment, entry) in built.segments.iter().zip(built.entries.iter()) {
+        // The cache was keyed by segment kind.  If a new segment kind
+        // appeared (unlikely in the current format), fall through to
+        // the general rewrite path by treating cache as missing.
+        let cached = cache_ref.segments.get(&segment.kind).cloned();
+        let (cached_offset, cached_bytes) = match cached.as_ref() {
+            Some((off, bytes)) => (*off, bytes.as_slice()),
+            None => {
+                // Brand-new segment kind — write at the new offset,
+                // no suffix optimisation possible.
+                write_segment_rmw(device, entry.offset, &segment.payload, sector_size)?;
+                cache_ref
+                    .segments
+                    .insert(segment.kind, (entry.offset, segment.payload.clone()));
+                segments_written += 1;
+                bytes_written += segment.payload.len() as u64;
+                continue;
+            }
+        };
+        let cached_len = cached_bytes.len();
+        let new_len = segment.payload.len();
+
+        // Offset unchanged and payload byte-identical → nothing to do.
+        if cached_offset == entry.offset && cached_bytes == segment.payload.as_slice() {
+            continue;
+        }
+
+        // Phase-2 fast path: offset unchanged and the cached payload
+        // is a byte-for-byte prefix of the new payload (append-only
+        // growth).  For the DATA segment on a fsync-heavy workload
+        // this is the common case — previously persisted file
+        // contents stay at their old positions and the newly created
+        // inode contributes a fresh tail.  Skipping the prefix write
+        // drops a 128 MiB-class I/O down to a few kilobytes.
+        //
+        // Requires offset equality: if the segment shifted, the old
+        // prefix bytes live at the *old* on-disk location and we
+        // cannot skip writing them at the new location.
+        if cached_offset == entry.offset
+            && new_len > cached_len
+            && segment.payload.starts_with(cached_bytes)
+        {
+            let suffix = &segment.payload[cached_len..];
+            let suffix_offset = entry
+                .offset
+                .checked_add(cached_len as u64)
+                .ok_or_else(|| CoreFsError::State("segment suffix offset overflow".to_string()))?;
+            write_segment_rmw(device, suffix_offset, suffix, sector_size)?;
+            if let Some(entry_mut) = cache_ref.segments.get_mut(&segment.kind) {
+                entry_mut.0 = entry.offset;
+                entry_mut.1.extend_from_slice(suffix);
+            }
+            segments_written += 1;
+            bytes_written += suffix.len() as u64;
+            continue;
+        }
+
+        // General case: rewrite the whole segment at the *new* offset
+        // (not necessarily the cached one).
+        write_segment_rmw(device, entry.offset, &segment.payload, sector_size)?;
+        if let Some(entry_mut) = cache_ref.segments.get_mut(&segment.kind) {
+            entry_mut.0 = entry.offset;
+            entry_mut.1 = segment.payload.clone();
+        }
+        segments_written += 1;
+        bytes_written += segment.payload.len() as u64;
     }
 
     if segments_written > 0 {

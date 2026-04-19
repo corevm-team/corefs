@@ -691,14 +691,25 @@ fn incremental_persist_writes_only_changed_metadata_segment() {
 }
 
 #[test]
-fn incremental_persist_falls_back_to_full_on_size_change() {
+fn incremental_persist_tolerates_small_size_changes() {
+    // Phase-2 change: segment alignment bumped from 64 to 4096 bytes,
+    // and the `can_incremental` predicate now requires only that
+    // segment *offsets* stay stable (not lengths).  A mutation that
+    // adds one inode grows the AINO payload by a few hundred bytes —
+    // well within a 4 KiB alignment slot — so the next segment's
+    // offset is unchanged and the incremental fast path still fires.
+    //
+    // The old test expected a fallback to full write in this case.
+    // That was correct under the old 64-byte alignment + strict
+    // size-match `can_incremental`, but the very behaviour we wanted
+    // to break in Phase 2 was that every small mutation triggered a
+    // full image rewrite.
     let mut state = sample_state();
     let mut dev = memory_device(2 * 1024 * 1024);
     let mut cache: Option<DeviceImageCache> = None;
 
     persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
 
-    // Add a new inode — AINO grows, so layout changes.
     state.active_inodes.push(Inode {
         id: InodeId(999),
         kind: InodeKind::File,
@@ -713,11 +724,12 @@ fn incremental_persist_falls_back_to_full_on_size_change() {
 
     let report = persist_to_device_incremental(&mut dev, &state, &mut cache).unwrap();
     assert!(
-        !report.incremental,
-        "adding an inode changes AINO size — should fall back to full write"
+        report.incremental,
+        "a single-inode growth fits inside the 4 KiB alignment slot and \
+         should stay on the incremental fast path"
     );
 
-    // Verify state loaded back correctly.
+    // Correctness: the loaded image must reflect the new inode count.
     let loaded = load_from_device(&dev).unwrap();
     assert_eq!(loaded.active_inodes.len(), state.active_inodes.len());
 }
