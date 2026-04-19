@@ -396,14 +396,29 @@ impl BlockStore {
         };
         self.records.remove(&inode);
 
-        // Write bytes to compat device
+        // Write bytes to compat device.
+        //
+        // Phase-3 hot-path fix: pre-Phase-3 this always allocated a
+        // padded scratch buffer and memcpy'd the payload into it
+        // before handing it off to `compat_device.write_at`.  For
+        // block-aligned payloads that intermediate buffer is a pure
+        // copy, and for a 32 MiB seq_write it was one of three full
+        // copies the raw write path did per call (clone → aligned buf
+        // → device).  The fix skips the scratch buffer whenever the
+        // payload already fills the allocated span exactly, writing
+        // the caller's bytes in-place.  Only the rare unaligned-tail
+        // case still pays for a padded copy.
         let byte_offset = phys_block * bs;
         let padded_len = (allocated_blocks * bs) as usize;
-        let mut buf = vec![0u8; padded_len];
-        buf[..size.min(padded_len)].copy_from_slice(&bytes[..size.min(padded_len)]);
-        // Write if within compat device capacity
         if byte_offset + padded_len as u64 <= self.compat_device.capacity() {
-            let _ = self.compat_device.write_at(byte_offset, &buf);
+            if padded_len == size {
+                let _ = self.compat_device.write_at(byte_offset, &bytes[..size]);
+            } else {
+                let mut buf = vec![0u8; padded_len];
+                let copy_end = size.min(padded_len);
+                buf[..copy_end].copy_from_slice(&bytes[..copy_end]);
+                let _ = self.compat_device.write_at(byte_offset, &buf);
+            }
         }
 
         // Update dedup table
