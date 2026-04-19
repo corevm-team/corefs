@@ -2468,6 +2468,64 @@ impl DeviceImageCache {
     }
 }
 
+/// Like [`persist_to_device_incremental`] but also carries block payload
+/// bytes (the DATA segment body), so that a file-backed mount can benefit
+/// from the same segment-diff optimisation while still persisting content.
+///
+/// P3-phase entrypoint: the FUSE file-backed path used to call
+/// [`crate::app::CoreFsService::save_image_to_path`] — which rewrote the
+/// entire image via tmp+rename on every checkpoint — giving O(volume) cost
+/// per mutation and a fsync rate capped at a handful of ops/s.  Using this
+/// function instead restricts each persist to the segments whose payloads
+/// actually changed.
+pub fn persist_to_device_incremental_with_bytes(
+    device: &mut dyn BlockDevice,
+    state: &PersistedState,
+    block_bytes: &HashMap<InodeId, Vec<u8>>,
+    cache: &mut Option<DeviceImageCache>,
+) -> CoreFsResult<PersistReport> {
+    persist_to_device_incremental_with_bytes_and_grow(device, state, block_bytes, cache, |_, _| {
+        Ok(())
+    })
+}
+
+/// Variant of [`persist_to_device_incremental_with_bytes`] that invites
+/// the caller to grow the backing before the write if the built image
+/// would exceed the current device capacity.
+///
+/// `grow` is called once with the concrete device and the required
+/// capacity in bytes whenever the built image is larger than the
+/// current device capacity.  The closure is expected to either resize
+/// the device (e.g. via [`crate::storage::block_device::FileImageDevice::resize`])
+/// or return an error — returning `Ok(())` after a no-op is allowed but
+/// will cause the subsequent write to fail with a capacity error.
+///
+/// This two-phase design avoids building the image twice per persist:
+/// the layout is computed exactly once, the capacity derived from it,
+/// and the resize happens in-place before `persist_built_image_incremental`
+/// writes the segments out.
+pub fn persist_to_device_incremental_with_bytes_and_grow<F>(
+    device: &mut dyn BlockDevice,
+    state: &PersistedState,
+    block_bytes: &HashMap<InodeId, Vec<u8>>,
+    cache: &mut Option<DeviceImageCache>,
+    grow: F,
+) -> CoreFsResult<PersistReport>
+where
+    F: FnOnce(&mut dyn BlockDevice, u64) -> CoreFsResult<()>,
+{
+    let sector_size = device.sector_size() as usize;
+    let upper_bound = device.capacity().max(1 << 32);
+    let built = build_image_with_bytes(state, sector_size, upper_bound, block_bytes)?;
+
+    let needed = built.bytes.len() as u64;
+    if needed > device.capacity() {
+        grow(device, needed)?;
+    }
+
+    persist_built_image_incremental(device, built, cache)
+}
+
 /// Persists the volume state to a device with optional incremental
 /// optimization: if all segment sizes are unchanged from the cached layout,
 /// only the segments whose bytes actually differ are rewritten in-place.
@@ -2483,6 +2541,14 @@ pub fn persist_to_device_incremental(
     cache: &mut Option<DeviceImageCache>,
 ) -> CoreFsResult<PersistReport> {
     let built = build_image(state, device.sector_size() as usize, device.capacity())?;
+    persist_built_image_incremental(device, built, cache)
+}
+
+fn persist_built_image_incremental(
+    device: &mut dyn BlockDevice,
+    built: BuiltImage,
+    cache: &mut Option<DeviceImageCache>,
+) -> CoreFsResult<PersistReport> {
 
     // Determine if we can do an in-place incremental update.
     let can_incremental = cache.as_ref().is_some_and(|c| {

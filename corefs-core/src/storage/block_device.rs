@@ -105,6 +105,24 @@ pub trait BlockDevice: fmt::Debug + Send {
     fn is_read_only(&self) -> bool {
         self.geometry().read_only
     }
+
+    /// Vergrößert oder verkleinert das Device auf `new_capacity` Bytes.
+    ///
+    /// `new_capacity` muss ein Vielfaches der Sektorgröße sein.  Devices
+    /// mit fester Größe (z. B. ein echtes Block-Device oder
+    /// [`MemoryDevice`]) liefern
+    /// [`CoreFsError::InvalidInput`].  Devices mit wachsender Kapazität
+    /// (z. B. `FileImageDevice`) überschreiben diese Default-Implementierung.
+    ///
+    /// Eingeführt mit Phase 1c (P3), damit der FUSE-Persist-Pfad ein
+    /// file-backed Image bei wachsendem Volume in-place vergrößern kann,
+    /// ohne dabei die Trait-Objekt-Abstraktion zu verlieren.
+    fn resize(&mut self, new_capacity: u64) -> CoreFsResult<()> {
+        let _ = new_capacity;
+        Err(CoreFsError::InvalidInput(
+            "BlockDevice::resize is not supported by this device".to_string(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------

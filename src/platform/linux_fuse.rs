@@ -560,8 +560,13 @@ struct VirtFile {
 ///
 /// Three persistence targets are supported:
 ///
-/// * [`FuseBacking::File`] — legacy `volume_image` file format, full
-///   atomic rewrite via temp-file + rename on each persist.
+/// * [`FuseBacking::File`] — `volume_image` file format, persisted via
+///   segment-incremental writes against an open
+///   [`crate::storage::block_device::FileImageDevice`].  Post-P3 only the
+///   segments whose payloads actually changed are rewritten in-place;
+///   unchanged segments are skipped entirely.  Crash consistency relies on
+///   the dual-superblock + per-segment checksum layout of the on-disk
+///   format, the same way the Device backing does.
 /// * [`FuseBacking::Device`] — legacy `volume_image` on a
 ///   [`crate::storage::block_device::BlockDevice`], incremental
 ///   segment-level writes via `persist_to_device_incremental`.
@@ -571,7 +576,23 @@ struct VirtFile {
 ///   [`crate::storage::ondisk::native::save_state_native_incremental`]
 ///   with crash-consistent journal semantics.
 enum FuseBacking {
-    File(PathBuf),
+    /// Image on the host filesystem, opened as a [`FileImageDevice`] for
+    /// incremental segment writes.
+    ///
+    /// `path` is kept so `statfs` / diagnostics can refer to the backing
+    /// file by name.  `device` is the live handle used for persists;
+    /// `cache` tracks the per-segment layout + payloads so consecutive
+    /// checkpoints only rewrite the segments that actually changed.
+    ///
+    /// `device` is `Option` so unit tests that only exercise the
+    /// in-memory FUSE mount state (no persist) can construct a
+    /// `FuseBacking::File` with a dummy path; `persist()` opens the
+    /// device lazily on first checkpoint if it is not already present.
+    File {
+        path: PathBuf,
+        device: Option<crate::storage::block_device::FileImageDevice>,
+        cache: Option<crate::storage::volume_image::DeviceImageCache>,
+    },
     Device {
         device: Box<dyn crate::storage::block_device::BlockDevice>,
         /// Cache of segment layout and payloads used for incremental persists.
@@ -596,7 +617,7 @@ enum FuseBacking {
 impl std::fmt::Debug for FuseBacking {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::File(path) => write!(f, "File({:?})", path),
+            Self::File { path, .. } => write!(f, "File({:?})", path),
             Self::Device { device, .. } => write!(f, "Device({:?})", device.geometry()),
             Self::Odf { image_path, .. } => write!(f, "Odf({:?})", image_path),
         }
@@ -816,10 +837,30 @@ impl CoreFsFuseMountRw {
     }
 
     fn open_session(_service: CoreFsService, image_path: PathBuf) -> CoreFsResult<Self> {
+        use crate::storage::block_device::FileImageDevice;
+
         let mut service = CoreFsService::load_image_from_path(&image_path)?;
         service.mark_unclean_shutdown();
+
+        // Mark the image unclean on disk before handing out the mount.  We
+        // stay on the legacy tmp+rename path for this one-shot write so the
+        // starting state is unambiguous even if a crash interrupts us
+        // before the first incremental checkpoint runs.
         service.save_image_to_path(&image_path)?;
-        Ok(Self::from_service(service, FuseBacking::File(image_path)))
+
+        // Open the image as a read-write FileImageDevice.  All subsequent
+        // checkpoints go through persist_to_device_incremental_with_bytes,
+        // so only segments that actually changed are rewritten.
+        let device = FileImageDevice::open(&image_path, false)?;
+
+        Ok(Self::from_service(
+            service,
+            FuseBacking::File {
+                path: image_path,
+                device: Some(device),
+                cache: None,
+            },
+        ))
     }
 
     fn open_device_session(
@@ -903,7 +944,73 @@ impl CoreFsFuseMountRw {
     ///   previous generation intact.
     fn persist(&mut self) -> CoreFsResult<()> {
         match &mut self.backing {
-            FuseBacking::File(path) => self.service.save_image_to_path(path),
+            FuseBacking::File { path, device, cache } => {
+                // P3: incremental segment-level persist against the open
+                // FileImageDevice.  Block content is carried through via
+                // `persist_to_device_incremental_with_bytes` so the DATA
+                // segment also benefits from the diff.
+                //
+                // Crash semantics: the same as the Device backing below.
+                // Dual superblocks + per-segment checksums let the volume
+                // recover to the previous generation if a segment write
+                // got torn.  The WAL captured in the PersistedState makes
+                // any unclean mutation that reached the image but not the
+                // superblock replayable on next mount.
+                if device.is_none() {
+                    // Lazy-open path: tests may construct a File-backed
+                    // mount without ever persisting.  Real mounts open
+                    // the device eagerly in `open_session`, so this only
+                    // fires if a test-constructed mount reaches persist
+                    // for a path that has not yet been formatted.
+                    //
+                    // If the file does not exist we fall back to the
+                    // legacy `save_image_to_path` path once to materialise
+                    // it — that runs the full-image serialisation and
+                    // atomic rename which creates the file cleanly.  All
+                    // subsequent persists go through the incremental
+                    // fast path against the now-open device.
+                    use crate::storage::block_device::FileImageDevice;
+                    let path_ref: &Path = path.as_ref();
+                    if !path_ref.exists() {
+                        self.service.save_image_to_path(path_ref)?;
+                    }
+                    *device = Some(FileImageDevice::open(path_ref, false)?);
+                }
+                let dev = device.as_mut().expect("device opened just above");
+                let state = self.service.persisted_state();
+                let block_bytes = self.service.read_all_block_bytes();
+
+                // The volume image grows over time (new inodes, new
+                // extents, WAL entries).  FileImageDevice does not grow
+                // implicitly; the `..._and_grow` variant gives us a hook
+                // that is called after the image has been built (so we
+                // know the exact required length without building twice)
+                // but before the segment writes happen.
+                //
+                // `BlockDevice::resize` was added as part of this phase
+                // so the closure can grow the file through the trait
+                // without downcasting.
+                let _report =
+                    crate::storage::volume_image::persist_to_device_incremental_with_bytes_and_grow(
+                        dev,
+                        &state,
+                        &block_bytes,
+                        cache,
+                        |dev, needed| {
+                            // Overshoot the required size by 25 % (rounded
+                            // to the sector) so we amortise the resize cost
+                            // over many checkpoints.  The file only ever
+                            // grows, and the overshoot is bounded by the
+                            // peak volume size.
+                            use crate::storage::block_device::BlockDevice as _;
+                            let sector_size = dev.sector_size() as u64;
+                            let target = needed.saturating_mul(5) / 4;
+                            let aligned = target.div_ceil(sector_size) * sector_size;
+                            dev.resize(aligned)
+                        },
+                    )?;
+                Ok(())
+            }
             FuseBacking::Device { device, cache } => {
                 let state = self.service.persisted_state();
                 let _report = crate::storage::volume_image::persist_to_device_incremental(
@@ -1691,7 +1798,7 @@ impl CoreFsFuseMountRw {
 
     fn statfs_view(&self) -> (u64, u64) {
         match &self.backing {
-            FuseBacking::File(path) => fuse_capacity_blocks(path, &self.nodes_by_ino),
+            FuseBacking::File { path, .. } => fuse_capacity_blocks(path, &self.nodes_by_ino),
             FuseBacking::Device { device, .. } => {
                 let used_bytes: u64 = self
                     .nodes_by_ino

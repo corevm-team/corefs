@@ -373,6 +373,13 @@ impl BlockDevice for FileImageDevice {
         &self.geometry
     }
 
+    fn resize(&mut self, new_capacity: u64) -> CoreFsResult<()> {
+        // Delegates to the inherent `FileImageDevice::resize` (see above)
+        // so callers that hold a `&mut dyn BlockDevice` can grow a
+        // file-backed device through the trait without downcasting.
+        Self::resize(self, new_capacity)
+    }
+
     fn read_at(&self, offset: u64, length: u64) -> CoreFsResult<Vec<u8>> {
         check_alignment(offset, length, self.geometry.sector_size)?;
         check_bounds(offset, length, self.geometry.capacity_bytes)?;
