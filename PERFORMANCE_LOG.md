@@ -381,3 +381,69 @@ das `fsync_cold`-Niveau (~90+ ops/s).
   `fsync_50x4096B` (-50 %) und `read_200x4096B` (-22 %) gegen die alte
   P1b-Baseline sind dokumentiert — `read_200` ist Jitter-Band, `fsync_warm`
   ist der oben beschriebene P3b-Gap.
+
+---
+
+## Phase 1d — 2026-04-19 (P3b-a: redundanten DATA-Clone eliminiert)
+
+Umgesetzt:
+
+- **Einzelner, kleiner Fix in `split_blocks`** (`src/storage/volume_image.rs`):
+  statt `block_bytes.get(&record.inode).cloned().unwrap_or_default()` wird
+  jetzt per `&[u8]`-Referenz in den DATA-Output geschrieben.  Das
+  eliminiert eine komplette Kopie des DATA-Inhalts pro Persist
+  (für ein Volume mit 128 MiB DATA entspricht das ~128 MiB RAM-Traffic
+  gespart pro fsync).
+- **Baseline `perf-history/baseline.tsv` auf den P3b-a-Run gesetzt**
+  (`perf-history/2026-04-19_*_p3b-no-clone.tsv`).
+
+### Ergebnisse
+
+| Workload                  | Phase 1c (P3) | **Phase 1d (P3b-a)** | ext4 | CoreFS/ext4 |
+|---------------------------|-------------:|---------------------:|-----:|------------:|
+| **fsync_warm 50 × 4 KiB** |     2 ops/s  |           **7 ops/s**|  403 |       58×   |
+| read 200 × 4 KiB          |  3174 ops/s  |               3846   | 5555 |        1.4× |
+| fsync_cold 50 × 4 KiB     |    92 ops/s  |                 93   |  416 |        4.5× |
+| create, seq_write, seq_read, rand, delete, append_log |    — | unverändert im Jitter-Band |  |  |
+
+`fsync_warm` ist um Faktor 3.5× schneller geworden, weil die doppelte
+DATA-Kopie pro Persist aus der Build-Pipeline verschwunden ist.  Der
+Restgap zu ext4 (58×) bleibt, dominiert von der weiterhin vollständigen
+DATA-Segment-Rematerialisierung in jedem Checkpoint.
+
+### Bekannter Gap nach Phase 1d — P3b-b
+
+`fsync_warm` bleibt bei 7 ops/s weil `split_blocks` jeden Persist das
+volle DATA-Segment aus allen Block-Records + deren Content neu
+assembliert (auch unveränderte Inodes).  Für ein 128 MiB-Volume mit
+50 × 4 KiB-fsync kopiert jeder Checkpoint 128 MiB durch die Build-
+Pipeline, auch wenn nur ~4 KB wirklich neu sind.
+
+**P3b-b (Folge-PR, echte dirty-tracking + partial DATA rebuild)**:
+
+- `CoreFsService` pflegt eine `dirty_inodes: HashSet<InodeId>`, die auf
+  jeder Mutation (`write_file` / `extend_file` / `create_file` /
+  `delete_file` / `set_owner` / `set_mode` / `rename_entry` / …)
+  aktualisiert und bei erfolgreichem Persist geleert wird.
+- `DeviceImageCache` speichert zusätzlich die Per-Inode-Offsets in
+  seinem cached DATA-Payload (aus den zuletzt emittierten
+  `BlockDescriptor`s).
+- Neue Funktion `persist_to_device_incremental_partial(device, state,
+  dirty_inodes, read_dirty, cache, grow)`:
+  - Wenn Layout identisch (selbe inode-Menge, selbe Reihenfolge):
+    starte vom cached DATA, patche dirty Regionen in-place.
+  - Sonst: Fallback auf den vollen Rebuild-Pfad.
+- `FUSE-persist` liest nur dirty Inodes via `read_dirty_block_bytes`
+  (neu im Service) und übergibt sie an `..._partial`.
+
+Erwartung: `fsync_warm` kommt auf das `fsync_cold`-Niveau (~90 ops/s),
+weil jeder Persist nur noch die tatsächlich geänderten 4 KiB
+materialisiert statt der gesamten 128 MiB.
+
+### Warum nicht gleich P3b-b?
+
+P3b-b ist größer und berührt sowohl den Cache-Layout-Code als auch die
+Service-API (dirty-Tracking als neues Public-Feature).  Der
+`.cloned()`-Fix ist ein isolierter Bugfix im Build-Pfad, ohne API- oder
+Format-Änderung — testbar und review-bar in einem einzelnen Commit.
+P3b-a + P3b-b zusammen wären ein unübersichtlicher Umbau gewesen.
