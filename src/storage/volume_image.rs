@@ -641,10 +641,15 @@ fn split_blocks(
     let mut data: Vec<u8> = Vec::new();
 
     for record in block_records {
-        let bytes = block_bytes
+        // Read the inode's bytes by reference — the previous `.cloned()`
+        // materialised an owned Vec per inode *in addition to* the
+        // `extend_from_slice` below, producing a second full copy of
+        // the DATA payload on every persist.  For a 128 MiB volume that
+        // added 128 MiB of wasted allocation+copy per checkpoint.
+        let bytes: &[u8] = block_bytes
             .get(&record.inode)
-            .cloned()
-            .unwrap_or_default();
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         let offset = data.len() as u64;
         let length = bytes.len() as u64;
         let device_block = record.first_physical_block();
@@ -656,7 +661,7 @@ fn split_blocks(
         } else {
             record.total_blocks().max(1)
         };
-        data.extend_from_slice(&bytes);
+        data.extend_from_slice(bytes);
         descriptors.push(BlockDescriptor {
             inode: record.inode,
             checksum: u64::from(record.content_crc),
