@@ -408,9 +408,26 @@ impl BlockStore {
         // payload already fills the allocated span exactly, writing
         // the caller's bytes in-place.  Only the rare unaligned-tail
         // case still pays for a padded copy.
+        //
+        // Phase-3d correctness fix: on-demand grow the compat device
+        // when the allocator hands us an offset past the current
+        // capacity.  Pre-3d the store silently dropped the write,
+        // which let `write_file` "succeed" while leaving the on-disk
+        // content truncated to the initial 64 MiB — a correctness
+        // issue that made large-file workloads lose data.  We double
+        // the capacity (or jump to `end`, whichever is larger) so
+        // repeated growth is amortised.
         let byte_offset = phys_block * bs;
         let padded_len = (allocated_blocks * bs) as usize;
-        if byte_offset + padded_len as u64 <= self.compat_device.capacity() {
+        let end_offset = byte_offset.saturating_add(padded_len as u64);
+        if end_offset > self.compat_device.capacity() {
+            let cur = self.compat_device.capacity();
+            let target = core::cmp::max(cur.saturating_mul(2), end_offset);
+            let ss = u64::from(self.compat_device.sector_size());
+            let aligned = target.div_ceil(ss) * ss;
+            let _ = self.compat_device.resize(aligned);
+        }
+        if end_offset <= self.compat_device.capacity() {
             if padded_len == size {
                 let _ = self.compat_device.write_at(byte_offset, &bytes[..size]);
             } else {
@@ -508,7 +525,15 @@ impl BlockStore {
         buf[..extra_len].copy_from_slice(extra);
 
         let byte_offset = new_phys * bs;
-        if byte_offset + padded_len as u64 <= self.compat_device.capacity() {
+        let end_offset = byte_offset.saturating_add(padded_len as u64);
+        if end_offset > self.compat_device.capacity() {
+            let cur = self.compat_device.capacity();
+            let target = core::cmp::max(cur.saturating_mul(2), end_offset);
+            let ss = u64::from(self.compat_device.sector_size());
+            let aligned = target.div_ceil(ss) * ss;
+            let _ = self.compat_device.resize(aligned);
+        }
+        if end_offset <= self.compat_device.capacity() {
             let _ = self.compat_device.write_at(byte_offset, &buf);
         }
 
@@ -957,8 +982,17 @@ impl BlockStore {
             let padded_len = (allocated_blocks * bs) as usize;
             let mut buf = vec![0u8; padded_len];
             buf[..size.min(padded_len)].copy_from_slice(&bytes[..size.min(padded_len)]);
-            if phys_block * bs + padded_len as u64 <= self.compat_device.capacity() {
-                let _ = self.compat_device.write_at(phys_block * bs, &buf);
+            let byte_offset = phys_block * bs;
+            let end_offset = byte_offset.saturating_add(padded_len as u64);
+            if end_offset > self.compat_device.capacity() {
+                let cur = self.compat_device.capacity();
+                let target = core::cmp::max(cur.saturating_mul(2), end_offset);
+                let ss = u64::from(self.compat_device.sector_size());
+                let aligned = target.div_ceil(ss) * ss;
+                let _ = self.compat_device.resize(aligned);
+            }
+            if end_offset <= self.compat_device.capacity() {
+                let _ = self.compat_device.write_at(byte_offset, &buf);
             }
         }
 

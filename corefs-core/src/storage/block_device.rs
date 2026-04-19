@@ -277,6 +277,26 @@ impl BlockDevice for MemoryDevice {
         &self.geometry
     }
 
+    /// Grow (or shrink) the in-memory backing `Vec` so the device can
+    /// accept writes past its previous capacity.  Required by the
+    /// BlockStore compat-device path — without this the store silently
+    /// dropped every byte past the initial 64 MiB allocation, making
+    /// large-file workloads lose data.
+    fn resize(&mut self, new_capacity: u64) -> CoreFsResult<()> {
+        let ss = u64::from(self.geometry.sector_size);
+        if new_capacity % ss != 0 {
+            return Err(CoreFsError::InvalidInput(format!(
+                "new capacity {new_capacity} must be a multiple of sector size {}",
+                self.geometry.sector_size
+            )));
+        }
+        let new_len = new_capacity as usize;
+        self.data.resize(new_len, 0);
+        self.geometry.capacity_bytes = new_capacity;
+        self.geometry.sector_count = new_capacity / ss;
+        Ok(())
+    }
+
     fn read_at(&self, offset: u64, length: u64) -> CoreFsResult<Vec<u8>> {
         check_alignment(offset, length, self.geometry.sector_size)?;
         check_bounds(offset, length, self.geometry.capacity_bytes)?;
