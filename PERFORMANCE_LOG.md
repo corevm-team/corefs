@@ -1,9 +1,11 @@
 # CoreFS Performance Log
 
-| Timestamp | Profile | Files | Payload (B) | Snapshots | Saves | Create (ms) | Read (ms) | Snapshot (ms) | Save (ms) | MiB | Create ops/s | Read ops/s |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2026-04-12 10:40:38 UTC | persist-heavy | 8 | 256 | 2 | 2 | 0 | 0 | 0 | 3 | 0.00 | 8.00 | 8.00 |
-| 2026-04-12 10:52:01 UTC | balanced | 4 | 64 | 1 | 1 | 0 | 0 | 0 | 0 | 0.00 | 4.00 | 4.00 |
+Dieses Dokument ist die **narrative Schicht**: Root-Cause-Analysen,
+Phasen-Entscheidungen, Roadmap.  Die **Rohmessungen** liegen als TSV in
+[`perf-history/`](perf-history/) — dort ist die Single Source of Truth
+für Zahlen, inklusive `baseline.tsv` für Regressions-Diffs.  Tabellen in
+diesem Log sind Zusammenfassungen und verweisen auf den jeweiligen
+TSV-Lauf.
 
 ---
 
@@ -17,7 +19,7 @@ CoreFS-Stack-Overhead.
 
 Harness: `/tmp/corefs-bench/run.sh` (FILES=200, PAYLOAD=4096,
 SEQ_MIB=128, FSYNC_N=50, RAND_MIB=32, RAND_OPS=500,
-STEP_TIMEOUT=180 s). Roh-Ergebnisse: `/tmp/corefs-bench/results.tsv`.
+STEP_TIMEOUT=180 s). Roh-TSV: [`perf-history/2026-04-18_phase0.tsv`](perf-history/2026-04-18_phase0.tsv).
 
 ### Ergebnisse
 
@@ -185,7 +187,7 @@ Umgesetzt:
 
 \* Phase 0 fsync war Timeout bei 180 s (<0.3 ops/s effektiv).
 
-Raw-TSV: `phase1-results.tsv`.
+Raw-TSV: [`perf-history/2026-04-19_phase1.tsv`](perf-history/2026-04-19_phase1.tsv).
 
 ### Verbliebene Gaps und geplante Folge-PRs
 
@@ -220,7 +222,8 @@ erst nach P2/P3 sinnvoll.
 - **Regression-Gate**: `scripts/corefs-benchmark-vs-ext4.sh` (idempotent,
   per-step-Timeouts, produziert TSV + Pretty-Table).  Sollte nach jedem
   Commit an `src/platform/linux_fuse.rs`, `src/app/mod.rs` oder
-  `corefs-core/src/storage/` laufen.
+  `corefs-core/src/storage/` laufen.  Archivierung + Diff gegen Baseline
+  via `scripts/corefs-benchmark-record.sh` → [`perf-history/`](perf-history/).
 - **Umgebungs-Variablen**:
   - `COREFS_STREAM_FLUSH_MIB` — Streaming-Buffer-Grenze pro Handle (default 64)
   - `COREFS_BIN`, `WORK`, `FILES`, `PAYLOAD`, `SEQ_MIB`, `FSYNC_N`,
@@ -259,8 +262,9 @@ Umgesetzt:
 
 ### Ergebnisse nach Phase 1b
 
-Zahlen aus `perf-history/2026-04-19_072652_p2-run2.tsv`, gleicher NVMe,
-gleicher Host.
+Zahlen aus [`perf-history/2026-04-19_072652_p2-run2.tsv`](perf-history/2026-04-19_072652_p2-run2.tsv),
+gleicher NVMe, gleicher Host.  Aktuelle Baseline für Regressions-Diffs:
+[`perf-history/baseline.tsv`](perf-history/baseline.tsv).
 
 | Workload                    | Phase 1 (vor P2) | Phase 1b (nach P2) | ext4 | CoreFS/ext4 | Anmerkung |
 |-----------------------------|-----------------:|-------------------:|-----:|------------:|-----------|
