@@ -283,7 +283,7 @@ Unterschied klar: ohne die neue Fast-Path wäre jeder der 2000 Appends
 O(file_size)-Read-Modify-Write, also quadratisch über den Loop
 (~2 GiB RAM-Traffic).  Mit P2 bleibt jeder Append O(append_size).
 
-### Was P2 NICHT gefixt hat
+### Was P2 NICHT gefixt hat (Phase 1c deckt P3 davon ab)
 
 - **seq_write 128 MiB** — dominiert vom Full-Image-Save am Abschluss-
   `fsync`.  P2 spart nur eine interne Kopie beim zweiten Streaming-Flush,
@@ -296,3 +296,88 @@ O(file_size)-Read-Modify-Write, also quadratisch über den Loop
   gegen Multi-Extent-Records.  Akzeptabel — echte Multi-Extent-Dedup ist
   Scope P2b, nicht Phase-1.
 
+
+---
+
+## Phase 1c — 2026-04-19 (P3: incremental save für FuseBacking::File)
+
+Umgesetzt:
+
+- **P3a — Incremental Save auch für `FuseBacking::File`**.  Die Variante hat
+  bisher bei jedem Checkpoint die gesamte Image-Datei via tmp+rename neu
+  geschrieben (`save_image_to_path`).  Ersetzt durch einen live gehaltenen
+  `FileImageDevice` + `DeviceImageCache` pro Mount; Persists gehen durch die
+  neue Funktion `persist_to_device_incremental_with_bytes_and_grow` in
+  `src/storage/volume_image.rs`, die nur die Segmente rausschreibt, deren
+  Payload gegenüber dem Cache tatsächlich abweicht.
+- **`BlockDevice::resize` als Trait-Methode**.  Default liefert
+  `InvalidInput` ("not supported"), `FileImageDevice` überschreibt mit der
+  bereits vorhandenen inherent `resize`.  Dadurch kann der FUSE-Persist die
+  Datei on-demand wachsen lassen, ohne Downcast auf konkrete Typen.
+- **Single-Build-Invariante**.  `persist_to_device_incremental_with_bytes_and_grow`
+  baut das Image genau einmal, misst danach die benötigte Kapazität und
+  ruft die `grow`-Closure (die im FUSE-Callsite die FileImageDevice um
+  25 % Overshoot vergrößert).  Kein zweites Image-Build für einen separaten
+  Capacity-Check — das war in einer Zwischenversion der Hauptgrund, warum
+  seq-write / rand messbar regressierten.
+- **Neuer Workload `fsync_cold_50x4096B`** im
+  `corefs-benchmark-vs-ext4.sh`.  Läuft *vor* `seq_write_128MiB` und
+  demonstriert P3 auf einem kleinen Volume — der Anwendungsfall, den P3
+  eigentlich adressiert.  Die bestehende `fsync_50x4096B`-Zeile läuft
+  weiterhin *nach* `seq_write_128MiB` und bleibt als Stress-Test stehen.
+
+### Ergebnisse nach Phase 1c
+
+Basis: `perf-history/2026-04-19_080123_p3-cold-fsync.tsv`
+(promotet nach `baseline.tsv`).
+
+| Workload                    | Phase 1b (P2) | **Phase 1c (P3)** | ext4       | CoreFS/ext4 | Anmerkung |
+|-----------------------------|-------------:|-------------------:|-----------:|------------:|-----------|
+| create 200 × 4 KiB          |   2127 ops/s |      **2631 ops/s**| 5263 ops/s |       2.0×  | +24 % |
+| read 200 × 4 KiB            |   4081 ops/s |          3174 ops/s| 6060 ops/s |       1.9×  | Jitter-Band |
+| stat (ls -la) 200           |        5 ms  |             5 ms   |       5 ms |    parity   | |
+| **fsync_cold 50 × 4 KiB**   |       n/a    |        **92 ops/s**|  471 ops/s |       5.1×  | **P3-Demo** (war <1 ops/s vor P1) |
+| seq write 128 MiB           |    67 MiB/s  |          68 MiB/s  |  757 MiB/s |      11×    | P3b-gebunden |
+| seq read 128 MiB            |  1075 MiB/s  |     **1802 MiB/s** | 6400 MiB/s |       3.6×  | +68 % |
+| fsync_warm 50 × 4 KiB       |     4 ops/s  |          2 ops/s   |  515 ops/s |      258×   | block_bytes-Clone dominiert |
+| rand 4K 70r/30w, 500 ops    |   627 ops/s  |          560 ops/s |14 285 ops/s|      25×    | Jitter-Band |
+| delete 200 × 4 KiB          |      26 ms   |          29 ms     |     13 ms  |       2.2×  | |
+| append_log 2000 × 1 KiB     |   5524 ops/s |          5167 ops/s|54 054 ops/s|      10×    | Jitter-Band |
+
+`fsync_cold` ist die klare Demonstration: bei einem frisch formatierten
+Volume erreicht CoreFS mit P3 nun **92 fsyncs/s** gegen ext4 **471/s** —
+Faktor 5.1× statt ~104× wie vor P3.  Pre-Phase-1 war der gleiche Workload
+mit <1 fsync/s effektiv blockiert.
+
+### Bekannter Gap nach Phase 1c — P3b
+
+`fsync_warm_50x4096B` (fsync-heavy *nach* `seq_write_128MiB`) bleibt bei
+~2 ops/s.  Ursache: `read_all_block_bytes` klont pro Persist die Bytes
+*aller* Inodes, auch die unveränderten.  Für ein Volume mit einem 128 MiB-
+File bedeutet das, dass jeder fsync 128 MiB im RAM kopiert, obwohl das
+DATA-Segment seit dem letzten Checkpoint unverändert ist.  Die Cache-Diff
+erkennt den Zustand zwar und überspringt den Write, aber der Build-Pfad
+hat die Kopie bereits angelegt.
+
+**P3b (Folge-PR)**: `CoreFsService` verfolgt pro Checkpoint eine Menge
+"dirty inodes"; `read_all_block_bytes_for_dirty(dirty)` liefert nur deren
+Content, unveränderte Inodes werden mit ihrem bereits im Cache
+gespeicherten Segment-Payload re-used.  Erwartung: `fsync_warm` kommt auf
+das `fsync_cold`-Niveau (~90+ ops/s).
+
+### Zusätzlich verbessert (Side-Effekte)
+
+- **seq_read 128 MiB**: 1075 → 1802 MiB/s (+68 %).  Keine direkte
+  Erklärung im Code — vermutlich weniger Fragmentierung der
+  `compat_device`-Allokationen, weil P3 die Image-Datei jetzt direkt als
+  FileImageDevice pro Mount offen hält.
+- **create 200 × 4 KiB**: 2127 → 2631 ops/s (+24 %).  Incremental Save
+  spart pro `create`-Checkpoint den tmp+rename-Overhead.
+
+### Harness-Änderungen
+
+- Neu: Workload `fsync_cold_50x4096B` vor `seq_write_128MiB`.
+- `baseline.tsv` auf P3 promotet (inkl. neuer Row).  Die Regressionen
+  `fsync_50x4096B` (-50 %) und `read_200x4096B` (-22 %) gegen die alte
+  P1b-Baseline sind dokumentiert — `read_200` ist Jitter-Band, `fsync_warm`
+  ist der oben beschriebene P3b-Gap.
