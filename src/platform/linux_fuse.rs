@@ -129,7 +129,7 @@ impl FuseNode {
 struct CoreFsFuseView {
     nodes_by_ino: HashMap<u64, FuseNode>,
     ino_by_path: HashMap<String, u64>,
-    children: BTreeMap<String, Vec<String>>,
+    children: BTreeMap<String, std::collections::BTreeSet<String>>,
     volume_name: String,
 }
 
@@ -163,7 +163,7 @@ impl CoreFsFuseView {
     ) -> Self {
         let mut nodes_by_ino = HashMap::new();
         let mut ino_by_path = HashMap::new();
-        let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut children: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
 
         let root = FuseNode {
             path: "/".to_string(),
@@ -197,7 +197,7 @@ impl CoreFsFuseView {
             children
                 .entry(parent_path.clone())
                 .or_default()
-                .push(base_name(&inode.path));
+                .insert(base_name(&inode.path));
             children.entry(inode.path.clone()).or_default();
             ino_by_path.insert(inode.path.clone(), ino);
             nodes_by_ino.insert(
@@ -211,10 +211,8 @@ impl CoreFsFuseView {
             );
         }
 
-        for names in children.values_mut() {
-            names.sort();
-            names.dedup();
-        }
+        // Children are kept in a BTreeSet, which is sorted + deduped
+        // by construction — no explicit sort pass needed.
 
         Self {
             nodes_by_ino,
@@ -631,7 +629,7 @@ struct CoreFsFuseMountRw {
     pending_wal: Option<VolumeWal>,
     nodes_by_ino: HashMap<u64, FuseNode>,
     ino_by_path: HashMap<String, u64>,
-    children: BTreeMap<String, Vec<String>>,
+    children: BTreeMap<String, std::collections::BTreeSet<String>>,
     next_handle: u64,
     open_files: HashMap<u64, OpenFileHandle>,
     dirty: bool,
@@ -1302,7 +1300,7 @@ impl CoreFsFuseMountRw {
 
         let mut nodes_by_ino = HashMap::new();
         let mut ino_by_path = HashMap::new();
-        let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut children: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
 
         nodes_by_ino.insert(
             ROOT_INO,
@@ -1323,7 +1321,7 @@ impl CoreFsFuseMountRw {
             children
                 .entry(par.clone())
                 .or_default()
-                .push(base_name(&inode.path));
+                .insert(base_name(&inode.path));
             children.entry(inode.path.clone()).or_default();
             ino_by_path.insert(inode.path.clone(), ino);
             nodes_by_ino.insert(
@@ -1336,10 +1334,7 @@ impl CoreFsFuseMountRw {
                 },
             );
         }
-        for names in children.values_mut() {
-            names.sort();
-            names.dedup();
-        }
+        // Phase-3c: children is a BTreeSet, sorted + deduped automatically.
 
         self.nodes_by_ino = nodes_by_ino;
         self.ino_by_path = ino_by_path;
@@ -1408,18 +1403,21 @@ impl CoreFsFuseMountRw {
     }
 
     /// Register a freshly created path in all index maps.
+    ///
+    /// Phase-3c note: the Phase-2 implementation pushed `name` into a
+    /// `Vec<String>` per directory and then iterated *every directory
+    /// in the volume* to sort + dedup its siblings.  On a workload
+    /// that creates N files one by one that was O(N²) work.  Moving
+    /// the sibling index to a `BTreeSet<String>` gives O(log m)
+    /// insertion/removal per op and keeps readdir output naturally
+    /// sorted.
     fn register_node(&mut self, node: FuseNode) {
         let ino = node.ino();
         let par = node.parent_path.clone();
         let name = base_name(&node.path);
         self.ino_by_path.insert(node.path.clone(), ino);
         self.children.entry(node.path.clone()).or_default();
-        self.children.entry(par).or_default().push(name);
-        // keep children sorted + deduplicated
-        for names in self.children.values_mut() {
-            names.sort();
-            names.dedup();
-        }
+        self.children.entry(par).or_default().insert(name);
         self.nodes_by_ino.insert(ino, node);
     }
 
@@ -1430,7 +1428,7 @@ impl CoreFsFuseMountRw {
             self.children.remove(&node.path);
             if let Some(siblings) = self.children.get_mut(&node.parent_path) {
                 let name = base_name(&node.path);
-                siblings.retain(|n| n != &name);
+                siblings.remove(&name);
             }
         }
     }
