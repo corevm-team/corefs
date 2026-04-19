@@ -437,16 +437,114 @@ impl BlockStore {
     }
 
     /// Hängt `extra` an den bestehenden Inhalt von `inode` an.
+    ///
+    /// Phase-1 P2: für plain (unflagged) Records wird ein **neuer Extent**
+    /// am Ende angehängt — es werden keine bestehenden Bytes gelesen oder
+    /// umkopiert.  Das macht sequentielle Streaming-Writes O(append_size)
+    /// statt O(existing + append) und eliminiert die quadratische
+    /// Skalierung, die bei wiederholten `append_to_inode`-Calls auf
+    /// wachsende Dateien entstand (siehe `PERFORMANCE_LOG.md` Phase 1).
+    ///
+    /// Für Records mit `flags != 0` (compressed/encrypted) fällt die
+    /// Funktion auf den klassischen Read-Modify-Write-Pfad zurück, weil
+    /// ein Plain-Extent hinter einem komprimierten Prefix die
+    /// read/decrypt/decompress-Pipeline brechen würde.  Multi-format
+    /// per-Extent-Support ist Scope für P2b.
     pub fn append_to_inode(&mut self, inode: InodeId, extra: &[u8]) -> usize {
-        let existing_bytes = match self.records.get(&inode) {
-            Some(rec) => self.read_bytes_internal(rec),
-            None => {
-                return self.write(inode, extra.to_vec());
-            }
+        // Empty append: no-op, return current logical size.
+        if extra.is_empty() {
+            return self
+                .records
+                .get(&inode)
+                .map(|r| r.logical_size as usize)
+                .unwrap_or(0);
+        }
+
+        // No existing record → full write path.
+        let Some(existing) = self.records.get(&inode).cloned() else {
+            return self.write(inode, extra.to_vec());
         };
-        let mut new_bytes = existing_bytes;
-        new_bytes.extend_from_slice(extra);
-        self.write(inode, new_bytes)
+
+        // Empty file (no extents) → full write path.
+        if existing.extents.is_empty() || existing.logical_size == 0 {
+            return self.write(inode, extra.to_vec());
+        }
+
+        // Compressed / encrypted prefix blocks the cheap append path.
+        // Appending a plain extent behind the existing compressed/encrypted
+        // extents would mean mixed pipeline state per extent, which the
+        // current read_bytes_internal does not support.  Fall back to RMW.
+        if existing.flags != 0 || existing.extents.iter().any(|e| e.flags != 0) {
+            let existing_bytes = self.read_bytes_internal(&existing);
+            let mut new_bytes = existing_bytes;
+            new_bytes.extend_from_slice(extra);
+            return self.write(inode, new_bytes);
+        }
+
+        // ── Fast path: allocate a new extent and append it ──────────────
+        let bs = self.block_size as u64;
+        let extra_len = extra.len();
+        let needed_blocks = (extra_len as u64).div_ceil(bs);
+        let (new_phys, new_alloc) = self.allocate_extent(needed_blocks);
+
+        // Materialise extra bytes, zero-padded to the allocated block span.
+        let padded_len = (new_alloc * bs) as usize;
+        let mut buf = vec![0u8; padded_len];
+        buf[..extra_len].copy_from_slice(extra);
+
+        let byte_offset = new_phys * bs;
+        if byte_offset + padded_len as u64 <= self.compat_device.capacity() {
+            let _ = self.compat_device.write_at(byte_offset, &buf);
+        }
+
+        // Per-extent CRC is over the logical (unpadded) appended bytes,
+        // matching the convention used for single-extent records elsewhere.
+        let extra_crc = Crc32c::hash(extra);
+
+        // Logical block offset of the new extent = blocks covered by all
+        // preceding extents.  We use length_blocks (allocated) rather than
+        // logical_len / bs so the mapping matches how read_bytes_internal
+        // iterates device blocks.
+        let logical_block_start: u32 = existing
+            .extents
+            .iter()
+            .map(|e| e.length_blocks)
+            .sum();
+
+        let new_extent = ExtentRef {
+            logical_block: logical_block_start,
+            logical_len: extra_len as u32,
+            physical_block: new_phys,
+            length_blocks: new_alloc as u32,
+            physical_len: extra_len as u32,
+            content_crc: extra_crc,
+            flags: 0,
+        };
+
+        // Incremental record-level CRC over (existing_logical_bytes || extra).
+        // Crc32c::hash = !update(!0, data); hash-combine requires the raw
+        // running seed.  We recover it as !existing.content_crc, advance
+        // with the extra bytes, then invert back.
+        let combined_crc = !Crc32c::update(!existing.content_crc, extra);
+
+        // Dedup bookkeeping: once a record spans multiple extents its
+        // combined CRC can no longer be resolved back to a single
+        // (phys_block, length_blocks) tuple, so we drop the old entry to
+        // avoid handing out stale dedup hits.  We do NOT insert a new entry
+        // for the combined CRC; multi-extent dedup is out of scope here.
+        let first_extent = &existing.extents[0];
+        let first_blocks = first_extent.length_blocks;
+        let first_phys = first_extent.physical_block;
+        self.dedup_release(existing.content_crc, first_phys, first_blocks);
+
+        let mut rec = existing;
+        rec.extents.push(new_extent);
+        rec.logical_size = rec.logical_size.saturating_add(extra_len as u64);
+        rec.content_crc = combined_crc;
+        let new_size = rec.logical_size as usize;
+        self.records.insert(inode, rec);
+
+        new_size
     }
 
     /// Liest alle Bytes für `inode` (intern).
