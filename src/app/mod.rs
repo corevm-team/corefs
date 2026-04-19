@@ -136,6 +136,19 @@ pub struct CoreFsService {
     pending_wal: Option<VolumeWal>,
     snapshots: Vec<Snapshot>,
     next_snapshot_id: u64,
+    /// Inodes whose on-disk representation is out of sync with the last
+    /// persisted image.  Populated by every mutation that touches block
+    /// content or extent layout (create/write/extend/delete/truncate
+    /// etc.), drained by
+    /// [`CoreFsService::take_dirty_inodes`] as part of a checkpoint.
+    ///
+    /// Introduced in Phase 1e / P3b-b so the FUSE persist path can
+    /// rebuild only the DATA regions that actually changed since the
+    /// last checkpoint instead of re-materialising the full segment
+    /// on every call.  Metadata-only mutations (owner, mode, rename,
+    /// timestamps) do *not* dirty this set — they change catalog /
+    /// inode segments but leave block content untouched.
+    dirty_inodes: std::collections::HashSet<crate::domain::inode::InodeId>,
 }
 
 impl CoreFsService {
@@ -171,7 +184,29 @@ impl CoreFsService {
             pending_wal: None,
             snapshots: Vec::new(),
             next_snapshot_id: 0,
+            dirty_inodes: std::collections::HashSet::new(),
         }
+    }
+
+    /// Returns and clears the set of inodes whose block content has
+    /// mutated since the previous call.  Intended to be called once per
+    /// checkpoint by the persist path — unchanged inodes can then be
+    /// served from the cached DATA segment instead of rematerialised.
+    pub fn take_dirty_inodes(&mut self) -> std::collections::HashSet<crate::domain::inode::InodeId> {
+        core::mem::take(&mut self.dirty_inodes)
+    }
+
+    /// Returns `true` if at least one inode has dirty block content
+    /// since the last `take_dirty_inodes` call.
+    pub fn has_dirty_inodes(&self) -> bool {
+        !self.dirty_inodes.is_empty()
+    }
+
+    /// Marks `inode` as having mutated block content.  Callers use this
+    /// alongside direct mutations of [`BlockStore`] so the persist path
+    /// can tell which DATA regions need a fresh build.
+    fn mark_inode_dirty(&mut self, inode: crate::domain::inode::InodeId) {
+        self.dirty_inodes.insert(inode);
     }
 
     pub fn create_file(&mut self, path: &str, bytes: &[u8], tags: &[String]) -> CoreFsResult<()> {
@@ -250,6 +285,7 @@ impl CoreFsService {
         self.hot_paths.record_write(path, bytes.len());
         self.journal
             .record("create_file", path, format!("bytes={}", bytes.len()));
+        self.dirty_inodes.insert(inode_id);
         self.auto_optimize_storage("create_file");
         Ok(())
     }
@@ -281,6 +317,10 @@ impl CoreFsService {
         self.catalog.insert(inode);
         self.hot_paths.record_metadata(path);
         self.journal.record("create_directory", path, "");
+        // Directories don't carry DATA bytes but the block_records list
+        // grows by one empty record — mark so the DATA segment layout
+        // gets rebuilt (the new descriptor shifts subsequent offsets).
+        self.dirty_inodes.insert(inode_id);
         Ok(())
     }
 
@@ -304,6 +344,7 @@ impl CoreFsService {
         self.hot_paths.record_metadata(path);
         self.journal
             .record("create_symlink", path, format!("target={target}"));
+        self.dirty_inodes.insert(inode_id);
         self.auto_optimize_storage("create_symlink");
         Ok(())
     }
@@ -361,6 +402,7 @@ impl CoreFsService {
         self.hot_paths.record_write(path, bytes.len());
         self.journal
             .record("write_file", path, format!("bytes={}", bytes.len()));
+        self.dirty_inodes.insert(inode_id);
         self.auto_optimize_storage("write_file");
         Ok(())
     }
@@ -421,6 +463,7 @@ impl CoreFsService {
         self.hot_paths.record_write(path, extra.len());
         self.journal
             .record("extend_file", path, format!("extra_bytes={}", extra.len()));
+        self.dirty_inodes.insert(inode_id);
         Ok(())
     }
 
@@ -475,6 +518,13 @@ impl CoreFsService {
             self.journal.record("delete", path, "recoverable=true");
         }
 
+        // Both secure and recoverable delete change the block_records
+        // list (records either removed or moved into the deleted
+        // section), so every downstream DATA segment offset shifts.
+        // Mark the removed inode id so the persist path knows the
+        // layout is no longer identical to the cached one.
+        self.dirty_inodes.insert(inode.id);
+
         Ok(())
     }
 
@@ -488,9 +538,11 @@ impl CoreFsService {
             })?
         };
 
+        let inode_id = inode.id;
         self.catalog.insert(inode);
         self.hot_paths.record_metadata(path);
         self.journal.record("restore", path, "");
+        self.dirty_inodes.insert(inode_id);
         Ok(())
     }
 
@@ -1483,6 +1535,10 @@ impl CoreFsService {
             pending_wal: state.pending_wal,
             snapshots: state.snapshots,
             next_snapshot_id: state.next_snapshot_id,
+            // The on-disk image we just loaded is, by construction,
+            // clean — nothing to mark dirty.  Subsequent mutations
+            // populate this set.
+            dirty_inodes: std::collections::HashSet::new(),
         };
         service.recover_runtime_state();
         service.reconcile_from_journal();
