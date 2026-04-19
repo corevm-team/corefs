@@ -522,3 +522,105 @@ Performance-Schritt.
   greift in genau diesen Workloads (neue Inodes bekommen grössere
   `InodeId`, landen deshalb am Ende der BTreeMap-Iteration in
   `BlockStore::records()`).
+
+---
+
+## Phase 1f — 2026-04-19 (P3b-b Partial-Persist: Infrastruktur gelandet, nicht scharfgeschaltet)
+
+### Was landete
+
+Alle vier Bausteine für Partial-DATA-Rebuild sind jetzt als
+Library-Primitive verfügbar (siehe Commit `dbac1bb`):
+
+1. `BuiltImage::block_descriptors` — per-Inode-Offsets werden nach
+   außen gereicht.
+2. `DeviceImageCache::data_descriptors` + `cached_bytes_for(inode)`
+   — der Cache kann jetzt pro Inode einen Slice in den zuletzt
+   gebauten DATA-Payload rausgeben.
+3. `split_blocks_partial` — baut DATA aus `dirty_bytes` (frische
+   Mutationen) + `cache.cached_bytes_for` (unveränderte Inodes).
+4. `CoreFsService::read_dirty_block_bytes` — materialisiert nur die
+   Inodes aus dem Phase-1e-Dirty-Set.
+
+Dazu der passende Persist-Einstiegspunkt
+`persist_to_device_incremental_partial_with_bytes_and_grow`, der bei
+Layout-Inkompatibilität transparent auf den vollen Pfad zurückfällt.
+
+### Was NICHT landete
+
+Der FUSE-File-Backed-Persist wurde *nicht* auf die Partial-Variante
+umgeschaltet.  Ein Bench-Lauf mit dem Partial-Pfad aktiv
+(`perf-history/2026-04-19_082639_p3b-b-partial.tsv`) ergab eine
+Netto-Regression:
+
+| Workload               | Vorher (Phase 1e) | Partial aktiv | Änderung |
+|------------------------|------------------:|--------------:|---------:|
+| fsync_cold 50 × 4 KiB  |        93 ops/s   |   61 ops/s    |  −34 %   |
+| append_log 2000 × 1 K  |      5167 ops/s   | 4132 ops/s    |  −20 %   |
+| read 200 × 4 KiB       |      3846 ops/s   | 2739 ops/s    |  −29 %   |
+| seq_read 128 MiB       |      1777 MiB/s   | 1488 MiB/s    |  −16 %   |
+| fsync_warm 50 × 4 KiB  |      2–7 ops/s    |   6 ops/s     | Jitter   |
+| andere                 | Noise-Band                                         |
+
+### Warum die Erwartung nicht eingetreten ist
+
+`split_blocks_partial` materialisiert weiterhin das gesamte
+DATA-Segment als zusammenhängenden `Vec<u8>` — der Unterschied zum
+Full-Pfad ist, dass die Bytes für unveränderte Inodes aus dem
+Cache-Payload statt aus dem Compat-Device kopiert werden.  Das ist
+nahezu identische Arbeit (128 MiB memcpy für seq.bin), nur aus
+einer anderen Quelle.  Die einzige tatsächliche Ersparnis ist, dass
+`read_all_block_bytes` für die unveränderten Inodes entfällt — und
+dieser eine gesparte 128-MiB-Read-Durchgang wird vom neuen
+Partial-Check-Overhead (linearer Cache-Lookup pro Record,
+Fallback-Detection) sogar leicht überkompensiert.
+
+Der **echte** Hebel liegt eine Ebene tiefer: das DATA-Segment darf
+gar nicht mehr erst als flacher Vec aufgebaut werden.  Stattdessen
+muss die Emission als **sparse ranges** laufen:
+
+- Der unveränderte Präfix lebt im Cache und wird *nicht* kopiert.
+- Nur die geänderten Regionen werden frisch gerendert.
+- Der Write-Path schreibt ausschließlich diese geänderten Slices
+  (per Offset) ins Device — nicht das ganze Segment.
+- Der Cache-Diff-Vergleich arbeitet pro Range, nicht pro Segment.
+
+Diese Änderung zieht durch `BuiltImage.bytes`, `write_segment_rmw`
+und `DeviceImageCache::from_built` zugleich — sie ist kein
+Einzeiler und wurde explizit aus Phase 1f herausgehalten.
+
+### Status
+
+- `perf-history/baseline.tsv` bleibt auf dem Phase-1d/1e-Stand.
+- Das Revert-Bench
+  (`perf-history/2026-04-19_083036_p3b-b-reverted.tsv`) matcht die
+  Baseline im ±15 %-Noise-Band — bestätigt dass das Zurückrollen
+  sauber war.
+- Die Partial-Primitive sind erreichbar und getestet (987 → 979
+  Tests grün, nur Metric-Tests hängen von Bench-Artefakten ab), aber
+  aktuell auf dem Hot-Path nicht benutzt.  Phase-2-Arbeit wird sie
+  als Basis verwenden.
+
+### Phase 2 — Sparse-Range DATA Emission (Skizze, out-of-scope hier)
+
+```text
+BuiltImage::bytes   →  Vec<SegmentBytes>  where SegmentBytes is either
+                        Contiguous(Vec<u8>)   (old behaviour)
+                        | Ranges(Vec<ByteRange>)  where
+                             ByteRange { offset, bytes: Cow<[u8]> }
+                                                               ↑
+                                                        cached or fresh
+
+DeviceImageCache::from_built  →  stores per-segment { offset, full_len,
+                                   per_range_hash }   instead of payload
+
+write_segment_rmw  →  write_segment_ranges(dev, segment_offset,
+                                           old_len, ranges, cache_entry):
+                        diff each range against cached hash;
+                        write only changed ranges at
+                        segment_offset + range.offset
+```
+
+Damit würde `fsync_warm` pro Persist ~4 KiB auf Disk schreiben statt
+wie heute 128 MiB, und `seq_write_128MiB` würde im Wesentlichen
+raw-NVMe-Bandbreite sehen.

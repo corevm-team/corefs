@@ -1,0 +1,21 @@
+fs	workload	ms	ops_or_mibs
+corefs-fuse	create_200x4096B	67	2985 ops/s
+corefs-fuse	read_200x4096B	58	3448 ops/s
+corefs-fuse	stat_ls_200	5	-
+corefs-fuse	fsync_cold_50x4096B	578	86 ops/s
+corefs-fuse	seq_write_128MiB	1898	67 MiB/s
+corefs-fuse	seq_read_128MiB	75	1706 MiB/s
+corefs-fuse	fsync_50x4096B	18153	2 ops/s
+corefs-fuse	rand4k_500ops_70r30w	870	574 ops/s
+corefs-fuse	delete_200_small	27	-
+corefs-fuse	append_log_2000x1KiB	386	5181 ops/s
+ext4-direct	create_200x4096B	37	5405 ops/s
+ext4-direct	read_200x4096B	33	6060 ops/s
+ext4-direct	stat_ls_200	5	-
+ext4-direct	fsync_cold_50x4096B	100	500 ops/s
+ext4-direct	seq_write_128MiB	180	711 MiB/s
+ext4-direct	seq_read_128MiB	22	5818 MiB/s
+ext4-direct	fsync_50x4096B	125	400 ops/s
+ext4-direct	rand4k_500ops_70r30w	33	15151 ops/s
+ext4-direct	delete_200_small	13	-
+ext4-direct	append_log_2000x1KiB	37	54054 ops/s
