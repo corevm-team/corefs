@@ -427,6 +427,58 @@ fn incremental_classifies_create_update_remove() {
 }
 
 #[test]
+fn dirty_incremental_persists_metadata_only_update() {
+    let mut dev = fresh_device(4096);
+    format_device(&mut dev, &default_options()).unwrap();
+    let mut state = empty_state();
+    let mut inode = sample_inode(1, "/f1", InodeKind::File, 4);
+    inode.metadata.mode = 0o644;
+    state.active_inodes.push(inode.clone());
+    state.block_records.push(BlockRecord {
+        inode: inode.id,
+        logical_size: 4,
+        extents: alloc::vec![],
+        content_crc: crate::storage::ondisk::checksum::Crc32c::hash(b"data"),
+        flags: 0,
+    });
+    save_state_native(&mut dev, &state).unwrap();
+
+    state.active_inodes[0].path = "/renamed".into();
+    state.active_inodes[0].metadata.mode = 0o600;
+    state.active_inodes[0].touch_changed_at(Timestamp::EPOCH);
+    let report =
+        save_state_native_incremental_dirty(&mut dev, &state, &[InodeId(1)], &[]).unwrap();
+    assert_eq!(report.updated, 1);
+    assert_eq!(report.created, 0);
+    assert_eq!(report.removed, 0);
+
+    let loaded = load_state_native(&dev).unwrap();
+    assert_eq!(loaded.active_inodes.len(), 1);
+    assert_eq!(loaded.active_inodes[0].path, "/renamed");
+    assert_eq!(loaded.active_inodes[0].metadata.mode, 0o600);
+}
+
+#[test]
+fn dirty_incremental_releases_removed_inode_slot() {
+    let mut dev = fresh_device(4096);
+    format_device(&mut dev, &default_options()).unwrap();
+    let mut state = empty_state();
+    state
+        .active_inodes
+        .push(sample_inode(1, "/f1", InodeKind::File, 0));
+    save_state_native(&mut dev, &state).unwrap();
+
+    state.active_inodes.clear();
+    let report =
+        save_state_native_incremental_dirty(&mut dev, &state, &[], &[InodeId(1)]).unwrap();
+    assert_eq!(report.removed, 1);
+
+    let loaded = load_state_native(&dev).unwrap();
+    assert!(loaded.active_inodes.is_empty());
+    assert!(loaded.deleted_inodes.is_empty());
+}
+
+#[test]
 fn incremental_save_reuses_freed_blocks() {
     let mut dev = fresh_device(4096);
     format_device(&mut dev, &default_options()).unwrap();

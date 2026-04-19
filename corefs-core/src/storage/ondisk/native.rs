@@ -36,7 +36,6 @@
 //! removed but retained for recovery.
 
 use alloc::format;
-use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -55,7 +54,7 @@ use super::bitmap::Bitmap;
 use super::checksum::Crc32c;
 use super::inode::{Extent, FLAG_HAS_EXTENT_INDEX, INODE_RECORD_SIZE, OnDiskInode, OnDiskKind};
 use super::layout::{BLOCK_SIZE, LayoutGeometry, PRIMARY_SUPERBLOCK_BLOCK};
-use super::superblock::{LAYOUT_MODE_NATIVE, STATE_CLEAN, Superblock};
+use super::superblock::{LAYOUT_MODE_NATIVE, STATE_CLEAN};
 
 /// Flag — this on-disk slot holds a soft-deleted inode.
 pub const FLAG_DELETED: u32 = 1 << 4;
@@ -568,6 +567,214 @@ pub fn save_state_native_incremental(
     rewrite_ancillary(device, &mut alloc, &geom, state, sb.created_at)?;
 
     // Flush bitmaps + superblock.
+    let used_data = geom.data_blocks - alloc.free_data_blocks();
+    let (final_bbm, final_ibm) = alloc.into_bitmaps();
+    write_blocks(device, geom.block_bitmap_start, final_bbm.as_bytes())?;
+    write_blocks(device, geom.inode_bitmap_start, final_ibm.as_bytes())?;
+
+    let mut sb = sb;
+    sb.generation += 1;
+    sb.last_write_at = now_secs();
+    sb.state = STATE_CLEAN;
+    sb.layout_mode = LAYOUT_MODE_NATIVE;
+    sb.payload_inode = ANCILLARY_INODE_SLOT;
+    sb.free_blocks = geom.data_blocks - used_data;
+    sb.free_inodes = geom.inode_count - final_ibm.popcount();
+    sb.block_bitmap_crc = Crc32c::hash(final_bbm.as_bytes());
+    sb.inode_bitmap_crc = Crc32c::hash(final_ibm.as_bytes());
+    sb.root_inode = state
+        .active_inodes
+        .iter()
+        .find(|i| i.path == "/" && matches!(i.kind, InodeKind::Directory))
+        .map(|i| i.id.0)
+        .unwrap_or(0);
+    let sb_block = sb.encode_block();
+    device.write_at(PRIMARY_SUPERBLOCK_BLOCK * BLOCK_SIZE, &sb_block)?;
+    device.write_at(geom.tertiary_superblock_block * BLOCK_SIZE, &sb_block)?;
+    device.write_at(geom.secondary_superblock_block * BLOCK_SIZE, &sb_block)?;
+    device.sync()?;
+
+    report.generation = sb.generation;
+    Ok(report)
+}
+
+/// Persist only a known set of changed inodes.
+///
+/// This is the hot path for kernel/native mounts that already track dirty
+/// domain inodes. It avoids walking every allocated inode slot just to discover
+/// which slots changed. If `removed_inode_ids` contains IDs that are no longer
+/// present in `state.active_inodes` or `state.deleted_inodes`, their on-disk
+/// slots are released.
+pub fn save_state_native_incremental_dirty(
+    device: &mut dyn BlockDevice,
+    state: &PersistedState,
+    dirty_inode_ids: &[InodeId],
+    removed_inode_ids: &[InodeId],
+) -> CoreFsResult<IncrementalSaveReport> {
+    if dirty_inode_ids.is_empty() && removed_inode_ids.is_empty() {
+        let sb = super::volume::read_sb_with_fallbacks(device)?;
+        return Ok(IncrementalSaveReport {
+            generation: sb.generation,
+            ..IncrementalSaveReport::default()
+        });
+    }
+
+    let sb = super::volume::read_sb_with_fallbacks(device)?;
+    if sb.layout_mode != LAYOUT_MODE_NATIVE {
+        let r = save_state_native(device, state)?;
+        return Ok(IncrementalSaveReport {
+            generation: r.generation,
+            created: r.active_slots + r.deleted_slots,
+            updated: 0,
+            removed: 0,
+            unchanged: 0,
+            fell_back_to_full_save: true,
+        });
+    }
+    let geom = sb.geometry();
+
+    let ibm_bytes = device.read_at(
+        geom.inode_bitmap_start * BLOCK_SIZE,
+        geom.inode_bitmap_blocks * BLOCK_SIZE,
+    )?;
+    let ibm = Bitmap::from_bytes(ibm_bytes, geom.inode_count)?;
+    let bbm_bytes = device.read_at(
+        geom.block_bitmap_start * BLOCK_SIZE,
+        geom.block_bitmap_blocks * BLOCK_SIZE,
+    )?;
+    let bbm = Bitmap::from_bytes(bbm_bytes, geom.total_blocks)?;
+
+    #[derive(Debug, Clone)]
+    struct ExistingSlot {
+        slot: u64,
+        on_disk: OnDiskInode,
+    }
+
+    let mut targets: HashMap<u64, ()> = HashMap::new();
+    for id in dirty_inode_ids {
+        targets.insert(id.0, ());
+    }
+    for id in removed_inode_ids {
+        targets.insert(id.0, ());
+    }
+
+    let mut existing: HashMap<u64, ExistingSlot> = HashMap::new();
+    for slot in FIRST_USER_INODE_SLOT..geom.inode_count {
+        if existing.len() >= targets.len() {
+            break;
+        }
+        if !ibm.is_set(slot)? {
+            continue;
+        }
+        let on_disk = read_inode_at_slot(device, &geom, slot)?;
+        if on_disk.kind == OnDiskKind::Unused {
+            continue;
+        }
+        if targets.contains_key(&on_disk.domain_inode_id) {
+            existing.insert(on_disk.domain_inode_id, ExistingSlot { slot, on_disk });
+        }
+    }
+
+    let mut records_by_inode: HashMap<InodeId, &crate::storage::block_store::BlockRecord> =
+        HashMap::new();
+    for rec in &state.block_records {
+        records_by_inode.insert(rec.inode, rec);
+    }
+
+    #[derive(Clone)]
+    struct DesiredSlot<'a> {
+        inode: &'a Inode,
+        rec: Option<&'a crate::storage::block_store::BlockRecord>,
+        deleted: bool,
+    }
+    let mut desired: HashMap<u64, DesiredSlot<'_>> = HashMap::new();
+    for inode in &state.active_inodes {
+        if targets.contains_key(&inode.id.0) {
+            desired.insert(
+                inode.id.0,
+                DesiredSlot {
+                    inode,
+                    rec: records_by_inode.get(&inode.id).copied(),
+                    deleted: false,
+                },
+            );
+        }
+    }
+    for inode in &state.deleted_inodes {
+        if targets.contains_key(&inode.id.0) {
+            desired.insert(
+                inode.id.0,
+                DesiredSlot {
+                    inode,
+                    rec: records_by_inode.get(&inode.id).copied(),
+                    deleted: true,
+                },
+            );
+        }
+    }
+
+    let mut alloc = OndiskAllocator::new(
+        &geom,
+        bbm,
+        ibm,
+        AllocationStrategy::FirstFit,
+        FIRST_USER_INODE_SLOT,
+    );
+
+    // File data may already have been written by the BlockStore before this
+    // metadata flush. Mark the current desired extents as used so attr/index
+    // allocations cannot collide with freshly written file blocks.
+    for rec in &state.block_records {
+        for ext in &rec.extents {
+            for b in 0..u64::from(ext.length_blocks) {
+                let _ = alloc.mark_used(ext.physical_block + b);
+            }
+        }
+    }
+
+    let mut report = IncrementalSaveReport::default();
+
+    for id in removed_inode_ids {
+        if desired.contains_key(&id.0) {
+            continue;
+        }
+        if let Some(cur) = existing.get(&id.0) {
+            release_slot(device, &mut alloc, &geom, cur.slot, &cur.on_disk)?;
+            report.removed += 1;
+        }
+    }
+
+    for id in dirty_inode_ids {
+        let Some(want) = desired.get(&id.0) else {
+            continue;
+        };
+        if let Some(cur) = existing.get(&id.0) {
+            free_inode_payload(&mut alloc, &cur.on_disk)?;
+            write_inode_record_from_record_at(
+                device,
+                &mut alloc,
+                &geom,
+                cur.slot,
+                want.inode,
+                want.rec,
+                want.deleted,
+            )?;
+            report.updated += 1;
+        } else {
+            write_inode_from_record(
+                device,
+                &mut alloc,
+                &geom,
+                want.inode,
+                want.rec,
+                want.deleted,
+            )?;
+            report.created += 1;
+        }
+    }
+
+    rewrite_ancillary(device, &mut alloc, &geom, state, sb.created_at)?;
+
     let used_data = geom.data_blocks - alloc.free_data_blocks();
     let (final_bbm, final_ibm) = alloc.into_bitmaps();
     write_blocks(device, geom.block_bitmap_start, final_bbm.as_bytes())?;
