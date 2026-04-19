@@ -447,3 +447,78 @@ Service-API (dirty-Tracking als neues Public-Feature).  Der
 `.cloned()`-Fix ist ein isolierter Bugfix im Build-Pfad, ohne API- oder
 Format-Änderung — testbar und review-bar in einem einzelnen Commit.
 P3b-a + P3b-b zusammen wären ein unübersichtlicher Umbau gewesen.
+
+---
+
+## Phase 1e — 2026-04-19 (P3b-b Infrastruktur: dirty-inode tracking)
+
+Umgesetzt: die **Voraussetzungen** für echten Partial-DATA-Rebuild,
+ohne das DATA-Rebuild-Verhalten selbst zu ändern (damit jeder
+Refactor-Schritt review- und rollback-bar bleibt).
+
+### Änderungen
+
+- **`CoreFsService.dirty_inodes: HashSet<InodeId>`** — neu.  Wird von
+  jeder Mutation, die Block-Inhalt oder Extent-Layout ändert, gepflegt
+  (`create_file`, `create_directory`, `create_symlink`, `write_file`,
+  `extend_file`, `delete_file`, `restore_file`).  Metadaten-nur
+  Mutationen wie `set_owner` / `set_mode` / `rename_entry` lassen das
+  Set bewusst leer — sie berühren catalog/inode-Segmente, nicht DATA.
+- **`CoreFsService::take_dirty_inodes(&mut self)`** — neu.  Gibt das
+  Set zurück und leert es; gedacht als Hook, den der Checkpoint-Code
+  genau einmal pro Persist aufruft.
+- **`CoreFsService::has_dirty_inodes(&self)`** — neu.  Günstiger
+  Zustands-Check ohne Drain.
+
+### Kein Perf-Impact jetzt (bewusst)
+
+Das Feld ist infrastruktur-only — der FUSE-Persist-Pfad liest es in
+Phase 1e *nicht*, rebuildet also weiterhin das volle DATA-Segment pro
+Checkpoint.  Der Bench bestätigt Parity mit der Phase-1d-Baseline im
+±15 %-Noise-Band (siehe `perf-history/2026-04-19_081928_p3b-a-run2.tsv`):
+
+| Workload              | Phase 1d | Phase 1e | Delta |
+|-----------------------|---------:|---------:|------:|
+| create 200 × 4 KiB    |     2631 |     2409 | −8 %  |
+| read 200 × 4 KiB      |     3846 |     3448 | −10 % |
+| fsync_cold 50 × 4 KiB |       93 |       94 |   0 % |
+| seq_write 128 MiB     |       68 |       65 | −4 %  |
+| seq_read 128 MiB      |     1777 |     1802 |  +1 % |
+| fsync_warm 50 × 4 KiB |        7 |        2 | noise-band (1–7) |
+| rand 4K               |      563 |      553 | −2 %  |
+| append_log 2000 × 1 K |     5167 |     5277 |  +2 % |
+
+### Warum zwei Schritte statt einem
+
+Der eigentliche Perf-Win (Partial-DATA-Rebuild) erfordert vier
+verschränkte Änderungen in `src/storage/volume_image.rs`:
+
+1. `DeviceImageCache` muss zusätzlich die `Vec<BlockDescriptor>` des
+   letzten DATA-Builds speichern (mit `(inode, offset, length)`-Tripeln).
+2. `BuiltImage` muss die Descriptors nach außen geben, damit
+   `DeviceImageCache::from_built` sie übernehmen kann.
+3. Eine neue Funktion `split_blocks_partial(records, block_size,
+   dirty_bytes, cache)` rekonstruiert das DATA-Segment aus
+   `cache.payload` (für Inodes, deren (inode, offset, length) identisch
+   ist) + frischen Bytes aus `dirty_bytes` (für dirty Inodes).  Layout-
+   Inkompatibilität (neuer Inode zwischen bestehenden, Grösse eines
+   Inodes geändert) fällt auf den vollen Build zurück.
+4. `CoreFsService::read_dirty_block_bytes(&HashSet<InodeId>)` materialisiert
+   nur die dirty Inodes (statt `read_all_block_bytes`).
+
+Jeder Schritt braucht Tests (Fallback-Pfade, append-only growth, delete
+mit nachfolgenden Inodes).  Das sauber in einem Commit zu landen
+würde den Reviewer überfordern — und ein Bug in einem der vier Schritte
+ist ein Korruptions-Risiko für die On-Disk-Daten.
+
+Phase 1e ist deshalb Setup.  Phase 1f liefert den strukturellen
+Performance-Schritt.
+
+### Erwartung für Phase 1f (P3b-b)
+
+- `fsync_warm_50x4096B`: 2–7 ops/s → **~90 ops/s** (Parität mit `fsync_cold`)
+- `seq_write_128MiB`: 68 MiB/s → **~300 MiB/s**
+- Voraussetzung: append-only-Growth-Erkennung in `split_blocks_partial`
+  greift in genau diesen Workloads (neue Inodes bekommen grössere
+  `InodeId`, landen deshalb am Ende der BTreeMap-Iteration in
+  `BlockStore::records()`).
