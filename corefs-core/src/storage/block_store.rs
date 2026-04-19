@@ -858,28 +858,6 @@ impl BlockStore {
 
         let bs = BLOCK_SIZE;
         let extra_len = extra.len();
-        let needed_blocks = (extra_len as u64).div_ceil(bs);
-        let (new_phys, new_alloc) = self.allocate_extent(needed_blocks.max(1));
-        let padded_len = (new_alloc * bs) as usize;
-        let mut buf = vec![0u8; padded_len];
-        buf[..extra_len].copy_from_slice(extra);
-        device.write_at(new_phys * bs, &buf)?;
-
-        let extra_crc = Crc32c::hash(extra);
-        let logical_block_start = existing
-            .extents
-            .iter()
-            .map(|e| e.length_blocks)
-            .sum();
-        let new_extent = ExtentRef {
-            logical_block: logical_block_start,
-            logical_len: extra_len as u32,
-            physical_block: new_phys,
-            length_blocks: new_alloc as u32,
-            physical_len: extra_len as u32,
-            content_crc: extra_crc,
-            flags: 0,
-        };
         let combined_crc = !Crc32c::update(!existing.content_crc, extra);
 
         if let Some(first) = existing.extents.first() {
@@ -887,7 +865,50 @@ impl BlockStore {
         }
 
         let mut rec = existing;
-        rec.extents.push(new_extent);
+        let mut remaining = extra;
+
+        if let Some(last) = rec.extents.last_mut() {
+            let capacity = u64::from(last.length_blocks).saturating_mul(bs);
+            let used = u64::from(last.physical_len);
+            if last.flags == 0 && used < capacity {
+                let tail_len = remaining.len().min((capacity - used) as usize);
+                if tail_len > 0 {
+                    let block_offset = last.physical_block * bs;
+                    let block_len = u64::from(last.length_blocks) * bs;
+                    let mut block = device.read_at(block_offset, block_len)?;
+                    let start = used as usize;
+                    block[start..start + tail_len].copy_from_slice(&remaining[..tail_len]);
+                    device.write_at(block_offset, &block)?;
+
+                    last.logical_len = last.logical_len.saturating_add(tail_len as u32);
+                    last.physical_len = last.physical_len.saturating_add(tail_len as u32);
+                    last.content_crc = Crc32c::hash(&block[..last.physical_len as usize]);
+                    remaining = &remaining[tail_len..];
+                }
+            }
+        }
+
+        if !remaining.is_empty() {
+            let needed_blocks = (remaining.len() as u64).div_ceil(bs);
+            let (new_phys, new_alloc) = self.allocate_extent(needed_blocks.max(1));
+            let padded_len = (new_alloc * bs) as usize;
+            let mut buf = vec![0u8; padded_len];
+            buf[..remaining.len()].copy_from_slice(remaining);
+            device.write_at(new_phys * bs, &buf)?;
+
+            let logical_block_start = rec.extents.iter().map(|e| e.length_blocks).sum();
+            let new_extent = ExtentRef {
+                logical_block: logical_block_start,
+                logical_len: remaining.len() as u32,
+                physical_block: new_phys,
+                length_blocks: new_alloc as u32,
+                physical_len: remaining.len() as u32,
+                content_crc: Crc32c::hash(remaining),
+                flags: 0,
+            };
+            rec.extents.push(new_extent);
+        }
+
         rec.logical_size = rec.logical_size.saturating_add(extra_len as u64);
         rec.content_crc = combined_crc;
         let new_size = rec.logical_size as usize;

@@ -460,7 +460,7 @@ fn write_shrink_records_tail_freed_extent() {
 }
 
 #[test]
-fn device_append_adds_extent_without_rewriting_existing_content() {
+fn device_append_coalesces_into_tail_block_without_rewriting_file() {
     let mut device = MemoryDevice::new(1024 * 1024, 4096).expect("device");
     let mut store = BlockStore::default();
     let inode = InodeId(42);
@@ -470,12 +470,37 @@ fn device_append_adds_extent_without_rewriting_existing_content() {
 
     let rec = store.record(inode).expect("record");
     assert_eq!(rec.logical_size, 11);
-    assert_eq!(rec.extents.len(), 2, "append should add an extent, not rewrite the file");
+    assert_eq!(rec.extents.len(), 1, "small append should reuse tail room in the last block");
+    assert_eq!(rec.extents[0].logical_len, 11);
+    assert_eq!(rec.extents[0].physical_len, 11);
 
     let mut buf = [0u8; 11];
     let n = store.read_bytes(&device, inode, 0, &mut buf).expect("read");
     assert_eq!(n, 11);
     assert_eq!(&buf, b"hello world");
+    assert!(store.verify_device(&device, inode));
+}
+
+#[test]
+fn device_append_allocates_new_extent_after_tail_block_is_full() {
+    let mut device = MemoryDevice::new(1024 * 1024, 4096).expect("device");
+    let mut store = BlockStore::default();
+    let inode = InodeId(44);
+
+    store.write_device(&mut device, inode, &alloc::vec![0xAA; 4090]).expect("write");
+    store.append_device(&mut device, inode, &alloc::vec![0xBB; 16]).expect("append");
+
+    let rec = store.record(inode).expect("record");
+    assert_eq!(rec.logical_size, 4106);
+    assert_eq!(rec.extents.len(), 2);
+    assert_eq!(rec.extents[0].logical_len, 4096);
+    assert_eq!(rec.extents[1].logical_len, 10);
+
+    let mut buf = alloc::vec![0u8; 4106];
+    let n = store.read_bytes(&device, inode, 0, &mut buf).expect("read");
+    assert_eq!(n, 4106);
+    assert_eq!(&buf[..4090], &alloc::vec![0xAA; 4090]);
+    assert_eq!(&buf[4090..], &alloc::vec![0xBB; 16]);
     assert!(store.verify_device(&device, inode));
 }
 
