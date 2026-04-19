@@ -19,6 +19,7 @@
 #   FSYNC_N        — fsync-heavy file count (default 50)
 #   RAND_MIB       — random-IO file size in MiB (default 32)
 #   RAND_OPS       — random-IO op count (default 500)
+#   APPEND_OPS     — append-log op count (default 2000, each writes 1 KiB + fsync skipped)
 #   IMG_SIZE_MIB   — CoreFS image pre-size (default 1024)
 #   THREADS        — FUSE worker threads (default 4)
 #   STEP_TIMEOUT   — seconds per workload step before skip (default 180)
@@ -39,6 +40,7 @@ SEQ_MIB="${SEQ_MIB:-128}"
 FSYNC_N="${FSYNC_N:-50}"
 RAND_MIB="${RAND_MIB:-32}"
 RAND_OPS="${RAND_OPS:-500}"
+APPEND_OPS="${APPEND_OPS:-2000}"
 THREADS="${THREADS:-4}"
 STEP_TIMEOUT="${STEP_TIMEOUT:-180}"
 
@@ -179,6 +181,26 @@ os.fsync(fd); os.close(fd)
   t1=$(date +%s%N)
   local rm_ms=$(( (t1-t0)/1000000 ))
   record "$fs" "delete_${FILES}_small" "$rm_ms" "-"
+
+  # W9 append-heavy (log-style): many small appends to the same file.
+  # Exercises the fast-path in BlockStore::append_to_inode — pre-P2 this
+  # was O(existing_bytes) per call (quadratic over the whole loop), so
+  # long-running log writers paid hidden cost scaling with the file
+  # length rather than the append size.
+  t0=$(date +%s%N)
+  timeout "$STEP_TIMEOUT" python3 -c "
+import os
+fd = os.open('$dir/log.bin', os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o644)
+rec = b'x'*1024
+for _ in range($APPEND_OPS):
+    os.write(fd, rec)
+os.fsync(fd); os.close(fd)
+" || true
+  t1=$(date +%s%N)
+  local append_ms=$(( (t1-t0)/1000000 ))
+  record "$fs" "append_log_${APPEND_OPS}x1KiB" "$append_ms" \
+    "$(( APPEND_OPS * 1000 / (append_ms>0?append_ms:1) )) ops/s"
+  rm -f "$dir/log.bin"
 }
 
 # ── CoreFS FUSE run ────────────────────────────────────────────────────────

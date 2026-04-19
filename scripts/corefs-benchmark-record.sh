@@ -121,14 +121,32 @@ for wl in sorted(set(list(base) + list(new))):
         pct = float("inf") if nv > 0 else 0.0
     else:
         pct = (nv - bv) / bv if bdir == "higher_better" else (bv - nv) / bv
-    tag = "SAME"
-    if pct >= threshold:
+
+    # Noise floor: sub-10 ms workloads are dominated by scheduler jitter,
+    # FUSE wakeup latency, and /usr/bin/date granularity.  Reporting them
+    # as regressions on a 1-2 ms swing produces more false positives than
+    # useful signal.  Below the floor we classify by absolute-ms delta
+    # (≥ 3 ms) rather than relative %.
+    noise_floor_ms = 10
+    if base_ms < noise_floor_ms and new_ms < noise_floor_ms:
+        abs_delta_ms = new_ms - base_ms
+        if abs_delta_ms >= 3:
+            tag = "REGRESS"
+            regressions.append(wl)
+        elif abs_delta_ms <= -3:
+            tag = "BETTER"
+            improvements.append(wl)
+        else:
+            tag = "SAME"
+            same.append(wl)
+    elif pct >= threshold:
         tag = "BETTER"
         improvements.append(wl)
     elif pct <= -threshold:
         tag = "REGRESS"
         regressions.append(wl)
     else:
+        tag = "SAME"
         same.append(wl)
     arrow = "↑" if pct > 0 else ("↓" if pct < 0 else "=")
     print(f"  {tag:<7} {wl:<{width}}  {bv:>10g}{bu} → {nv:>10g}{nu}  {arrow}{pct*100:+7.1f}%")
