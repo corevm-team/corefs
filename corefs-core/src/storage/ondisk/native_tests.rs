@@ -498,6 +498,56 @@ fn dirty_incremental_uses_and_reports_slot_hints() {
 }
 
 #[test]
+fn native_record_extents_spill_to_index_chain() {
+    let mut dev = fresh_device(4096);
+    format_device(&mut dev, &default_options()).unwrap();
+    let mut state = empty_state();
+    let inode = sample_inode(
+        1,
+        "/many-extents",
+        InodeKind::File,
+        10 * BLOCK_SIZE as usize,
+    );
+    let mut extents = Vec::new();
+    for i in 0..10u64 {
+        let physical_block = 600 + (i * 2);
+        let payload = alloc::vec![i as u8; BLOCK_SIZE as usize];
+        dev.write_at(physical_block * BLOCK_SIZE, &payload).unwrap();
+        extents.push(crate::storage::block_store::ExtentRef {
+            logical_block: i as u32,
+            logical_len: BLOCK_SIZE as u32,
+            physical_block,
+            length_blocks: 1,
+            physical_len: BLOCK_SIZE as u32,
+            content_crc: crate::storage::ondisk::checksum::Crc32c::hash(&payload),
+            flags: 0,
+        });
+    }
+    state.active_inodes.push(inode.clone());
+    state.block_records.push(BlockRecord {
+        inode: inode.id,
+        logical_size: 10 * BLOCK_SIZE,
+        extents,
+        content_crc: 0,
+        flags: 0,
+    });
+
+    save_state_native(&mut dev, &state).unwrap();
+
+    let slot = load_native_inode_slot_index(&dev).unwrap()[0].slot;
+    let sb = crate::storage::ondisk::volume::read_sb_with_fallbacks(&dev).unwrap();
+    let on_disk = read_inode_at_slot(&dev, &sb.geometry(), slot).unwrap();
+    assert_eq!(on_disk.extents.len(), 0);
+    assert!(on_disk.flags & crate::storage::ondisk::inode::FLAG_HAS_EXTENT_INDEX != 0);
+    assert_ne!(on_disk.index_block_addr, 0);
+
+    let loaded = load_state_native(&dev).unwrap();
+    assert_eq!(loaded.block_records.len(), 1);
+    assert_eq!(loaded.block_records[0].extents.len(), 10);
+    assert_eq!(loaded.block_records[0].logical_size, 10 * BLOCK_SIZE);
+}
+
+#[test]
 fn dirty_incremental_releases_removed_inode_slot() {
     let mut dev = fresh_device(4096);
     format_device(&mut dev, &default_options()).unwrap();

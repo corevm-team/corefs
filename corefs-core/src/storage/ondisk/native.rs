@@ -329,17 +329,27 @@ pub fn load_state_native(device: &dyn BlockDevice) -> CoreFsResult<PersistedStat
         // Data remains on the device — no bytes loaded into RAM.
         if on_disk.size_bytes > 0 || !on_disk.extents.is_empty() {
             use crate::storage::block_store::{EXTENT_COMPRESSED, EXTENT_ENCRYPTED, ExtentRef};
-            let extent_refs: Vec<ExtentRef> = on_disk
-                .extents
+            let extents = if on_disk.flags & FLAG_HAS_EXTENT_INDEX != 0 {
+                super::extent_tree::ExtentChain::read_chain(device, on_disk.index_block_addr)?
+            } else {
+                on_disk.extents.clone()
+            };
+            let mut remaining = on_disk.size_bytes;
+            let extent_refs: Vec<ExtentRef> = extents
                 .iter()
-                .map(|e| ExtentRef {
-                    logical_block: e.logical_block,
-                    logical_len: e.length_blocks.saturating_mul(BLOCK_SIZE as u32),
-                    physical_block: e.physical_block,
-                    length_blocks: e.length_blocks,
-                    physical_len: e.length_blocks.saturating_mul(BLOCK_SIZE as u32),
-                    content_crc: on_disk.data_crc as u32,
-                    flags: 0,
+                .map(|e| {
+                    let capacity = u64::from(e.length_blocks).saturating_mul(BLOCK_SIZE);
+                    let logical_len = remaining.min(capacity) as u32;
+                    remaining = remaining.saturating_sub(u64::from(logical_len));
+                    ExtentRef {
+                        logical_block: e.logical_block,
+                        logical_len,
+                        physical_block: e.physical_block,
+                        length_blocks: e.length_blocks,
+                        physical_len: logical_len,
+                        content_crc: on_disk.data_crc as u32,
+                        flags: 0,
+                    }
                 })
                 .collect();
             let mut flags = 0u32;
@@ -588,7 +598,7 @@ pub fn save_state_native_incremental(
                 continue;
             }
             // UPDATE: free old extents + attr block, rewrite at the same slot.
-            free_inode_payload(&mut alloc, &cur.on_disk)?;
+            free_inode_payload(device, &mut alloc, &cur.on_disk)?;
             write_inode_record_from_record_at(
                 device,
                 &mut alloc,
@@ -855,7 +865,7 @@ pub fn save_state_native_incremental_dirty_with_slots(
             continue;
         };
         if let Some(cur) = existing.get(&id.0) {
-            free_inode_payload(&mut alloc, &cur.on_disk)?;
+            free_inode_payload(device, &mut alloc, &cur.on_disk)?;
             write_inode_record_from_record_at(
                 device,
                 &mut alloc,
@@ -921,10 +931,26 @@ pub fn save_state_native_incremental_dirty_with_slots(
     })
 }
 
-fn free_inode_payload(alloc: &mut OndiskAllocator, on_disk: &OnDiskInode) -> CoreFsResult<()> {
+fn free_inode_payload(
+    device: &dyn BlockDevice,
+    alloc: &mut OndiskAllocator,
+    on_disk: &OnDiskInode,
+) -> CoreFsResult<()> {
     for ext in &on_disk.extents {
         if ext.length_blocks > 0 {
             alloc.free_extent(*ext)?;
+        }
+    }
+    if on_disk.flags & FLAG_HAS_EXTENT_INDEX != 0 && on_disk.index_block_addr != 0 {
+        for block in super::extent_tree::ExtentChain::read_chain_blocks(
+            device,
+            on_disk.index_block_addr,
+        )? {
+            alloc.free_extent(Extent {
+                logical_block: 0,
+                length_blocks: 1,
+                physical_block: block,
+            })?;
         }
     }
     if on_disk.xattr_block_addr != 0 {
@@ -938,13 +964,13 @@ fn free_inode_payload(alloc: &mut OndiskAllocator, on_disk: &OnDiskInode) -> Cor
 }
 
 fn release_slot(
-    _device: &mut dyn BlockDevice,
+    device: &mut dyn BlockDevice,
     alloc: &mut OndiskAllocator,
     _geom: &LayoutGeometry,
     slot: u64,
     on_disk: &OnDiskInode,
 ) -> CoreFsResult<()> {
-    free_inode_payload(alloc, on_disk)?;
+    free_inode_payload(device, alloc, on_disk)?;
     alloc.free_inode(slot)?;
     // Note: we deliberately don't zero the inode record on disk — the
     // bitmap is the source of truth, and a future allocate will overwrite
@@ -1081,6 +1107,38 @@ fn write_inode_record_at(
 
 /// Extent-aware variant of [`write_inode_record_at`] for the incremental
 /// save path.  Data is already on the device.
+fn extents_from_block_record(
+    device: &mut dyn BlockDevice,
+    alloc: &mut OndiskAllocator,
+    rec: &crate::storage::block_store::BlockRecord,
+) -> CoreFsResult<(Vec<Extent>, u64, bool, u64)> {
+    let mut on_disk_extents: Vec<Extent> = Vec::new();
+    let mut total_blocks = 0u64;
+    for ext in &rec.extents {
+        let e = Extent {
+            logical_block: ext.logical_block,
+            length_blocks: ext.length_blocks,
+            physical_block: ext.physical_block,
+        };
+        for b in 0..u64::from(ext.length_blocks) {
+            let _ = alloc.mark_used(ext.physical_block + b);
+        }
+        total_blocks += u64::from(ext.length_blocks);
+        on_disk_extents.push(e);
+    }
+    if on_disk_extents.len() <= super::inode::MAX_INLINE_EXTENTS {
+        return Ok((on_disk_extents, 0, false, total_blocks));
+    }
+
+    let needed = super::extent_tree::ExtentChain::index_blocks_needed(on_disk_extents.len());
+    let index_extent = alloc.allocate_contiguous(needed as u64)?;
+    let reserve_blocks: Vec<u64> = (0..needed)
+        .map(|i| index_extent.physical_block + i as u64)
+        .collect();
+    super::extent_tree::ExtentChain::write_chain(device, &on_disk_extents, &reserve_blocks)?;
+    Ok((Vec::new(), reserve_blocks[0], true, total_blocks))
+}
+
 fn write_inode_record_from_record_at(
     device: &mut dyn BlockDevice,
     alloc: &mut OndiskAllocator,
@@ -1090,44 +1148,31 @@ fn write_inode_record_from_record_at(
     rec: Option<&crate::storage::block_store::BlockRecord>,
     deleted: bool,
 ) -> CoreFsResult<()> {
-    let (on_disk_extents, _index_block_addr, size_bytes, data_crc, blocks_alloc) =
+    let (on_disk_extents, index_block_addr, flags_has_index, size_bytes, data_crc, blocks_alloc) =
         if let Some(rec) = rec {
             if rec.extents.is_empty() {
                 (
                     Vec::new(),
                     0u64,
+                    false,
                     rec.logical_size,
                     rec.content_crc as u64,
                     0u64,
                 )
             } else {
-                let mut on_disk_extents: Vec<Extent> = Vec::new();
-                let mut total_blocks = 0u64;
-                for ext in &rec.extents {
-                    let e = Extent {
-                        logical_block: ext.logical_block,
-                        length_blocks: ext.length_blocks,
-                        physical_block: ext.physical_block,
-                    };
-                    for b in 0..u64::from(ext.length_blocks) {
-                        let _ = alloc.mark_used(ext.physical_block + b);
-                    }
-                    total_blocks += u64::from(ext.length_blocks);
-                    on_disk_extents.push(e);
-                }
-                if on_disk_extents.len() > super::inode::MAX_INLINE_EXTENTS {
-                    on_disk_extents.truncate(super::inode::MAX_INLINE_EXTENTS);
-                }
+                let (on_disk_extents, index_block_addr, flags_has_index, total_blocks) =
+                    extents_from_block_record(device, alloc, rec)?;
                 (
                     on_disk_extents,
-                    0u64,
+                    index_block_addr,
+                    flags_has_index,
                     rec.logical_size,
                     rec.content_crc as u64,
                     total_blocks,
                 )
             }
         } else {
-            (Vec::new(), 0u64, 0u64, 0u64, 0u64)
+            (Vec::new(), 0u64, false, 0u64, 0u64, 0u64)
         };
 
     let attr_bytes = crate::bincode_compat::serialize(inode)
@@ -1150,6 +1195,9 @@ fn write_inode_record_from_record_at(
         InodeKind::Symlink => OnDiskKind::Symlink,
     };
     let mut flags = super::inode::FLAG_HAS_XATTRS;
+    if flags_has_index {
+        flags |= FLAG_HAS_EXTENT_INDEX;
+    }
     if deleted {
         flags |= FLAG_DELETED;
     }
@@ -1175,7 +1223,7 @@ fn write_inode_record_from_record_at(
         accessed_at: systime_to_secs(inode.accessed_at),
         generation: 1,
         extents: on_disk_extents,
-        index_block_addr: 0,
+        index_block_addr,
         xattr_block_addr: attr_block_addr,
         domain_inode_id: inode.id.0,
         data_crc,
@@ -1320,29 +1368,12 @@ fn write_inode_from_record(
                     0u64,
                 )
             } else {
-                // Map ExtentRef → Extent and mark blocks used in the allocator.
-                let mut on_disk_extents: Vec<Extent> = Vec::new();
-                let mut total_blocks = 0u64;
-                for ext in &rec.extents {
-                    let e = Extent {
-                        logical_block: ext.logical_block,
-                        length_blocks: ext.length_blocks,
-                        physical_block: ext.physical_block,
-                    };
-                    // Mark these blocks as used so OndiskAllocator doesn't overwrite them.
-                    for b in 0..u64::from(ext.length_blocks) {
-                        let _ = alloc.mark_used(ext.physical_block + b);
-                    }
-                    total_blocks += u64::from(ext.length_blocks);
-                    on_disk_extents.push(e);
-                }
-                if on_disk_extents.len() > super::inode::MAX_INLINE_EXTENTS {
-                    on_disk_extents.truncate(super::inode::MAX_INLINE_EXTENTS);
-                }
+                let (on_disk_extents, index_block_addr, flags_has_index, total_blocks) =
+                    extents_from_block_record(device, alloc, rec)?;
                 (
                     on_disk_extents,
-                    0u64,
-                    false,
+                    index_block_addr,
+                    flags_has_index,
                     rec.logical_size,
                     rec.content_crc as u64,
                     total_blocks,

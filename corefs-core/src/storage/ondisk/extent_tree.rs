@@ -156,6 +156,29 @@ impl ExtentChain {
         Ok(out)
     }
 
+    /// Return every index-block address reachable from `root_block`,
+    /// including the root block.
+    pub fn read_chain_blocks(device: &dyn BlockDevice, root_block: u64) -> CoreFsResult<Vec<u64>> {
+        if root_block == 0 {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        let mut cursor = root_block;
+        let mut visited = HashSet::new();
+        while cursor != 0 {
+            if !visited.insert(cursor) {
+                return Err(CoreFsError::State(format!(
+                    "extent chain: loop detected at block {cursor}"
+                )));
+            }
+            out.push(cursor);
+            let buf = device.read_at(cursor * BLOCK_SIZE, BLOCK_SIZE)?;
+            let blk = ExtentIndexBlock::decode(&buf)?;
+            cursor = blk.next_index_block;
+        }
+        Ok(out)
+    }
+
     /// Write `extents` as a fresh chain using blocks pre-allocated by the
     /// caller via `reserve_blocks`.  The first block in `reserve_blocks`
     /// becomes the chain root; subsequent entries hold overflow.  Returns
