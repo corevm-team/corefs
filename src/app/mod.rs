@@ -1683,3 +1683,7 @@ mod stress_tests;
 #[cfg(test)]
 #[path = "content_roundtrip_characterization_tests.rs"]
 mod content_roundtrip_char_tests;
+
+#[cfg(test)]
+#[path = "persistence_roundtrip_tests.rs"]
+mod persistence_roundtrip_tests;
