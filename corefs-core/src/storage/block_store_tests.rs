@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use alloc::string::ToString;
-use alloc::{vec, vec::Vec};
+use crate::storage::block_device::MemoryDevice;
+use alloc::vec;
 
 // Helper: build a BlockRecord with the new fields, using a single simple extent
 // with a given device_block and allocated_blocks (for backward-compat tests).
@@ -457,6 +457,42 @@ fn write_shrink_records_tail_freed_extent() {
     let trims = store.drain_freed_extents();
     // Should have freed the tail blocks
     assert!(!trims.is_empty());
+}
+
+#[test]
+fn device_append_adds_extent_without_rewriting_existing_content() {
+    let mut device = MemoryDevice::new(1024 * 1024, 4096).expect("device");
+    let mut store = BlockStore::default();
+    let inode = InodeId(42);
+
+    store.write_device(&mut device, inode, b"hello").expect("write");
+    store.append_device(&mut device, inode, b" world").expect("append");
+
+    let rec = store.record(inode).expect("record");
+    assert_eq!(rec.logical_size, 11);
+    assert_eq!(rec.extents.len(), 2, "append should add an extent, not rewrite the file");
+
+    let mut buf = [0u8; 11];
+    let n = store.read_bytes(&device, inode, 0, &mut buf).expect("read");
+    assert_eq!(n, 11);
+    assert_eq!(&buf, b"hello world");
+    assert!(store.verify_device(&device, inode));
+}
+
+#[test]
+fn device_ranged_read_crosses_extent_boundaries_without_full_materialisation() {
+    let mut device = MemoryDevice::new(1024 * 1024, 4096).expect("device");
+    let mut store = BlockStore::default();
+    let inode = InodeId(43);
+
+    store.write_device(&mut device, inode, b"abcd").expect("write");
+    store.append_device(&mut device, inode, b"efgh").expect("append");
+    store.append_device(&mut device, inode, b"ijkl").expect("append");
+
+    let mut buf = [0u8; 6];
+    let n = store.read_bytes(&device, inode, 3, &mut buf).expect("read");
+    assert_eq!(n, 6);
+    assert_eq!(&buf, b"defghi");
 }
 
 #[test]

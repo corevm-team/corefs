@@ -13,10 +13,9 @@
 //! Gerät für die alten Signaturen fungiert.
 
 use crate::domain::inode::InodeId;
-use crate::error::{CoreFsError, CoreFsResult};
+use crate::error::CoreFsResult;
 use crate::storage::block_device::{BlockDevice, MemoryDevice};
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
@@ -24,6 +23,22 @@ use serde::{Deserialize, Serialize};
 
 use super::ondisk::checksum::Crc32c;
 use super::ondisk::layout::BLOCK_SIZE;
+
+fn align_down_u64(value: u64, alignment: u64) -> u64 {
+    if alignment == 0 {
+        value
+    } else {
+        value - (value % alignment)
+    }
+}
+
+fn align_up_u64(value: u64, alignment: u64) -> u64 {
+    if alignment == 0 || value.is_multiple_of(alignment) {
+        value
+    } else {
+        value + (alignment - (value % alignment))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Flag constants for ExtentRef.flags
@@ -620,7 +635,33 @@ impl BlockStore {
         offset: u64,
         data: &[u8],
     ) -> CoreFsResult<()> {
-        // Simple implementation: read all existing bytes, overlay, write back
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let current_size = self
+            .records
+            .get(&inode)
+            .map(|r| r.logical_size)
+            .unwrap_or(0);
+
+        // Fast paths used by AnyOS' kernel driver:
+        //
+        // * A full rewrite at offset 0 does not need to read old content.
+        // * A write exactly at EOF is an append.  Preserve existing extents
+        //   and add one new extent instead of doing read-all + write-all.
+        if offset == 0 && data.len() as u64 >= current_size {
+            return self.write_device(device, inode, data);
+        }
+        if offset == current_size {
+            self.append_device(device, inode, data)?;
+            return Ok(());
+        }
+
+        // Correct fallback for true random writes / sparse growth.  This is
+        // still O(file_size), but `read_all` now streams extent ranges instead
+        // of materialising unrelated device blocks.  A later patch can replace
+        // this with per-block partial rewrite + CRC recompute.
         let existing = self.read_all(device, inode).unwrap_or_default();
         let new_size = (offset as usize).saturating_add(data.len()).max(existing.len());
         let mut new_bytes = vec![0u8; new_size];
@@ -705,15 +746,55 @@ impl BlockStore {
             Some(r) => r,
             None => return Ok(0),
         };
-        let all = self.read_all_from_device(device, rec)?;
-        let start = offset as usize;
-        if start >= all.len() {
+        if out.is_empty() || offset >= rec.logical_size {
             return Ok(0);
         }
-        let end = (start + out.len()).min(all.len());
-        let n = end - start;
-        out[..n].copy_from_slice(&all[start..end]);
-        Ok(n)
+
+        let wanted_end = offset
+            .saturating_add(out.len() as u64)
+            .min(rec.logical_size);
+        let mut copied = 0usize;
+        let mut logical_cursor = 0u64;
+        let sector_size = u64::from(device.sector_size());
+        let block_size = BLOCK_SIZE;
+
+        for ext in &rec.extents {
+            let ext_len = u64::from(ext.logical_len).min(ext.physical_len as u64);
+            let ext_start = logical_cursor;
+            let ext_end = ext_start.saturating_add(ext_len);
+            logical_cursor = ext_end;
+
+            if ext_len == 0 || ext_end <= offset {
+                continue;
+            }
+            if ext_start >= wanted_end {
+                break;
+            }
+
+            let overlap_start = offset.max(ext_start);
+            let overlap_end = wanted_end.min(ext_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+
+            let inside_extent = overlap_start - ext_start;
+            let physical_start = ext
+                .physical_block
+                .saturating_mul(block_size)
+                .saturating_add(inside_extent);
+            let physical_end = physical_start.saturating_add(overlap_end - overlap_start);
+            let aligned_start = align_down_u64(physical_start, sector_size);
+            let aligned_end = align_up_u64(physical_end, sector_size);
+            let buf = device.read_at(aligned_start, aligned_end - aligned_start)?;
+            let slice_start = (physical_start - aligned_start) as usize;
+            let slice_end = slice_start + (overlap_end - overlap_start) as usize;
+            let out_start = (overlap_start - offset) as usize;
+            let out_end = out_start + (overlap_end - overlap_start) as usize;
+            out[out_start..out_end].copy_from_slice(&buf[slice_start..slice_end]);
+            copied = copied.max(out_end);
+        }
+
+        Ok(copied)
     }
 
     /// Liest den kompletten Inhalt von `inode` von `device`.
@@ -753,11 +834,65 @@ impl BlockStore {
         inode: InodeId,
         extra: &[u8],
     ) -> CoreFsResult<usize> {
-        let mut existing = self.read_all(device, inode).unwrap_or_default();
-        existing.extend_from_slice(extra);
-        let len = existing.len();
-        self.write_device(device, inode, &existing)?;
-        Ok(len)
+        if extra.is_empty() {
+            return Ok(self.records.get(&inode).map(|r| r.logical_size as usize).unwrap_or(0));
+        }
+
+        let Some(existing) = self.records.get(&inode).cloned() else {
+            self.write_device(device, inode, extra)?;
+            return Ok(extra.len());
+        };
+
+        if existing.extents.is_empty() || existing.logical_size == 0 {
+            self.write_device(device, inode, extra)?;
+            return Ok(extra.len());
+        }
+
+        if existing.flags != 0 || existing.extents.iter().any(|e| e.flags != 0) {
+            let mut bytes = self.read_all_from_device(device, &existing)?;
+            bytes.extend_from_slice(extra);
+            let len = bytes.len();
+            self.write_device(device, inode, &bytes)?;
+            return Ok(len);
+        }
+
+        let bs = BLOCK_SIZE;
+        let extra_len = extra.len();
+        let needed_blocks = (extra_len as u64).div_ceil(bs);
+        let (new_phys, new_alloc) = self.allocate_extent(needed_blocks.max(1));
+        let padded_len = (new_alloc * bs) as usize;
+        let mut buf = vec![0u8; padded_len];
+        buf[..extra_len].copy_from_slice(extra);
+        device.write_at(new_phys * bs, &buf)?;
+
+        let extra_crc = Crc32c::hash(extra);
+        let logical_block_start = existing
+            .extents
+            .iter()
+            .map(|e| e.length_blocks)
+            .sum();
+        let new_extent = ExtentRef {
+            logical_block: logical_block_start,
+            logical_len: extra_len as u32,
+            physical_block: new_phys,
+            length_blocks: new_alloc as u32,
+            physical_len: extra_len as u32,
+            content_crc: extra_crc,
+            flags: 0,
+        };
+        let combined_crc = !Crc32c::update(!existing.content_crc, extra);
+
+        if let Some(first) = existing.extents.first() {
+            self.dedup_release(existing.content_crc, first.physical_block, first.length_blocks);
+        }
+
+        let mut rec = existing;
+        rec.extents.push(new_extent);
+        rec.logical_size = rec.logical_size.saturating_add(extra_len as u64);
+        rec.content_crc = combined_crc;
+        let new_size = rec.logical_size as usize;
+        self.records.insert(inode, rec);
+        Ok(new_size)
     }
 
     /// Entfernt `inode` aus dem Store und gibt den `BlockRecord` zurück.
