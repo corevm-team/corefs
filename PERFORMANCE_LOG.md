@@ -624,3 +624,96 @@ write_segment_rmw  →  write_segment_ranges(dev, segment_offset,
 Damit würde `fsync_warm` pro Persist ~4 KiB auf Disk schreiben statt
 wie heute 128 MiB, und `seq_write_128MiB` würde im Wesentlichen
 raw-NVMe-Bandbreite sehen.
+
+---
+
+## Phase 2 — 2026-04-19 (Always-incremental persist + suffix-write)
+
+**Zielsetzung durchgezogen.**  Nach der ehrlichen Analyse in Phase 1f
+(dass der fsync_warm-Gap eine Format-Evolution braucht) wurde der
+`volume_image`-Persist-Pfad so umgebaut, dass er nie mehr auf
+`write_full_image` zurückfällt, solange irgendein Cache existiert.
+
+### Was geändert wurde
+
+1. **`SEGMENT_ALIGNMENT` von 64 → 4096 Bytes.**  Typische
+   Metadaten-Mutationen (ein neuer Inode ≈ 200 Bytes AINO + ≈ 40 Bytes
+   BLKD) werden jetzt innerhalb eines einzigen Alignment-Slots
+   absorbiert.  `device_volume.rs` wurde auf den gleichen Wert
+   synchronisiert, weil es sein eigenes `image_end` mit dieser
+   Konstante berechnet.
+2. **Alignment-Check relaxed.**  Readers akzeptieren jede
+   Power-of-Two-Alignment aus dem Superblock statt nur den
+   compile-time-Wert.  Alte Volumes (Alignment 64) bleiben lesbar.
+3. **`can_incremental` auf `cache.is_some()` reduziert.**  Der
+   Per-Segment-Loop macht jetzt das ganze Entscheiden selbst:
+   - identisch (Offset + Länge + Bytes): skip
+   - identischer Offset + cache ist Präfix des neuen Payloads:
+     Suffix-only-Write an `offset + cached_len`  *(← der DATA-
+     Fastpath, der fsync_warm von 2 auf ≈480 ops/s bringt)*
+   - sonst: Segment komplett an den *neuen* Offset schreiben; alte
+     Position wird zu Garbage, Leser folgen dem refreshten Directory.
+4. **Header + Directory werden bei jedem Inkrementellen immer neu
+   geschrieben** — 4 KiB Write — damit die On-Disk-Directory zu den
+   neuen (offset, length)-Paaren konsistent bleibt.
+5. **Offset-Gleichheits-Guard auf dem Suffix-Fastpath.**  Eine
+   Zwischenversion dieses Patches hat auch dann Suffix-only
+   geschrieben, wenn das Segment geshifted war — das korrumpierte das
+   Image, weil der gecachte Präfix weiterhin an der alten Device-
+   Position lag.  Der Guard `cached_offset == entry.offset` verhindert
+   das.
+6. **Test angepasst.** `incremental_persist_falls_back_to_full_on_size_change`
+   wurde in `incremental_persist_tolerates_small_size_changes`
+   umbenannt — das alte Verhalten war in Phase 0 richtig, in Phase 2
+   genau das, was behoben werden sollte.
+
+### Ergebnisse
+
+Baseline: `perf-history/2026-04-19_103252_phase2-run2-stable.tsv`
+(auf `baseline.tsv` promotet).  Zwei Back-to-back-Läufe bestätigen
+Stabilität.
+
+| Workload                    | Phase 1d | **Phase 2** |   ext4     | CoreFS/ext4 |
+|-----------------------------|---------:|------------:|-----------:|------------:|
+| create 200 × 4 KiB          |   2631   |    2631 ops/s|  5128     |      1.95×  |
+| read 200 × 4 KiB            |   3846   |    3508     |  6250     |      1.78×  |
+| stat (ls -la) 200           |      5 ms|       5 ms  |     5 ms  |   parity    |
+| fsync_cold 50 × 4 KiB       |     93   |      99 ops/s|   450    |      4.5×   |
+| seq_write 128 MiB           |     68 MiB/s|     67 MiB/s|     666|      9.9×   |
+| seq_read 128 MiB (warm)     |   1777 MiB/s| **32 000 MiB/s**|5818| *0.18×* (besser, Cache) |
+| **fsync_warm 50 × 4 KiB**   |      7   | **480 ops/s**|    406    | **0.85×** (besser!) |
+| rand 4K 70r/30w, 500 ops    |    563   | **14 285 ops/s**|13 157|  **0.92×** (besser!) |
+| delete 200 × 4 KiB          |     27 ms|     **8 ms**|    14 ms |  **0.57×** (besser!) |
+| append_log 2000 × 1 KiB     |   5167   | **55 555 ops/s**|55 555|     parity  |
+
+### Was Phase 2 eliminiert
+
+- Der 128 MiB-Disk-Write pro fsync ist weg.  Jeder Persist schreibt
+  jetzt nur noch die Header-Seite + die wirklich geänderten Segmente
+  + für DATA nur das appended Tail.  Für fsync_warm sind das pro
+  Iteration ~12 KiB statt ~128 MiB.
+- Die komplette `tmp+rename`-Atomic-Rewrite-Pipeline ist aus dem
+  Hot Path.  Atomicity wird jetzt über Dual-Superblock + per-Segment
+  Checksums + WAL bereitgestellt, genauso wie bei Device-Backing.
+
+### Was bleibt
+
+1. **Create / read**: 2× vs ext4 — dominiert von der pro-Op FUSE-
+   Round-Trip-Latenz (Kernel↔User-Space).  Kein Persist-Problem mehr.
+2. **seq_write**: 10× vs ext4 — der Persist am Ende eines 128 MiB-
+   Writes schreibt das DATA-Segment komplett (weil seq.bin neu und
+   nicht im Cache); zudem sind vorgeschaltete Services (Compression/
+   Encryption/Version) in diesem Pfad aktiv.  Abgrenzung zu Phase 3.
+
+### Phase 3 — Ausblick (nicht Scope dieser Änderung)
+
+- Streaming-DATA-Writes: statt erst die ganze Datei in den Service zu
+  schreiben und dann beim Persist als Ganzes ins DATA-Segment zu
+  legen, den DATA-Suffix direkt während `write_file`/`extend_file` auf
+  das Device schieben.  Dann ist der finale fsync auch bei grossen
+  Files fast kostenlos.
+- Parallelität: FUSE-Handler hinter `&mut self`.  Alle Ops sind
+  serialisiert, auch mit `--threads 4`.  Inode-Hash-basierte Locks
+  würden Multi-Writer-Workloads freischalten.
+- Pro-Op FUSE-Latenz: reduziert sich bei verschiedenen Mount-Optionen
+  (writeback_cache etc.), aber einige Kosten sind systembedingt.
