@@ -13,9 +13,10 @@
 //! Gerät für die alten Signaturen fungiert.
 
 use crate::domain::inode::InodeId;
-use crate::error::CoreFsResult;
+use crate::error::{CoreFsError, CoreFsResult};
 use crate::storage::block_device::{BlockDevice, MemoryDevice};
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
@@ -23,6 +24,8 @@ use serde::{Deserialize, Serialize};
 
 use super::ondisk::checksum::Crc32c;
 use super::ondisk::layout::BLOCK_SIZE;
+
+const MAX_RMW_BYTES: usize = 16 * 1024 * 1024;
 
 fn align_down_u64(value: u64, alignment: u64) -> u64 {
     if alignment == 0 {
@@ -663,7 +666,16 @@ impl BlockStore {
         // of materialising unrelated device blocks.  A later patch can replace
         // this with per-block partial rewrite + CRC recompute.
         let existing = self.read_all(device, inode).unwrap_or_default();
-        let new_size = (offset as usize).saturating_add(data.len()).max(existing.len());
+        let write_end = offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| CoreFsError::InvalidInput("block store write offset overflow".into()))?;
+        let new_size_u64 = write_end.max(existing.len() as u64);
+        if new_size_u64 > MAX_RMW_BYTES as u64 {
+            return Err(CoreFsError::InvalidInput(format!(
+                "block store random write would materialize {new_size_u64} bytes"
+            )));
+        }
+        let new_size = new_size_u64 as usize;
         let mut new_bytes = vec![0u8; new_size];
         new_bytes[..existing.len()].copy_from_slice(&existing);
         let start = offset as usize;
