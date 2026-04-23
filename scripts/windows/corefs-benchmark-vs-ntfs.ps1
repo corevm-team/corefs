@@ -14,6 +14,7 @@ param(
     [int]$BigDirFiles = 512,
     [int]$ReadyTimeoutSeconds = 30,
     [int]$MaxSeconds = 60,
+    [string]$Profile = "performance",
     [string]$HistoryLabel = "windows-vs-ntfs",
     [string]$HistoryDir = "",
     [switch]$NoPerfHistory
@@ -305,6 +306,8 @@ function Convert-TsvToMarkdown {
         "",
         "Budget: ${MaxSeconds}s",
         "",
+        "CoreFS profile: $Profile",
+        "",
         "| FS | Workload | ms | Metric |",
         "| --- | --- | ---: | --- |"
     )
@@ -353,7 +356,7 @@ if (Test-Path $drivePath) {
 }
 
 Write-Host "[*] CoreFS: creating image at $resolvedImage"
-Invoke-CoreFs -CoreFsArgs @("mkfs-image", $resolvedImage, "--demo")
+Invoke-CoreFs -CoreFsArgs @("mkfs-image", $resolvedImage, "--demo", "--profile", $Profile)
 
 $mountProcess = $null
 try {

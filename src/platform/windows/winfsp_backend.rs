@@ -140,7 +140,6 @@ struct CoreFsWinFsp {
 
 #[derive(Debug)]
 struct CoreFsState {
-    image_path: PathBuf,
     writable: bool,
     service: Mutex<CoreFsService>,
     device: Mutex<FileImageDevice>,
@@ -160,7 +159,6 @@ impl CoreFsWinFsp {
         let service = CoreFsService::load_image_from_path(&image_path)?;
         let device = FileImageDevice::open(&image_path, !writable)?;
         Ok(Arc::new(CoreFsState {
-            image_path,
             writable,
             service: Mutex::new(service),
             device: Mutex::new(device),

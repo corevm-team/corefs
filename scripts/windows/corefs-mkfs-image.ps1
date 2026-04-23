@@ -1,5 +1,6 @@
 param(
     [string]$ImagePath = ".\corefs-volume.img",
+    [string]$Profile = "default",
     [switch]$Demo
 )
 
@@ -8,6 +9,9 @@ param(
 $args = @("mkfs-image", $ImagePath)
 if ($Demo) {
     $args += "--demo"
+}
+if (-not [string]::IsNullOrWhiteSpace($Profile)) {
+    $args += @("--profile", $Profile)
 }
 
 Invoke-CoreFs -CoreFsArgs $args

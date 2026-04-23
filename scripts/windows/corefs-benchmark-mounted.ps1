@@ -8,6 +8,7 @@ param(
     [int]$SequentialMiB = 32,
     [int]$ReadyTimeoutSeconds = 30,
     [int]$MaxSeconds = 60,
+    [string]$Profile = "performance",
     [string]$HistoryLabel = "windows-mount",
     [string]$HistoryDir = "",
     [switch]$NoPerfHistory
@@ -62,7 +63,7 @@ function Append-MountBenchmarkRow {
     }
 
     $timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss UTC")
-    $row = "| $timestamp | winfsp-mounted | $Files | $PayloadBytes | $SequentialMiB | $([int]$CreateMs) | $([int]$ReadMs) | $([int]$SequentialWriteMs) | $([int]$SequentialReadMs) | $([int]$DeleteMs) |"
+    $row = "| $timestamp | winfsp-mounted/$Profile | $Files | $PayloadBytes | $SequentialMiB | $([int]$CreateMs) | $([int]$ReadMs) | $([int]$SequentialWriteMs) | $([int]$SequentialReadMs) | $([int]$DeleteMs) |"
     Add-Content -Path $Path -Value $row -Encoding UTF8
 }
 
@@ -126,7 +127,7 @@ if (Test-Path $drivePath) {
     throw "Drive $driveRoot already exists. Choose a free drive letter."
 }
 
-Invoke-CoreFs -CoreFsArgs @("mkfs-image", $resolvedImage, "--demo")
+Invoke-CoreFs -CoreFsArgs @("mkfs-image", $resolvedImage, "--demo", "--profile", $Profile)
 
 $mountProcess = $null
 try {

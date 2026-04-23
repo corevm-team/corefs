@@ -146,10 +146,11 @@ where
                 CoreFsError::InvalidCommand("missing path for mkfs-image".to_string())
             })?;
             let include_demo = args.iter().any(|arg| arg == "--demo");
+            let config = corefs_config_from_args(&args[3..])?;
             let fs = if include_demo {
-                bootstrap_demo_fs()?
+                bootstrap_demo_fs_with_config(config)?
             } else {
-                CoreFsService::format(CoreFsConfig::default())
+                CoreFsService::format(config)
             };
             fs.save_image_to_path(path)?;
             println!("created CoreFS image at {path}");
@@ -387,7 +388,7 @@ where
                         "device is not safe to format — see errors above".to_string(),
                     ));
                 }
-                let config = crate::config::CoreFsConfig::default();
+                let config = corefs_config_from_args(&args[3..])?;
                 let mut device =
                     crate::storage::block_device::raw::RawBlockDevice::open(device_path, false)?;
                 linux_fuse::format_device(&mut device, config)?;
@@ -742,7 +743,11 @@ where
 }
 
 fn bootstrap_demo_fs() -> CoreFsResult<CoreFsService> {
-    let mut fs = CoreFsService::format(CoreFsConfig::default());
+    bootstrap_demo_fs_with_config(CoreFsConfig::default())
+}
+
+fn bootstrap_demo_fs_with_config(config: CoreFsConfig) -> CoreFsResult<CoreFsService> {
+    let mut fs = CoreFsService::format(config);
     fs.create_directory("/etc")?;
     fs.create_directory("/var")?;
     fs.create_file(
@@ -901,7 +906,7 @@ fn print_usage() {
     println!("  write <path> <payload>");
     println!("  read <path>");
     println!("  save-image <path>");
-    println!("  mkfs-image <path> [--demo]");
+    println!("  mkfs-image <path> [--demo] [--profile default|performance]");
     println!("  load-image <path>");
     println!("  fsck-image <path> [--repair]");
     println!("  defrag-image <path>");
@@ -910,7 +915,7 @@ fn print_usage() {
     println!("  mount-image-rw <image-path> <mount-point>");
     println!("  unmount-image-win <drive-letter> [--discard]  (Windows only)");
     println!("  probe-device <device-path>");
-    println!("  mkfs-device <device-path> [--skip-check]");
+    println!("  mkfs-device <device-path> [--skip-check] [--profile default|performance]");
     println!("  fsck-device <device-path>");
     println!("  verify-device <device-path> --destructive [--chunks <n>] [--chunk-size <bytes>]");
     println!("  mount-device-rw <device-path> <mount-point>");
@@ -936,6 +941,41 @@ fn print_usage() {
 fn parse_flag_u64(args: &[String], flag: &str) -> Option<u64> {
     let idx = args.iter().position(|a| a == flag)?;
     args.get(idx + 1).and_then(|v| v.parse::<u64>().ok())
+}
+
+fn corefs_config_from_args(args: &[String]) -> CoreFsResult<CoreFsConfig> {
+    let mut config = CoreFsConfig::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--profile" => {
+                let value = args.get(index + 1).ok_or_else(|| {
+                    CoreFsError::InvalidCommand("missing value for --profile".to_string())
+                })?;
+                config = corefs_config_from_profile(value)?;
+                index += 2;
+            }
+            "--demo" | "--skip-check" => {
+                index += 1;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    Ok(config)
+}
+
+fn corefs_config_from_profile(profile: &str) -> CoreFsResult<CoreFsConfig> {
+    match profile {
+        "default" | "enterprise" | "secure" => Ok(CoreFsConfig::default()),
+        "performance" | "bench" | "raw" => Ok(CoreFsConfig::performance_profile()),
+        other => Err(CoreFsError::InvalidInput(format!(
+            "unknown CoreFS profile: {other}"
+        ))),
+    }
 }
 
 fn benchmark_config_from_args(args: &[String]) -> CoreFsResult<BenchmarkConfig> {
