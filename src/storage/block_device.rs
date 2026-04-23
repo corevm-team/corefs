@@ -254,6 +254,8 @@ pub struct FileImageDevice {
     file: std::fs::File,
     geometry: DeviceGeometry,
     metadata_dirty: bool,
+    data_dirty: bool,
+    defer_data_sync: bool,
     write_through: bool,
 }
 
@@ -307,6 +309,8 @@ impl FileImageDevice {
                 read_only,
             },
             metadata_dirty: false,
+            data_dirty: false,
+            defer_data_sync: false,
             write_through: write_through && !read_only,
         })
     }
@@ -361,6 +365,8 @@ impl FileImageDevice {
                 read_only: false,
             },
             metadata_dirty: true,
+            data_dirty: false,
+            defer_data_sync: false,
             write_through: false,
         })
     }
@@ -368,6 +374,21 @@ impl FileImageDevice {
     /// Returns the file path of the backing image.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Defers data-only sync requests until [`Self::force_sync`] is called.
+    ///
+    /// This is intended for mounted-image backends that want to keep the
+    /// foreground flush path responsive while a background thread performs
+    /// durable host syncs. Metadata-affecting changes such as image resize
+    /// still sync immediately through [`BlockDevice::sync`].
+    pub fn set_defer_data_sync(&mut self, enabled: bool) {
+        self.defer_data_sync = enabled && !self.geometry.read_only;
+    }
+
+    /// Forces any deferred image writes to stable storage.
+    pub fn force_sync(&mut self) -> CoreFsResult<()> {
+        self.sync_now()
     }
 
     /// Resizes the image to the new capacity.
@@ -389,6 +410,26 @@ impl FileImageDevice {
         self.geometry.capacity_bytes = new_capacity;
         self.geometry.sector_count = new_capacity / ss;
         self.metadata_dirty = true;
+        Ok(())
+    }
+
+    fn sync_now(&mut self) -> CoreFsResult<()> {
+        if self.write_through && !self.metadata_dirty {
+            self.data_dirty = false;
+            return Ok(());
+        }
+        let result = if self.metadata_dirty {
+            self.file.sync_all()
+        } else if self.data_dirty {
+            self.file.sync_data()
+        } else {
+            return Ok(());
+        };
+        result.map_err(|e| {
+            CoreFsError::State(format!("sync failed on {}: {e}", self.path.display()))
+        })?;
+        self.metadata_dirty = false;
+        self.data_dirty = false;
         Ok(())
     }
 }
@@ -444,23 +485,15 @@ impl BlockDevice for FileImageDevice {
                 data.len()
             ))
         })?;
+        self.data_dirty = true;
         Ok(())
     }
 
     fn sync(&mut self) -> CoreFsResult<()> {
-        if self.write_through && !self.metadata_dirty {
+        if self.defer_data_sync && !self.metadata_dirty {
             return Ok(());
         }
-        let result = if self.metadata_dirty {
-            self.file.sync_all()
-        } else {
-            self.file.sync_data()
-        };
-        result.map_err(|e| {
-            CoreFsError::State(format!("sync failed on {}: {e}", self.path.display()))
-        })?;
-        self.metadata_dirty = false;
-        Ok(())
+        self.sync_now()
     }
 
     fn trim(&mut self, _offset: u64, _length: u64) -> CoreFsResult<()> {

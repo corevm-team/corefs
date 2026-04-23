@@ -1,0 +1,23 @@
+﻿fs	workload	ms	metric
+corefs-winfsp	create_64x4096B	71	897,18 ops/s
+corefs-winfsp	read_64x4096B	59	1.092,78 ops/s
+corefs-winfsp	stat_list_64	4	-
+corefs-winfsp	fsync_cold_8x4096B	52	153,92 ops/s
+corefs-winfsp	seq_write_32MiB	227	140,97 MiB/s
+corefs-winfsp	seq_read_32MiB	27	1.170,03 MiB/s
+corefs-winfsp	fsync_8x4096B	997	8,02 ops/s
+corefs-winfsp	rand4k_128ops_70r30w	193	664,16 ops/s
+corefs-winfsp	delete_64_small	18	-
+corefs-winfsp	bigdir_create_512	252	2.033,65 ops/s
+corefs-winfsp	append_log_256x1KiB	163	1.567,19 ops/s
+ntfs-direct	create_64x4096B	21	3.067,96 ops/s
+ntfs-direct	read_64x4096B	5	12.040,03 ops/s
+ntfs-direct	stat_list_64	1	-
+ntfs-direct	fsync_cold_8x4096B	8	1.027,76 ops/s
+ntfs-direct	seq_write_32MiB	20	1.589,71 MiB/s
+ntfs-direct	seq_read_32MiB	9	3.533,06 MiB/s
+ntfs-direct	fsync_8x4096B	7	1.086,51 ops/s
+ntfs-direct	rand4k_128ops_70r30w	8	16.431,53 ops/s
+ntfs-direct	delete_64_small	54	-
+ntfs-direct	bigdir_create_512	149	3.439,42 ops/s
+ntfs-direct	append_log_256x1KiB	1	175.006,84 ops/s

@@ -15,6 +15,8 @@ param(
     [int]$ReadyTimeoutSeconds = 30,
     [int]$MaxSeconds = 60,
     [string]$Profile = "performance",
+    [ValidateSet("strict", "deferred")]
+    [string]$FlushMode = "deferred",
     [string]$HistoryLabel = "windows-vs-ntfs",
     [string]$HistoryDir = "",
     [switch]$NoPerfHistory
@@ -307,6 +309,7 @@ function Convert-TsvToMarkdown {
         "Budget: ${MaxSeconds}s",
         "",
         "CoreFS profile: $Profile",
+        "CoreFS WinFSP flush mode: $FlushMode",
         "",
         "| FS | Workload | ms | Metric |",
         "| --- | --- | ---: | --- |"
@@ -359,8 +362,10 @@ Write-Host "[*] CoreFS: creating image at $resolvedImage"
 Invoke-CoreFs -CoreFsArgs @("mkfs-image", $resolvedImage, "--demo", "--profile", $Profile)
 
 $mountProcess = $null
+$previousFlushMode = $env:COREFS_WINDOWS_FLUSH_MODE
 try {
     Write-Host "[*] CoreFS: mounting read-write at $driveRoot"
+    $env:COREFS_WINDOWS_FLUSH_MODE = $FlushMode
     $mountProcess = Start-CoreFsProcess `
         -CoreFsArgs @("mount-image-rw", $resolvedImage, $driveRoot) `
         -StdoutPath $mountStdout `
@@ -396,7 +401,15 @@ try {
         -EnforceBudget
 }
 finally {
+    if ($null -eq $previousFlushMode) {
+        Remove-Item Env:\COREFS_WINDOWS_FLUSH_MODE -ErrorAction SilentlyContinue
+    } else {
+        $env:COREFS_WINDOWS_FLUSH_MODE = $previousFlushMode
+    }
     if ($mountProcess -and -not $mountProcess.HasExited) {
+        if ($FlushMode -eq "deferred") {
+            Start-Sleep -Milliseconds 1200
+        }
         Stop-Process -Id $mountProcess.Id -Force
         $mountProcess.WaitForExit()
     }

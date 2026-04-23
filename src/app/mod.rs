@@ -13,7 +13,7 @@ use crate::platform::runtime::RuntimeIntegrationBlueprint;
 use crate::platform::tools::ToolRegistry;
 use crate::services::compression::CompressionService;
 use crate::services::encryption::EncryptionService;
-use crate::services::hot_paths::{HotPathRecord, HotPathService};
+use crate::services::hot_paths::HotPathService;
 use crate::services::indexing::IndexingService;
 use crate::services::integrity::{IntegrityReport, IntegrityService};
 use crate::services::journal::{JournalRecoverySummary, JournalRuntimeState, JournalService};
@@ -156,7 +156,9 @@ impl CoreFsService {
         let block_size = config.block_size;
         let volume = VolumeDescriptor::from_config(&config);
         let mut journal = JournalService::default();
-        journal.record("format", "/", format!("volume={}", volume.name));
+        if config.performance.journaling_enabled {
+            journal.record("format", "/", format!("volume={}", volume.name));
+        }
 
         let mut encryption = EncryptionService::default();
         if config.security.encryption_at_rest {
@@ -1659,19 +1661,40 @@ impl CoreFsService {
     }
 
     pub fn persisted_state(&self) -> PersistedState {
+        let persist_runtime_logs = self.config.performance.journaling_enabled;
         PersistedState {
             config: self.config.clone(),
             volume: self.volume.clone(),
-            clean_unmount: self.clean_unmount,
-            pending_wal: self.pending_wal.clone(),
+            clean_unmount: if persist_runtime_logs {
+                self.clean_unmount
+            } else {
+                true
+            },
+            pending_wal: if persist_runtime_logs {
+                self.pending_wal.clone()
+            } else {
+                None
+            },
             active_inodes: self.catalog.active_entries(),
             deleted_inodes: self.catalog.deleted_entries(),
             allocator_policy: self.blocks.allocator_policy().clone(),
             free_extents: self.blocks.free_extents(),
-            hot_path_records: self.hot_paths.records(),
+            hot_path_records: if persist_runtime_logs {
+                self.hot_paths.records()
+            } else {
+                Vec::new()
+            },
             block_records: self.blocks.records(),
-            journal_entries: self.journal.entries().to_vec(),
-            journal_runtime: self.journal.runtime_state().clone(),
+            journal_entries: if persist_runtime_logs {
+                self.journal.entries().to_vec()
+            } else {
+                Vec::new()
+            },
+            journal_runtime: if persist_runtime_logs {
+                self.journal.runtime_state().clone()
+            } else {
+                JournalRuntimeState::default()
+            },
             versions: self.versioning.all_versions(),
             sync_statuses: self.sync.statuses().to_vec(),
             snapshots: self.snapshots.clone(),
@@ -1700,6 +1723,29 @@ impl CoreFsService {
         }
 
         let mut service = Self {
+            clean_unmount: if state.config.performance.journaling_enabled {
+                state.clean_unmount
+            } else {
+                true
+            },
+            pending_wal: if state.config.performance.journaling_enabled {
+                state.pending_wal
+            } else {
+                None
+            },
+            journal: if state.config.performance.journaling_enabled {
+                JournalService::from_entries_with_runtime(
+                    state.journal_entries,
+                    state.journal_runtime,
+                )
+            } else {
+                JournalService::default()
+            },
+            hot_paths: if state.config.performance.journaling_enabled {
+                HotPathService::from_records(state.hot_path_records)
+            } else {
+                HotPathService::default()
+            },
             config: state.config,
             volume: state.volume,
             allocator: InodeAllocator::with_next_inode(next_inode),
@@ -1710,10 +1756,6 @@ impl CoreFsService {
                 state.allocator_policy,
                 state.free_extents,
             ),
-            journal: JournalService::from_entries_with_runtime(
-                state.journal_entries,
-                state.journal_runtime,
-            ),
             versioning: VersioningService::from_versions(state.versions),
             compression: CompressionService,
             encryption,
@@ -1721,11 +1763,8 @@ impl CoreFsService {
             recovery,
             integrity: IntegrityService,
             indexing: IndexingService,
-            hot_paths: HotPathService::from_records(state.hot_path_records),
             security: SecurityService,
             sync: SyncService::from_statuses(state.sync_statuses),
-            clean_unmount: state.clean_unmount,
-            pending_wal: state.pending_wal,
             snapshots: state.snapshots,
             next_snapshot_id: state.next_snapshot_id,
             // The on-disk image we just loaded is, by construction,
@@ -1733,8 +1772,10 @@ impl CoreFsService {
             // populate this set.
             dirty_inodes: std::collections::HashSet::new(),
         };
-        service.recover_runtime_state();
-        service.reconcile_from_journal();
+        if service.config.performance.journaling_enabled {
+            service.recover_runtime_state();
+            service.reconcile_from_journal();
+        }
         service
     }
 

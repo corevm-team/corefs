@@ -9,6 +9,8 @@ param(
     [int]$ReadyTimeoutSeconds = 30,
     [int]$MaxSeconds = 60,
     [string]$Profile = "performance",
+    [ValidateSet("strict", "deferred")]
+    [string]$FlushMode = "deferred",
     [string]$HistoryLabel = "windows-mount",
     [string]$HistoryDir = "",
     [switch]$NoPerfHistory
@@ -57,13 +59,16 @@ function Append-MountBenchmarkRow {
         @(
             "# CoreFS Windows Mount Performance Log",
             "",
+            "CoreFS profile: $Profile",
+            "CoreFS WinFSP flush mode: $FlushMode",
+            "",
             "| Timestamp | Mode | Files | Payload (B) | Seq MiB | Create (ms) | Read (ms) | Seq Write (ms) | Seq Read (ms) | Delete (ms) |",
             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
         ) | Set-Content -Path $Path -Encoding UTF8
     }
 
     $timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss UTC")
-    $row = "| $timestamp | winfsp-mounted/$Profile | $Files | $PayloadBytes | $SequentialMiB | $([int]$CreateMs) | $([int]$ReadMs) | $([int]$SequentialWriteMs) | $([int]$SequentialReadMs) | $([int]$DeleteMs) |"
+    $row = "| $timestamp | winfsp-mounted/$Profile/$FlushMode | $Files | $PayloadBytes | $SequentialMiB | $([int]$CreateMs) | $([int]$ReadMs) | $([int]$SequentialWriteMs) | $([int]$SequentialReadMs) | $([int]$DeleteMs) |"
     Add-Content -Path $Path -Value $row -Encoding UTF8
 }
 
@@ -130,7 +135,9 @@ if (Test-Path $drivePath) {
 Invoke-CoreFs -CoreFsArgs @("mkfs-image", $resolvedImage, "--demo", "--profile", $Profile)
 
 $mountProcess = $null
+$previousFlushMode = $env:COREFS_WINDOWS_FLUSH_MODE
 try {
+    $env:COREFS_WINDOWS_FLUSH_MODE = $FlushMode
     $mountProcess = Start-CoreFsProcess `
         -CoreFsArgs @("mount-image-rw", $resolvedImage, $driveRoot) `
         -StdoutPath $mountStdout `
@@ -244,7 +251,15 @@ try {
     }
 }
 finally {
+    if ($null -eq $previousFlushMode) {
+        Remove-Item Env:\COREFS_WINDOWS_FLUSH_MODE -ErrorAction SilentlyContinue
+    } else {
+        $env:COREFS_WINDOWS_FLUSH_MODE = $previousFlushMode
+    }
     if ($mountProcess -and -not $mountProcess.HasExited) {
+        if ($FlushMode -eq "deferred") {
+            Start-Sleep -Milliseconds 1200
+        }
         Stop-Process -Id $mountProcess.Id -Force
         $mountProcess.WaitForExit()
     }

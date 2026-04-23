@@ -38,6 +38,6 @@ fn performance_profile_disables_expensive_logical_services() {
     assert!(!config.performance.copy_on_write);
     assert!(!config.performance.compression_enabled);
     assert!(!config.performance.deduplication_enabled);
-    assert!(config.performance.journaling_enabled);
+    assert!(!config.performance.journaling_enabled);
     assert!(config.performance.trim_enabled);
 }

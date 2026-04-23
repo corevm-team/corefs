@@ -3,6 +3,8 @@ param(
     [string]$DriveLetter = "X:",
     [switch]$ReadWrite,
     [switch]$Background,
+    [ValidateSet("strict", "deferred")]
+    [string]$FlushMode = "strict",
     [string]$PidPath = "",
     [string]$LogDir = ".\target\windows-mounts",
     [int]$ReadyTimeoutSeconds = 30
@@ -22,8 +24,19 @@ if (-not (Test-Path $resolvedImage)) {
 }
 
 if (-not $Background) {
-    Invoke-CoreFs -CoreFsArgs @($command, $resolvedImage, $driveRoot)
-    return
+    $previousFlushMode = $env:COREFS_WINDOWS_FLUSH_MODE
+    try {
+        $env:COREFS_WINDOWS_FLUSH_MODE = $FlushMode
+        Invoke-CoreFs -CoreFsArgs @($command, $resolvedImage, $driveRoot)
+        return
+    }
+    finally {
+        if ($null -eq $previousFlushMode) {
+            Remove-Item Env:\COREFS_WINDOWS_FLUSH_MODE -ErrorAction SilentlyContinue
+        } else {
+            $env:COREFS_WINDOWS_FLUSH_MODE = $previousFlushMode
+        }
+    }
 }
 
 if (Test-Path $drivePath) {
@@ -48,8 +61,10 @@ $driveName = $driveRoot.TrimEnd(":")
 $stdoutPath = Join-Path $resolvedLogDir "corefs-$driveName.stdout.log"
 $stderrPath = Join-Path $resolvedLogDir "corefs-$driveName.stderr.log"
 $mountProcess = $null
+$previousFlushMode = $env:COREFS_WINDOWS_FLUSH_MODE
 
 try {
+    $env:COREFS_WINDOWS_FLUSH_MODE = $FlushMode
     $mountProcess = Start-CoreFsProcess `
         -CoreFsArgs @($command, $resolvedImage, $driveRoot) `
         -StdoutPath $stdoutPath `
@@ -78,6 +93,7 @@ try {
         DriveLetter = $driveRoot
         ImagePath = $resolvedImage
         ReadWrite = [bool]$ReadWrite
+        FlushMode = $FlushMode
         StartedAt = (Get-Date).ToString("o")
         StdoutPath = $stdoutPath
         StderrPath = $stderrPath
@@ -85,6 +101,7 @@ try {
 
     Write-Host "CoreFS ist im Hintergrund gemountet: $driveRoot -> $resolvedImage"
     Write-Host "PID: $($mountProcess.Id)"
+    Write-Host "Flush-Modus: $FlushMode"
     Write-Host "Statusdatei: $statePath"
     Write-Host "Unmount: .\scripts\windows\corefs-unmount-image.ps1 -DriveLetter $driveRoot"
 }
@@ -93,4 +110,11 @@ catch {
         Stop-Process -Id $mountProcess.Id -Force
     }
     throw
+}
+finally {
+    if ($null -eq $previousFlushMode) {
+        Remove-Item Env:\COREFS_WINDOWS_FLUSH_MODE -ErrorAction SilentlyContinue
+    } else {
+        $env:COREFS_WINDOWS_FLUSH_MODE = $previousFlushMode
+    }
 }

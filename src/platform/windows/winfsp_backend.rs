@@ -113,8 +113,10 @@ pub fn mount_image_as_drive(
         while !STOP_REQUESTED.load(Ordering::SeqCst) {
             thread::sleep(Duration::from_millis(BACKGROUND_FLUSH_INTERVAL_MS));
             let _ = flush_state.persist_if_dirty();
+            let _ = flush_state.sync_deferred();
         }
         let _ = flush_state.persist_if_dirty();
+        let _ = flush_state.sync_deferred();
     });
 
     while !STOP_REQUESTED.load(Ordering::SeqCst) {
@@ -123,6 +125,7 @@ pub fn mount_image_as_drive(
 
     host.stop();
     let _ = state.persist_if_dirty();
+    let _ = state.sync_deferred();
     let _ = flusher.join();
     host.unmount();
     uninstall_console_stop_handler();
@@ -141,10 +144,12 @@ struct CoreFsWinFsp {
 #[derive(Debug)]
 struct CoreFsState {
     writable: bool,
+    flush_mode: FlushMode,
     service: Mutex<CoreFsService>,
     device: Mutex<FileImageDevice>,
     cache: Mutex<Option<DeviceImageCache>>,
     dirty: AtomicBool,
+    deferred_sync_dirty: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -154,10 +159,20 @@ struct CoreFsHandle {
     delete_on_cleanup: AtomicBool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlushMode {
+    Strict,
+    Deferred,
+}
+
 impl CoreFsWinFsp {
     fn open_state(image_path: PathBuf, writable: bool) -> CoreFsResult<Arc<CoreFsState>> {
         let service = CoreFsService::load_image_from_path(&image_path)?;
-        let device = FileImageDevice::open_with_write_through(&image_path, !writable, writable)?;
+        let flush_mode = windows_flush_mode();
+        let mut device = FileImageDevice::open(&image_path, !writable)?;
+        if flush_mode == FlushMode::Deferred {
+            device.set_defer_data_sync(true);
+        }
         let cache = if writable {
             volume_image::load_device_image_cache(&device).ok()
         } else {
@@ -165,10 +180,12 @@ impl CoreFsWinFsp {
         };
         Ok(Arc::new(CoreFsState {
             writable,
+            flush_mode,
             service: Mutex::new(service),
             device: Mutex::new(device),
             cache: Mutex::new(cache),
             dirty: AtomicBool::new(false),
+            deferred_sync_dirty: AtomicBool::new(false),
         }))
     }
 
@@ -249,8 +266,9 @@ impl CoreFsState {
         .map(|report| {
             if trace {
                 eprintln!(
-                    "[winfsp persist] elapsed={:?} dirty_inodes={} dirty_data_inodes={} report={:?}",
+                    "[winfsp persist] elapsed={:?} flush_mode={:?} dirty_inodes={} dirty_data_inodes={} report={:?}",
                     started.elapsed(),
+                    self.flush_mode,
                     dirty.len(),
                     dirty_bytes.len(),
                     report
@@ -263,7 +281,31 @@ impl CoreFsState {
             return Err(corefs_to_winfsp(error));
         }
 
+        if self.flush_mode == FlushMode::Deferred {
+            self.deferred_sync_dirty.store(true, Ordering::SeqCst);
+        }
         let _ = service.take_dirty_inodes();
+        Ok(())
+    }
+
+    fn sync_deferred(&self) -> winfsp::Result<()> {
+        if !self.writable
+            || self.flush_mode != FlushMode::Deferred
+            || !self.deferred_sync_dirty.swap(false, Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+
+        let trace = std::env::var_os("COREFS_PERF_TRACE").is_some();
+        let started = Instant::now();
+        let mut device = self.device.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+        if let Err(error) = device.force_sync() {
+            self.deferred_sync_dirty.store(true, Ordering::SeqCst);
+            return Err(corefs_to_winfsp(error));
+        }
+        if trace {
+            eprintln!("[winfsp deferred-sync] elapsed={:?}", started.elapsed());
+        }
         Ok(())
     }
 }
@@ -390,7 +432,7 @@ impl FileSystemContext for CoreFsWinFsp {
     }
 
     fn flush(&self, context: Option<&Self::FileContext>, file_info: &mut FileInfo) -> winfsp::Result<()> {
-        if self.state.writable {
+        if self.state.writable && self.state.flush_mode == FlushMode::Strict {
             self.state.persist_if_dirty()?;
         }
         let service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
@@ -693,6 +735,19 @@ fn align_up(value: u64, alignment: u64) -> u64 {
         return value;
     }
     value.div_ceil(alignment).saturating_mul(alignment)
+}
+
+fn windows_flush_mode() -> FlushMode {
+    match std::env::var("COREFS_WINDOWS_FLUSH_MODE") {
+        Ok(value)
+            if value.eq_ignore_ascii_case("deferred")
+                || value.eq_ignore_ascii_case("relaxed")
+                || value.eq_ignore_ascii_case("performance") =>
+        {
+            FlushMode::Deferred
+        }
+        _ => FlushMode::Strict,
+    }
 }
 
 fn nt(status: i32) -> winfsp::FspError {

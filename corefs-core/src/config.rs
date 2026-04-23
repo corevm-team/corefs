@@ -103,6 +103,7 @@ impl CoreFsConfig {
         config.versioning.expose_time_travel = false;
         config.versioning.max_version_bytes = None;
         config.security.encryption_at_rest = false;
+        config.performance.journaling_enabled = false;
         config.performance.copy_on_write = false;
         config.performance.compression_enabled = false;
         config.performance.deduplication_enabled = false;
