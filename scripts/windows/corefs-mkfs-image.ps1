@@ -1,4 +1,6 @@
 param(
+    [Parameter(Position = 0)]
+    [Alias("Path", "LiteralPath")]
     [string]$ImagePath = ".\corefs-volume.img",
     [string]$Profile = "default",
     [switch]$Demo
@@ -6,7 +8,13 @@ param(
 
 . (Join-Path $PSScriptRoot "corefs-common.ps1")
 
-$args = @("mkfs-image", $ImagePath)
+$resolvedImage = Resolve-CoreFsUserPath -Path $ImagePath
+$imageDir = Split-Path -Parent $resolvedImage
+if ($imageDir) {
+    New-Item -ItemType Directory -Force -Path $imageDir | Out-Null
+}
+
+$args = @("mkfs-image", $resolvedImage)
 if ($Demo) {
     $args += "--demo"
 }

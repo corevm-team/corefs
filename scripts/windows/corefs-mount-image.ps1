@@ -1,5 +1,8 @@
 param(
+    [Parameter(Position = 0)]
+    [Alias("Path", "LiteralPath")]
     [string]$ImagePath = ".\corefs-volume.img",
+    [Parameter(Position = 1)]
     [string]$DriveLetter = "X:",
     [switch]$ReadWrite,
     [switch]$Background,
@@ -17,7 +20,7 @@ Assert-CoreFsWinFspInstalled
 $command = if ($ReadWrite) { "mount-image-rw" } else { "mount-image" }
 $driveRoot = Normalize-CoreFsDriveRoot -Value $DriveLetter
 $drivePath = "$driveRoot\"
-$resolvedImage = [System.IO.Path]::GetFullPath($ImagePath)
+$resolvedImage = Resolve-CoreFsUserPath -Path $ImagePath
 
 if (-not (Test-Path $resolvedImage)) {
     throw "Image nicht gefunden: $resolvedImage. Erst mit corefs-mkfs-image.ps1 oder 'corefs mkfs-image' erzeugen."
@@ -43,7 +46,7 @@ if (Test-Path $drivePath) {
     throw "Laufwerk $driveRoot existiert bereits. Bitte einen freien Buchstaben waehlen oder zuerst unmounten."
 }
 
-$resolvedLogDir = [System.IO.Path]::GetFullPath($LogDir)
+$resolvedLogDir = Resolve-CoreFsUserPath -Path $LogDir
 New-Item -ItemType Directory -Force -Path $resolvedLogDir | Out-Null
 
 $statePath = Get-CoreFsMountStatePath -DriveLetter $driveRoot -PidPath $PidPath

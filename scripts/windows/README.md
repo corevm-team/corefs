@@ -40,8 +40,10 @@ Beispiele:
 
 ```powershell
 .\scripts\windows\corefs-mkfs-image.ps1 -ImagePath .\demo.img -Demo
+.\scripts\windows\corefs-mkfs-image.ps1 -Path .\images\demo.img -Demo
 .\scripts\windows\corefs-mkfs-image.ps1 -ImagePath .\fast.img -Profile performance
 .\scripts\windows\corefs-mount-image.ps1 -ImagePath .\demo.img -DriveLetter X: -ReadWrite
+.\scripts\windows\corefs-mount-image.ps1 -Path .\images\demo.img -DriveLetter X: -ReadWrite
 .\scripts\windows\corefs-mount-image.ps1 -ImagePath .\demo.img -DriveLetter X: -ReadWrite -Background
 .\scripts\windows\corefs-unmount-image.ps1 -DriveLetter X:
 .\scripts\windows\corefs-benchmark.ps1 -LogPath .\PERFORMANCE_LOG.windows.md
@@ -72,6 +74,7 @@ scripts\windows\corefs-benchmark-vs-ntfs.bat -ImagePath .\target\windows-bench\c
 Hinweis:
 
 - Native Windows-Mounts laufen ueber WinFSP, nicht ueber `subst`.
+- Relative `-ImagePath`/`-Path`, `-PidPath` und `-LogDir`-Angaben werden relativ zu deinem aktuellen Arbeitsordner aufgeloest, nicht relativ zum Repo oder zur `corefs.exe`.
 - `-Profile performance` ist kein Windows-Sonderpfad: es erzeugt ein plattformneutrales CoreFS-Image ohne Versioning, Compression und Encryption fuer faire Rohdurchsatz-Messungen gegen NTFS/ext4.
 - Build: `cargo build --features windows-winfsp`
 - Voraussetzung: installierte WinFSP-2.x-Laufzeit. Die Rust-Bindings sind vendored; LLVM/libclang wird dafuer nicht lokal benoetigt.

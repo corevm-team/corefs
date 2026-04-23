@@ -97,6 +97,20 @@ function Normalize-CoreFsDriveRoot {
     throw "Ungueltiger Windows-Laufwerksbuchstabe: $Value"
 }
 
+function Resolve-CoreFsUserPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    try {
+        return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    }
+    catch {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+}
+
 function Get-CoreFsMountStatePath {
     param(
         [string]$DriveLetter,
@@ -104,7 +118,7 @@ function Get-CoreFsMountStatePath {
     )
 
     if ($PidPath) {
-        return [System.IO.Path]::GetFullPath($PidPath)
+        return Resolve-CoreFsUserPath -Path $PidPath
     }
 
     $repoRoot = Get-CoreFsRepoRoot
