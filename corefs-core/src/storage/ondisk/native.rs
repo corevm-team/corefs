@@ -260,8 +260,60 @@ pub fn save_state_native(
     })
 }
 
+/// Per-slot warning emitted by [`load_state_native_lossy`] when an
+/// individual inode slot fails to decode (e.g. torn attr-block write after
+/// a crash).  The slot is skipped so the mount can still proceed; `fsck`
+/// is the proper cleanup path.
+#[derive(Debug, Clone)]
+pub struct InodeSlotWarning {
+    pub slot: u64,
+    pub reason: alloc::string::String,
+    /// Optional post-mortem info for corruption diagnosis — only populated
+    /// when the warning stems from an unreadable attr block. Shows what
+    /// was actually on disk at the referenced address so callers can
+    /// distinguish "all zeros" (lost write) from "valid magic but bad CRC"
+    /// (torn write) from "arbitrary bytes" (overwritten by unrelated data).
+    pub diagnostic: Option<AttrBlockDiagnostic>,
+}
+
+/// Diagnostic snapshot captured when an attr-block load fails.
+#[derive(Debug, Clone)]
+pub struct AttrBlockDiagnostic {
+    /// Physical block address the inode record pointed at.
+    pub attr_block_addr: u64,
+    /// Magic value actually present at byte 0..4.
+    pub magic_found: u32,
+    /// Magic value expected at byte 0..4.
+    pub magic_expected: u32,
+    /// Stored CRC at the end of the block.
+    pub stored_crc: u32,
+    /// CRC we computed over the block contents.
+    pub computed_crc: u32,
+    /// First 64 bytes of the block so callers can eyeball the pattern
+    /// (zeros, another magic, recognizable text, …).
+    pub first_bytes: [u8; 64],
+}
+
 /// Reconstruct a `PersistedState` from a native-layout volume.
 pub fn load_state_native(device: &dyn BlockDevice) -> CoreFsResult<PersistedState> {
+    load_state_native_inner(device, /* lossy = */ false).map(|(state, _)| state)
+}
+
+/// Like [`load_state_native`] but tolerates per-inode-slot corruption
+/// (torn attr blocks, unreadable inode records, deserialize failures)
+/// by skipping the affected slot and returning it as a warning.  Used
+/// by the kernel mount path so that a crash mid-write does not brick
+/// the whole filesystem.
+pub fn load_state_native_lossy(
+    device: &dyn BlockDevice,
+) -> CoreFsResult<(PersistedState, Vec<InodeSlotWarning>)> {
+    load_state_native_inner(device, /* lossy = */ true)
+}
+
+fn load_state_native_inner(
+    device: &dyn BlockDevice,
+    lossy: bool,
+) -> CoreFsResult<(PersistedState, Vec<InodeSlotWarning>)> {
     let sb = super::volume::read_sb_with_fallbacks(device)?;
     super::volume::verify_bitmap_integrity(device, &sb)?;
     if sb.layout_mode != LAYOUT_MODE_NATIVE {
@@ -306,31 +358,118 @@ pub fn load_state_native(device: &dyn BlockDevice) -> CoreFsResult<PersistedStat
     let mut active_inodes = Vec::new();
     let mut deleted_inodes = Vec::new();
     let mut block_records = Vec::new();
+    let mut warnings: Vec<InodeSlotWarning> = Vec::new();
+
+    // Small helper so the lossy branch only has to check one flag.
+    // Variants: without diagnostic (generic errors) and with diagnostic
+    // (attr-block read/decode failures — the usual crash-induced case).
+    macro_rules! slot_bail {
+        ($slot:expr, $err:expr) => {{
+            let e: CoreFsError = $err;
+            if lossy {
+                warnings.push(InodeSlotWarning {
+                    slot: $slot,
+                    reason: alloc::format!("{:?}", e),
+                    diagnostic: None,
+                });
+                continue;
+            } else {
+                return Err(e);
+            }
+        }};
+        ($slot:expr, $err:expr, $diag:expr) => {{
+            let e: CoreFsError = $err;
+            if lossy {
+                warnings.push(InodeSlotWarning {
+                    slot: $slot,
+                    reason: alloc::format!("{:?}", e),
+                    diagnostic: Some($diag),
+                });
+                continue;
+            } else {
+                return Err(e);
+            }
+        }};
+    }
 
     for slot in FIRST_USER_INODE_SLOT..geom.inode_count {
         if !inode_bitmap.is_set(slot)? {
             continue;
         }
-        let on_disk = read_inode_at_slot(device, &geom, slot)?;
+        let on_disk = match read_inode_at_slot(device, &geom, slot) {
+            Ok(v) => v,
+            Err(e) => slot_bail!(slot, e),
+        };
         if on_disk.kind == OnDiskKind::Unused {
             continue;
         }
         if on_disk.xattr_block_addr == 0 {
-            return Err(CoreFsError::State(format!(
-                "native load: inode slot {slot} has no attr block"
-            )));
+            slot_bail!(
+                slot,
+                CoreFsError::State(format!(
+                    "native load: inode slot {slot} has no attr block"
+                ))
+            );
         }
-        let attr_buf = device.read_at(on_disk.xattr_block_addr * BLOCK_SIZE, BLOCK_SIZE)?;
-        let attr = AttrBlock::decode(&attr_buf)?;
-        let inode: Inode = crate::bincode_compat::deserialize(&attr.payload).map_err(|e| {
+        let attr_buf = match device.read_at(on_disk.xattr_block_addr * BLOCK_SIZE, BLOCK_SIZE) {
+            Ok(v) => v,
+            Err(e) => slot_bail!(slot, e),
+        };
+        let attr = match AttrBlock::decode(&attr_buf) {
+            Ok(v) => v,
+            Err(e) if lossy => {
+                // Build a post-mortem snapshot so the caller can tell
+                // lost-write (all zeros) apart from torn-write (valid
+                // magic, bad CRC) apart from cross-overwrite (foreign
+                // bytes, wrong magic).
+                let mut first_bytes = [0u8; 64];
+                let take = core::cmp::min(64, attr_buf.len());
+                first_bytes[..take].copy_from_slice(&attr_buf[..take]);
+                let magic_found = if attr_buf.len() >= 4 {
+                    u32::from_le_bytes(attr_buf[0..4].try_into().unwrap())
+                } else {
+                    0
+                };
+                let stored_crc = if attr_buf.len() >= 4096 {
+                    u32::from_le_bytes(attr_buf[4092..4096].try_into().unwrap())
+                } else {
+                    0
+                };
+                let computed_crc = if attr_buf.len() == BLOCK_SIZE as usize {
+                    let mut zeroed = attr_buf.clone();
+                    zeroed[4092..4096].fill(0);
+                    super::checksum::Crc32c::hash(&zeroed)
+                } else {
+                    0
+                };
+                let diag = AttrBlockDiagnostic {
+                    attr_block_addr: on_disk.xattr_block_addr,
+                    magic_found,
+                    magic_expected: super::attr_block::ATTR_BLOCK_MAGIC,
+                    stored_crc,
+                    computed_crc,
+                    first_bytes,
+                };
+                slot_bail!(slot, e, diag);
+            }
+            Err(e) => slot_bail!(slot, e),
+            Err(e) => slot_bail!(slot, e),
+        };
+        let inode: Inode = match crate::bincode_compat::deserialize(&attr.payload).map_err(|e| {
             CoreFsError::State(format!("native load: inode deserialize failed: {e}"))
-        })?;
+        }) {
+            Ok(v) => v,
+            Err(e) => slot_bail!(slot, e),
+        };
         // Reconstruct a BlockRecord (metadata-only) from on-disk extents.
         // Data remains on the device — no bytes loaded into RAM.
         if on_disk.size_bytes > 0 || !on_disk.extents.is_empty() {
             use crate::storage::block_store::{EXTENT_COMPRESSED, EXTENT_ENCRYPTED, ExtentRef};
             let extents = if on_disk.flags & FLAG_HAS_EXTENT_INDEX != 0 {
-                super::extent_tree::ExtentChain::read_chain(device, on_disk.index_block_addr)?
+                match super::extent_tree::ExtentChain::read_chain(device, on_disk.index_block_addr) {
+                    Ok(v) => v,
+                    Err(e) => slot_bail!(slot, e),
+                }
             } else {
                 on_disk.extents.clone()
             };
@@ -374,24 +513,27 @@ pub fn load_state_native(device: &dyn BlockDevice) -> CoreFsResult<PersistedStat
         }
     }
 
-    Ok(PersistedState {
-        config: ancillary.config,
-        volume: ancillary.volume,
-        clean_unmount: ancillary.clean_unmount,
-        pending_wal: ancillary.pending_wal,
-        active_inodes,
-        deleted_inodes,
-        allocator_policy: ancillary.allocator_policy,
-        free_extents: ancillary.free_extents,
-        hot_path_records: ancillary.hot_path_records,
-        block_records,
-        journal_entries: ancillary.journal_entries,
-        journal_runtime: ancillary.journal_runtime,
-        versions: ancillary.versions,
-        sync_statuses: ancillary.sync_statuses,
-        snapshots: ancillary.snapshots,
-        next_snapshot_id: ancillary.next_snapshot_id,
-    })
+    Ok((
+        PersistedState {
+            config: ancillary.config,
+            volume: ancillary.volume,
+            clean_unmount: ancillary.clean_unmount,
+            pending_wal: ancillary.pending_wal,
+            active_inodes,
+            deleted_inodes,
+            allocator_policy: ancillary.allocator_policy,
+            free_extents: ancillary.free_extents,
+            hot_path_records: ancillary.hot_path_records,
+            block_records,
+            journal_entries: ancillary.journal_entries,
+            journal_runtime: ancillary.journal_runtime,
+            versions: ancillary.versions,
+            sync_statuses: ancillary.sync_statuses,
+            snapshots: ancillary.snapshots,
+            next_snapshot_id: ancillary.next_snapshot_id,
+        },
+        warnings,
+    ))
 }
 
 // ---------------------------------------------------------------------------
