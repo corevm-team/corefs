@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use corefs_tools::fsck;
 use std::fs;
 use std::path::{Path, PathBuf};

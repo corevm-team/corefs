@@ -31,6 +31,18 @@ explicit platform command listed below.
 | `cert_080` | ODF microbenchmark regression gates |
 | `cert_081` | Service benchmark output and throughput metrics |
 | `cert_090` | Cross-platform command manifest presence |
+| `cert_100` | Snapshot diff, scoped restore, snapshot deletion, persistence |
+| `cert_101` | Metadata owner/mode masking, version retention, journal persistence |
+| `cert_102` | Clone tree, copy-on-write divergence, dedup pass, persistence |
+| `cert_103` | Fragmentation, hot-path optimization, legacy image roundtrip |
+| `cert_104` | Aborted ODF mutation does not persist partial changes |
+| `cert_105` | Pending WAL replay after simulated crash/reload |
+| `cert_110` | ODF xattr/ACL block CRC roundtrip and corruption rejection |
+| `cert_120` | File creation exists, duplicate creation rejection, reopen |
+| `cert_121` | File soft deletion: deleted from active namespace but recoverable/restorable |
+| `cert_122` | Secure delete and expunge irrecoverability |
+| `cert_123` | File overwrite, range write, append, truncate shrink/grow exact semantics |
+| `cert_124` | Forced flush/fsync persistence boundary |
 
 ## Platform Commands
 

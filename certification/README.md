@@ -45,6 +45,18 @@ cargo test -p corefs-certification -- --nocapture
 | `cert_080` | ODF format/save/load benchmark regression gates |
 | `cert_081` | Service benchmark output and throughput metrics |
 | `cert_090` | Cross-platform command manifest presence |
+| `cert_100` | Snapshot diff, scoped restore, snapshot deletion and persistence |
+| `cert_101` | Owner/mode metadata, permission masking, version retention and journal persistence |
+| `cert_102` | Clone tree, copy-on-write divergence, dedup pass and persistence |
+| `cert_103` | Fragmentation, hot-path optimization and legacy image roundtrip |
+| `cert_104` | Aborted ODF mutation rollback-at-disk boundary |
+| `cert_105` | Pending WAL replay after simulated crash/reload |
+| `cert_110` | ODF xattr/ACL block CRC roundtrip and corruption rejection |
+| `cert_120` | File creation existence, duplicate rejection and reopen |
+| `cert_121` | Soft deletion removes from active namespace but remains recoverable/restorable |
+| `cert_122` | Secure delete and expunge are irrecoverable |
+| `cert_123` | Overwrite, range write, append and truncate exact semantics |
+| `cert_124` | Forced flush/fsync persistence boundary |
 
 ## Performance Gates
 
