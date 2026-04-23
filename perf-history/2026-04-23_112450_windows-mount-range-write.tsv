@@ -1,0 +1,6 @@
+﻿fs	workload	ms	metric
+corefs-winfsp	create_128x4096B	187	685,27 ops/s
+corefs-winfsp	read_128x4096B	116	1.100,27 ops/s
+corefs-winfsp	seq_write_32MiB	1082	29,56 MiB/s
+corefs-winfsp	seq_read_32MiB	403	79,32 MiB/s
+corefs-winfsp	delete_128_small	2454	-

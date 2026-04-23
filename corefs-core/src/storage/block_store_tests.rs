@@ -521,6 +521,52 @@ fn device_ranged_read_crosses_extent_boundaries_without_full_materialisation() {
 }
 
 #[test]
+fn compat_write_range_updates_existing_extent_without_full_rewrite() {
+    let mut store = BlockStore::default();
+    let inode = InodeId(45);
+
+    store.write(inode, b"abcdefgh".to_vec());
+    let before = store.record(inode).expect("record").clone();
+
+    let size = store.write_range(inode, 2, b"XY").expect("range write");
+    assert_eq!(size, 8);
+
+    let after = store.record(inode).expect("record");
+    assert_eq!(after.logical_size, 8);
+    assert_eq!(after.extents.len(), before.extents.len());
+    assert_eq!(after.first_physical_block(), before.first_physical_block());
+    assert_eq!(store.read(inode).expect("read").bytes, b"abXYefgh");
+    assert!(store.verify(inode));
+}
+
+#[test]
+fn compat_write_range_appends_at_eof() {
+    let mut store = BlockStore::default();
+    let inode = InodeId(46);
+
+    store.write(inode, b"abc".to_vec());
+    let size = store.write_range(inode, 3, b"def").expect("append");
+
+    assert_eq!(size, 6);
+    assert_eq!(store.read(inode).expect("read").bytes, b"abcdef");
+    assert!(store.verify(inode));
+}
+
+#[test]
+fn compat_resize_inode_shrinks_and_grows() {
+    let mut store = BlockStore::default();
+    let inode = InodeId(47);
+
+    store.write(inode, b"abcdef".to_vec());
+    store.resize_inode(inode, 3).expect("shrink");
+    assert_eq!(store.read(inode).expect("read").bytes, b"abc");
+
+    store.resize_inode(inode, 6).expect("grow");
+    assert_eq!(store.read(inode).expect("read").bytes, b"abc\0\0\0");
+    assert!(store.verify(inode));
+}
+
+#[test]
 fn drain_freed_extents_clears_pending() {
     let mut store = BlockStore::default();
     store.write(InodeId(1), b"hello".to_vec());

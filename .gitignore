@@ -14,3 +14,5 @@ scripts/testing/.xfstests-helpers/
 corefs_brainstorming.txt
 CLAUDE.md
 .codex
+.cargo-*/
+scratch-test/

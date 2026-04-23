@@ -486,6 +486,265 @@ impl BlockStore {
         Some(OldBlockRecord::from_record_and_bytes(rec, bytes))
     }
 
+    /// Reads only a byte range for `inode` from the internal compat device.
+    pub fn read_range(&self, inode: InodeId, offset: u64, length: usize) -> Option<Vec<u8>> {
+        let rec = self.records.get(&inode)?;
+        if length == 0 || offset >= rec.logical_size {
+            return Some(Vec::new());
+        }
+
+        let bs = self.block_size as u64;
+        let requested_end = offset.saturating_add(length as u64).min(rec.logical_size);
+        let mut logical_cursor = 0u64;
+        let mut out = Vec::with_capacity((requested_end - offset) as usize);
+
+        for ext in &rec.extents {
+            let ext_len = u64::from(ext.logical_len);
+            let ext_start = logical_cursor;
+            let ext_end = ext_start.saturating_add(ext_len);
+            logical_cursor = ext_end;
+
+            if requested_end <= ext_start {
+                break;
+            }
+            if offset >= ext_end {
+                continue;
+            }
+
+            let in_ext_start = offset.saturating_sub(ext_start);
+            let in_ext_end = requested_end.min(ext_end).saturating_sub(ext_start);
+            if in_ext_end <= in_ext_start {
+                continue;
+            }
+
+            let byte_offset = ext.physical_block * bs + in_ext_start;
+            let read_len = in_ext_end - in_ext_start;
+            let sector = u64::from(self.compat_device.sector_size());
+            let aligned_start = align_down_u64(byte_offset, sector);
+            let aligned_end = align_up_u64(byte_offset.saturating_add(read_len), sector);
+            if aligned_end <= self.compat_device.capacity() {
+                if let Ok(buf) = self.compat_device.read_at(aligned_start, aligned_end - aligned_start) {
+                    let start = (byte_offset - aligned_start) as usize;
+                    let end = start + read_len as usize;
+                    out.extend_from_slice(&buf[start..end]);
+                }
+            }
+        }
+
+        Some(out)
+    }
+
+    /// Writes a byte range for `inode` on the internal compat device.
+    ///
+    /// This is the platform-neutral hot path used by native mounts.  Plain
+    /// in-place overwrites update only the touched device sectors instead of
+    /// materialising and rewriting the whole file.  Sparse writes and writes
+    /// beyond EOF intentionally fall back to the full compat path for now.
+    pub fn write_range(
+        &mut self,
+        inode: InodeId,
+        offset: u64,
+        data: &[u8],
+    ) -> CoreFsResult<usize> {
+        if data.is_empty() {
+            return Ok(self
+                .records
+                .get(&inode)
+                .map(|r| r.logical_size as usize)
+                .unwrap_or(0));
+        }
+
+        let Some(existing) = self.records.get(&inode).cloned() else {
+            if offset == 0 {
+                return Ok(self.write(inode, data.to_vec()));
+            }
+            return self.write_range_fallback(inode, offset, data);
+        };
+
+        let current_size = existing.logical_size;
+        let write_end = offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| CoreFsError::InvalidInput("block store write offset overflow".into()))?;
+
+        if offset == current_size {
+            return Ok(self.append_to_inode(inode, data));
+        }
+        if offset == 0 && write_end >= current_size {
+            return Ok(self.write(inode, data.to_vec()));
+        }
+        if offset > current_size || write_end > current_size {
+            return self.write_range_fallback(inode, offset, data);
+        }
+        if existing.flags != 0 || existing.extents.iter().any(|e| e.flags != 0) {
+            return self.write_range_fallback(inode, offset, data);
+        }
+
+        if let Some(first) = existing.extents.first() {
+            self.dedup_release(existing.content_crc, first.physical_block, first.length_blocks);
+        }
+
+        let mut rec = existing;
+        let mut written = 0usize;
+        let mut logical_cursor = 0u64;
+        for idx in 0..rec.extents.len() {
+            let ext_len = u64::from(rec.extents[idx].logical_len);
+            let ext_start = logical_cursor;
+            let ext_end = ext_start.saturating_add(ext_len);
+            logical_cursor = ext_end;
+
+            if write_end <= ext_start {
+                break;
+            }
+            if offset >= ext_end {
+                continue;
+            }
+
+            let overlap_start = offset.max(ext_start);
+            let overlap_end = write_end.min(ext_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+
+            let src_start = (overlap_start - offset) as usize;
+            let src_len = (overlap_end - overlap_start) as usize;
+            let in_extent_start = overlap_start - ext_start;
+            self.write_compat_extent_range(
+                &rec.extents[idx],
+                in_extent_start,
+                &data[src_start..src_start + src_len],
+            )?;
+            let crc = self.compat_extent_crc(&rec.extents[idx])?;
+            rec.extents[idx].content_crc = crc;
+            written += src_len;
+        }
+
+        if written != data.len() {
+            return self.write_range_fallback(inode, offset, data);
+        }
+
+        rec.content_crc = self.compat_record_crc(&rec);
+        if rec.extents.len() == 1 {
+            if let Some(first) = rec.extents.first() {
+                self.dedup_insert(
+                    rec.content_crc,
+                    first.physical_block,
+                    first.length_blocks,
+                    first.physical_len,
+                );
+            }
+        }
+        let size = rec.logical_size as usize;
+        self.records.insert(inode, rec);
+        Ok(size)
+    }
+
+    /// Resizes an inode on the internal compat device.
+    pub fn resize_inode(&mut self, inode: InodeId, new_size: u64) -> CoreFsResult<usize> {
+        let current_size = self
+            .records
+            .get(&inode)
+            .map(|r| r.logical_size)
+            .unwrap_or(0);
+        if new_size == current_size {
+            return Ok(new_size as usize);
+        }
+        if new_size > current_size {
+            let growth = (new_size - current_size) as usize;
+            let zeros = vec![0u8; growth];
+            return Ok(self.append_to_inode(inode, &zeros));
+        }
+        if new_size > MAX_RMW_BYTES as u64 {
+            return Err(CoreFsError::InvalidInput(format!(
+                "block store truncate would materialize {new_size} bytes"
+            )));
+        }
+        let prefix = self.read_range(inode, 0, new_size as usize).unwrap_or_default();
+        Ok(self.write(inode, prefix))
+    }
+
+    fn write_range_fallback(
+        &mut self,
+        inode: InodeId,
+        offset: u64,
+        data: &[u8],
+    ) -> CoreFsResult<usize> {
+        let existing = self.read(inode).map(|r| r.bytes).unwrap_or_default();
+        let write_end = offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| CoreFsError::InvalidInput("block store write offset overflow".into()))?;
+        let new_size_u64 = write_end.max(existing.len() as u64);
+        if new_size_u64 > MAX_RMW_BYTES as u64 {
+            return Err(CoreFsError::InvalidInput(format!(
+                "block store random write would materialize {new_size_u64} bytes"
+            )));
+        }
+
+        let mut bytes = existing;
+        bytes.resize(new_size_u64 as usize, 0);
+        let start = offset as usize;
+        let end = start + data.len();
+        bytes[start..end].copy_from_slice(data);
+        Ok(self.write(inode, bytes))
+    }
+
+    fn write_compat_extent_range(
+        &mut self,
+        extent: &ExtentRef,
+        in_extent_start: u64,
+        data: &[u8],
+    ) -> CoreFsResult<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let bs = self.block_size as u64;
+        let physical_start = extent
+            .physical_block
+            .saturating_mul(bs)
+            .saturating_add(in_extent_start);
+        let physical_end = physical_start.saturating_add(data.len() as u64);
+        let sector = u64::from(self.compat_device.sector_size());
+        let aligned_start = align_down_u64(physical_start, sector);
+        let aligned_end = align_up_u64(physical_end, sector);
+
+        if aligned_end > self.compat_device.capacity() {
+            let cur = self.compat_device.capacity();
+            let target = core::cmp::max(cur.saturating_mul(2), aligned_end);
+            let aligned = align_up_u64(target, sector);
+            self.compat_device.resize(aligned)?;
+        }
+
+        let mut block = self
+            .compat_device
+            .read_at(aligned_start, aligned_end - aligned_start)?;
+        let start = (physical_start - aligned_start) as usize;
+        let end = start + data.len();
+        block[start..end].copy_from_slice(data);
+        self.compat_device.write_at(aligned_start, &block)
+    }
+
+    fn compat_extent_crc(&self, extent: &ExtentRef) -> CoreFsResult<u32> {
+        if extent.physical_len == 0 {
+            return Ok(0);
+        }
+
+        let bs = self.block_size as u64;
+        let offset = extent.physical_block.saturating_mul(bs);
+        let read_len = u64::from(extent.length_blocks).saturating_mul(bs);
+        let bytes = self.compat_device.read_at(offset, read_len)?;
+        let want = (extent.physical_len as usize).min(bytes.len());
+        Ok(Crc32c::hash(&bytes[..want]))
+    }
+
+    fn compat_record_crc(&self, record: &BlockRecord) -> u32 {
+        let bytes = self.read_bytes_internal(record);
+        if bytes.is_empty() {
+            0
+        } else {
+            Crc32c::hash(&bytes)
+        }
+    }
+
     /// Hängt `extra` an den bestehenden Inhalt von `inode` an.
     ///
     /// Phase-1 P2: für plain (unflagged) Records wird ein **neuer Extent**

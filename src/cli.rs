@@ -264,6 +264,7 @@ where
             }
             #[cfg(target_os = "windows")]
             {
+                println!("mounting CoreFS image on {mount_point}; keep this process running");
                 let report = windows::mount_image_as_drive(
                     image_path,
                     mount_point,
@@ -271,9 +272,9 @@ where
                     windows_staging_from_args(&args[4..]),
                 )?;
                 println!(
-                    "mounted CoreFS image on {}: via {}",
+                    "unmounted CoreFS image from {}: mount_point={}",
                     report.drive_letter,
-                    report.staging_dir.display()
+                    report.mount_point.display()
                 );
             }
             #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -296,6 +297,7 @@ where
             }
             #[cfg(target_os = "windows")]
             {
+                println!("mounting CoreFS image read-write on {mount_point}; keep this process running");
                 let report = windows::mount_image_as_drive(
                     image_path,
                     mount_point,
@@ -303,9 +305,9 @@ where
                     windows_staging_from_args(&args[4..]),
                 )?;
                 println!(
-                    "mounted CoreFS image read-write on {}: via {}",
+                    "unmounted CoreFS image read-write from {}: mount_point={}",
                     report.drive_letter,
-                    report.staging_dir.display()
+                    report.mount_point.display()
                 );
             }
             #[cfg(not(any(target_os = "linux", target_os = "windows")))]

@@ -90,6 +90,26 @@ impl Default for CoreFsConfig {
     }
 }
 
+impl CoreFsConfig {
+    /// Throughput-oriented profile for filesystem benchmark and appliance use.
+    ///
+    /// This keeps the format and semantics platform-neutral: Windows, Linux and
+    /// anyOS can all request the same profile and get the same CoreFS policy.
+    pub fn performance_profile() -> Self {
+        let mut config = Self::default();
+        config.default_tier = StorageTier::Hot;
+        config.versioning.keep_latest = 0;
+        config.versioning.auto_prune = false;
+        config.versioning.expose_time_travel = false;
+        config.versioning.max_version_bytes = None;
+        config.security.encryption_at_rest = false;
+        config.performance.copy_on_write = false;
+        config.performance.compression_enabled = false;
+        config.performance.deduplication_enabled = false;
+        config
+    }
+}
+
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;

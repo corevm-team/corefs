@@ -2086,7 +2086,7 @@ impl Filesystem for CoreFsFuseMountRw {
                     reply.error(EIO);
                     return;
                 }
-                if let Err(_) = self.service.write_file(&path, &buf) {
+                if let Err(_) = self.service.truncate_file(&path, new_size) {
                     reply.error(EIO);
                     return;
                 }

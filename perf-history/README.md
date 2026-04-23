@@ -37,6 +37,26 @@ fs<TAB>workload<TAB>ms<TAB>ops_or_mibs
 
 Workloads are defined in `scripts/corefs-benchmark-vs-ext4.sh`.
 
+## Windows Runs
+
+The Windows benchmark scripts also archive timestamped TSV files here so
+WinFSP performance changes are visible beside the Linux history.
+
+```powershell
+.\scripts\windows\corefs-benchmark-vs-ntfs.ps1 -ImagePath .\target\windows-bench\corefs.img -DriveLetter X:
+.\scripts\windows\corefs-benchmark-mounted.ps1 -ImagePath .\target\windows-bench\mounted.img -DriveLetter X:
+```
+
+Windows artifacts use these labels by default:
+
+| File | Purpose |
+|---|---|
+| `YYYY-MM-DD_HHMMSS_windows-vs-ntfs.tsv` | CoreFS/WinFSP compared with a direct NTFS directory. |
+| `YYYY-MM-DD_HHMMSS_windows-mount.tsv` | Mounted CoreFS/WinFSP only, useful for quick native Windows smoke/perf runs. |
+
+Use `-HistoryLabel <label>` for a custom suffix, `-HistoryDir <path>` for a
+different archive directory, or `-NoPerfHistory` for one-off local runs.
+
 ## Known historical points
 
 | Date | Label | Headline |

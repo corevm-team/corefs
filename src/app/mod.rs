@@ -202,6 +202,11 @@ impl CoreFsService {
         !self.dirty_inodes.is_empty()
     }
 
+    /// Returns a snapshot of dirty block-content inodes without clearing it.
+    pub fn dirty_inodes_snapshot(&self) -> std::collections::HashSet<crate::domain::inode::InodeId> {
+        self.dirty_inodes.clone()
+    }
+
     /// Marks `inode` as having mutated block content.  Callers use this
     /// alongside direct mutations of [`BlockStore`] so the persist path
     /// can tell which DATA regions need a fresh build.
@@ -370,12 +375,14 @@ impl CoreFsService {
         }
 
         // Store version before compression (versions hold original content).
-        self.versioning.store_version(path, bytes.to_vec());
-        self.versioning
-            .prune(path, self.config.versioning.keep_latest);
-        if let Some(budget) = self.config.versioning.max_version_bytes {
-            if self.versioning.total_bytes() > budget {
-                self.versioning.prune_to_budget(budget);
+        if self.config.versioning.keep_latest > 0 {
+            self.versioning.store_version(path, bytes.to_vec());
+            self.versioning
+                .prune(path, self.config.versioning.keep_latest);
+            if let Some(budget) = self.config.versioning.max_version_bytes {
+                if self.versioning.total_bytes() > budget {
+                    self.versioning.prune_to_budget(budget);
+                }
             }
         }
 
@@ -404,6 +411,138 @@ impl CoreFsService {
             .record("write_file", path, format!("bytes={}", bytes.len()));
         self.dirty_inodes.insert(inode_id);
         self.auto_optimize_storage("write_file");
+        Ok(())
+    }
+
+    /// Writes a byte range without replacing the whole file when the current
+    /// stored representation is plain extents.
+    pub fn write_file_range(&mut self, path: &str, offset: u64, bytes: &[u8]) -> CoreFsResult<()> {
+        let (inode_id, inode_kind, old_size, was_compressed, was_encrypted) = {
+            let inode = self
+                .catalog
+                .get(path)
+                .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+            (
+                inode.id,
+                inode.kind,
+                inode.size,
+                inode.metadata.compressed,
+                inode.metadata.encrypted,
+            )
+        };
+
+        if inode_kind != InodeKind::File {
+            return Err(CoreFsError::InvalidInput(format!(
+                "range writes are only supported for files: {path}"
+            )));
+        }
+
+        let write_end = offset
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| CoreFsError::InvalidInput("file write offset overflow".into()))?;
+        let new_size = write_end.max(old_size as u64) as usize;
+        let byte_delta = new_size as isize - old_size as isize;
+        if byte_delta > 0 {
+            let (cur_files, cur_bytes) = self.catalog.quota_stats();
+            self.quota
+                .check_stats(&self.config.quotas, cur_files, cur_bytes, 0, byte_delta)?;
+        }
+
+        // Compressed/encrypted files need the full logical pipeline.  Keep this
+        // path correct; hot native writes become plain after append/full-write.
+        if was_compressed || was_encrypted {
+            let mut existing = self.read_file(path)?;
+            existing.resize(new_size, 0);
+            let start = offset as usize;
+            existing[start..start + bytes.len()].copy_from_slice(bytes);
+            return self.write_file(path, &existing);
+        }
+
+        if self.config.versioning.keep_latest > 0 {
+            let before = self.read_file(path)?;
+            self.versioning.store_version(path, before);
+            self.versioning
+                .prune(path, self.config.versioning.keep_latest);
+            if let Some(budget) = self.config.versioning.max_version_bytes {
+                if self.versioning.total_bytes() > budget {
+                    self.versioning.prune_to_budget(budget);
+                }
+            }
+        }
+
+        let stored_size = self.blocks.write_range(inode_id, offset, bytes)?;
+        let inode = self.catalog.get_mut(path).expect("path still exists");
+        inode.touch_modified();
+        inode.metadata.compressed = false;
+        inode.metadata.encrypted = false;
+        inode.size = stored_size;
+        self.hot_paths.record_write(path, bytes.len());
+        self.journal.record(
+            "write_file_range",
+            path,
+            format!("offset={offset} bytes={}", bytes.len()),
+        );
+        self.dirty_inodes.insert(inode_id);
+        Ok(())
+    }
+
+    /// Resizes a file using the BlockStore range/truncate path for plain files.
+    pub fn truncate_file(&mut self, path: &str, new_size: u64) -> CoreFsResult<()> {
+        let (inode_id, inode_kind, old_size, was_compressed, was_encrypted) = {
+            let inode = self
+                .catalog
+                .get(path)
+                .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+            (
+                inode.id,
+                inode.kind,
+                inode.size,
+                inode.metadata.compressed,
+                inode.metadata.encrypted,
+            )
+        };
+
+        if inode_kind != InodeKind::File {
+            return Err(CoreFsError::InvalidInput(format!(
+                "truncate is only supported for files: {path}"
+            )));
+        }
+
+        let byte_delta = new_size as isize - old_size as isize;
+        if byte_delta > 0 {
+            let (cur_files, cur_bytes) = self.catalog.quota_stats();
+            self.quota
+                .check_stats(&self.config.quotas, cur_files, cur_bytes, 0, byte_delta)?;
+        }
+
+        if was_compressed || was_encrypted {
+            let mut bytes = self.read_file(path)?;
+            bytes.resize(new_size as usize, 0);
+            return self.write_file(path, &bytes);
+        }
+
+        if self.config.versioning.keep_latest > 0 {
+            let before = self.read_file(path)?;
+            self.versioning.store_version(path, before);
+            self.versioning
+                .prune(path, self.config.versioning.keep_latest);
+            if let Some(budget) = self.config.versioning.max_version_bytes {
+                if self.versioning.total_bytes() > budget {
+                    self.versioning.prune_to_budget(budget);
+                }
+            }
+        }
+
+        let stored_size = self.blocks.resize_inode(inode_id, new_size)?;
+        let inode = self.catalog.get_mut(path).expect("path still exists");
+        inode.touch_modified();
+        inode.metadata.compressed = false;
+        inode.metadata.encrypted = false;
+        inode.size = stored_size;
+        self.hot_paths.record_write(path, stored_size);
+        self.journal
+            .record("truncate_file", path, format!("size={stored_size}"));
+        self.dirty_inodes.insert(inode_id);
         Ok(())
     }
 
@@ -491,6 +630,29 @@ impl CoreFsService {
         } else {
             Ok(decrypted)
         }
+    }
+
+    pub fn read_file_range(
+        &self,
+        path: &str,
+        offset: u64,
+        length: usize,
+    ) -> CoreFsResult<Vec<u8>> {
+        let inode = self
+            .catalog
+            .get(path)
+            .ok_or_else(|| CoreFsError::NotFound(format!("path not found: {path}")))?;
+
+        if inode.metadata.encrypted || inode.metadata.compressed {
+            let bytes = self.read_file(path)?;
+            let start = (offset as usize).min(bytes.len());
+            let end = start.saturating_add(length).min(bytes.len());
+            return Ok(bytes[start..end].to_vec());
+        }
+
+        self.blocks
+            .read_range(inode.id, offset, length)
+            .ok_or_else(|| CoreFsError::State(format!("missing data blocks for {path}")))
     }
 
     pub fn delete_file(&mut self, path: &str, secure: bool) -> CoreFsResult<()> {
