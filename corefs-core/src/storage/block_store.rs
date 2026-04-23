@@ -96,6 +96,12 @@ pub struct BlockRecord {
     pub flags: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeWriteOutcome {
+    pub size: usize,
+    pub changed: bool,
+}
+
 impl BlockRecord {
     /// Liefert die Gesamtzahl belegter Device-Blöcke.
     pub fn total_blocks(&self) -> u64 {
@@ -546,17 +552,33 @@ impl BlockStore {
         offset: u64,
         data: &[u8],
     ) -> CoreFsResult<usize> {
+        self.write_range_report(inode, offset, data)
+            .map(|outcome| outcome.size)
+    }
+
+    pub fn write_range_report(
+        &mut self,
+        inode: InodeId,
+        offset: u64,
+        data: &[u8],
+    ) -> CoreFsResult<RangeWriteOutcome> {
         if data.is_empty() {
-            return Ok(self
-                .records
-                .get(&inode)
-                .map(|r| r.logical_size as usize)
-                .unwrap_or(0));
+            return Ok(RangeWriteOutcome {
+                size: self
+                    .records
+                    .get(&inode)
+                    .map(|r| r.logical_size as usize)
+                    .unwrap_or(0),
+                changed: false,
+            });
         }
 
         let Some(existing) = self.records.get(&inode).cloned() else {
             if offset == 0 {
-                return Ok(self.write(inode, data.to_vec()));
+                return Ok(RangeWriteOutcome {
+                    size: self.write(inode, data.to_vec()),
+                    changed: true,
+                });
             }
             return self.write_range_fallback(inode, offset, data);
         };
@@ -567,10 +589,16 @@ impl BlockStore {
             .ok_or_else(|| CoreFsError::InvalidInput("block store write offset overflow".into()))?;
 
         if offset == current_size {
-            return Ok(self.append_to_inode(inode, data));
+            return Ok(RangeWriteOutcome {
+                size: self.append_to_inode(inode, data),
+                changed: true,
+            });
         }
         if offset == 0 && write_end >= current_size {
-            return Ok(self.write(inode, data.to_vec()));
+            return Ok(RangeWriteOutcome {
+                size: self.write(inode, data.to_vec()),
+                changed: true,
+            });
         }
         if offset > current_size || write_end > current_size {
             return self.write_range_fallback(inode, offset, data);
@@ -579,12 +607,14 @@ impl BlockStore {
             return self.write_range_fallback(inode, offset, data);
         }
 
-        if let Some(first) = existing.extents.first() {
-            self.dedup_release(existing.content_crc, first.physical_block, first.length_blocks);
-        }
-
         let mut rec = existing;
+        let old_crc = rec.content_crc;
+        let old_first = rec
+            .extents
+            .first()
+            .map(|first| (first.physical_block, first.length_blocks));
         let mut written = 0usize;
+        let mut changed_any = false;
         let mut logical_cursor = 0u64;
         for idx in 0..rec.extents.len() {
             let ext_len = u64::from(rec.extents[idx].logical_len);
@@ -608,20 +638,32 @@ impl BlockStore {
             let src_start = (overlap_start - offset) as usize;
             let src_len = (overlap_end - overlap_start) as usize;
             let in_extent_start = overlap_start - ext_start;
-            self.write_compat_extent_range(
+            let changed = self.write_compat_extent_range(
                 &rec.extents[idx],
                 in_extent_start,
                 &data[src_start..src_start + src_len],
             )?;
-            let crc = self.compat_extent_crc(&rec.extents[idx])?;
-            rec.extents[idx].content_crc = crc;
+            if changed {
+                let crc = self.compat_extent_crc(&rec.extents[idx])?;
+                rec.extents[idx].content_crc = crc;
+                changed_any = true;
+            }
             written += src_len;
         }
 
         if written != data.len() {
             return self.write_range_fallback(inode, offset, data);
         }
+        if !changed_any {
+            return Ok(RangeWriteOutcome {
+                size: rec.logical_size as usize,
+                changed: false,
+            });
+        }
 
+        if let Some((phys, blocks)) = old_first {
+            self.dedup_release(old_crc, phys, blocks);
+        }
         rec.content_crc = self.compat_record_crc(&rec);
         if rec.extents.len() == 1 {
             if let Some(first) = rec.extents.first() {
@@ -635,7 +677,10 @@ impl BlockStore {
         }
         let size = rec.logical_size as usize;
         self.records.insert(inode, rec);
-        Ok(size)
+        Ok(RangeWriteOutcome {
+            size,
+            changed: true,
+        })
     }
 
     /// Resizes an inode on the internal compat device.
@@ -667,7 +712,7 @@ impl BlockStore {
         inode: InodeId,
         offset: u64,
         data: &[u8],
-    ) -> CoreFsResult<usize> {
+    ) -> CoreFsResult<RangeWriteOutcome> {
         let existing = self.read(inode).map(|r| r.bytes).unwrap_or_default();
         let write_end = offset
             .checked_add(data.len() as u64)
@@ -679,12 +724,21 @@ impl BlockStore {
             )));
         }
 
-        let mut bytes = existing;
+        let mut bytes = existing.clone();
         bytes.resize(new_size_u64 as usize, 0);
         let start = offset as usize;
         let end = start + data.len();
         bytes[start..end].copy_from_slice(data);
-        Ok(self.write(inode, bytes))
+        if existing.len() == bytes.len() && existing.as_slice() == bytes.as_slice() {
+            return Ok(RangeWriteOutcome {
+                size: existing.len(),
+                changed: false,
+            });
+        }
+        Ok(RangeWriteOutcome {
+            size: self.write(inode, bytes),
+            changed: true,
+        })
     }
 
     fn write_compat_extent_range(
@@ -692,9 +746,9 @@ impl BlockStore {
         extent: &ExtentRef,
         in_extent_start: u64,
         data: &[u8],
-    ) -> CoreFsResult<()> {
+    ) -> CoreFsResult<bool> {
         if data.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
 
         let bs = self.block_size as u64;
@@ -719,8 +773,12 @@ impl BlockStore {
             .read_at(aligned_start, aligned_end - aligned_start)?;
         let start = (physical_start - aligned_start) as usize;
         let end = start + data.len();
+        if block.get(start..end) == Some(data) {
+            return Ok(false);
+        }
         block[start..end].copy_from_slice(data);
-        self.compat_device.write_at(aligned_start, &block)
+        self.compat_device.write_at(aligned_start, &block)?;
+        Ok(true)
     }
 
     fn compat_extent_crc(&self, extent: &ExtentRef) -> CoreFsResult<u32> {

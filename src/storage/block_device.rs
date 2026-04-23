@@ -253,19 +253,42 @@ pub struct FileImageDevice {
     path: PathBuf,
     file: std::fs::File,
     geometry: DeviceGeometry,
+    metadata_dirty: bool,
+    write_through: bool,
 }
 
 impl FileImageDevice {
     /// Opens an existing image file.
     pub fn open(path: impl AsRef<Path>, read_only: bool) -> CoreFsResult<Self> {
+        Self::open_with_options(path, read_only, false)
+    }
+
+    /// Opens an existing image file and optionally requests write-through I/O.
+    ///
+    /// Write-through mode is useful for mounted image files: individual
+    /// sector-aligned writes become durable at the device boundary, avoiding a
+    /// handle-wide flush of the whole image on every fsync.  Metadata changes
+    /// such as resize still force a full metadata sync.
+    pub fn open_with_write_through(
+        path: impl AsRef<Path>,
+        read_only: bool,
+        write_through: bool,
+    ) -> CoreFsResult<Self> {
+        Self::open_with_options(path, read_only, write_through)
+    }
+
+    fn open_with_options(
+        path: impl AsRef<Path>,
+        read_only: bool,
+        write_through: bool,
+    ) -> CoreFsResult<Self> {
         let path = path.as_ref();
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(!read_only)
-            .open(path)
-            .map_err(|e| {
-                CoreFsError::State(format!("failed to open image file {}: {e}", path.display()))
-            })?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(!read_only);
+        apply_write_through(&mut options, write_through && !read_only);
+        let file = options.open(path).map_err(|e| {
+            CoreFsError::State(format!("failed to open image file {}: {e}", path.display()))
+        })?;
 
         let metadata = file.metadata().map_err(|e| {
             CoreFsError::State(format!("failed to stat image file {}: {e}", path.display()))
@@ -283,6 +306,8 @@ impl FileImageDevice {
                 capacity_bytes,
                 read_only,
             },
+            metadata_dirty: false,
+            write_through: write_through && !read_only,
         })
     }
 
@@ -311,17 +336,14 @@ impl FileImageDevice {
             )));
         }
 
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(|e| {
-                CoreFsError::State(format!(
-                    "failed to create image file {}: {e}",
-                    path.display()
-                ))
-            })?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        let file = options.open(path).map_err(|e| {
+            CoreFsError::State(format!(
+                "failed to create image file {}: {e}",
+                path.display()
+            ))
+        })?;
 
         file.set_len(capacity_bytes).map_err(|e| {
             CoreFsError::State(format!(
@@ -338,6 +360,8 @@ impl FileImageDevice {
                 capacity_bytes,
                 read_only: false,
             },
+            metadata_dirty: true,
+            write_through: false,
         })
     }
 
@@ -364,6 +388,7 @@ impl FileImageDevice {
             .map_err(|e| CoreFsError::State(format!("failed to resize image file: {e}")))?;
         self.geometry.capacity_bytes = new_capacity;
         self.geometry.sector_count = new_capacity / ss;
+        self.metadata_dirty = true;
         Ok(())
     }
 }
@@ -423,9 +448,19 @@ impl BlockDevice for FileImageDevice {
     }
 
     fn sync(&mut self) -> CoreFsResult<()> {
-        self.file
-            .sync_all()
-            .map_err(|e| CoreFsError::State(format!("sync failed on {}: {e}", self.path.display())))
+        if self.write_through && !self.metadata_dirty {
+            return Ok(());
+        }
+        let result = if self.metadata_dirty {
+            self.file.sync_all()
+        } else {
+            self.file.sync_data()
+        };
+        result.map_err(|e| {
+            CoreFsError::State(format!("sync failed on {}: {e}", self.path.display()))
+        })?;
+        self.metadata_dirty = false;
+        Ok(())
     }
 
     fn trim(&mut self, _offset: u64, _length: u64) -> CoreFsResult<()> {
@@ -435,6 +470,25 @@ impl BlockDevice for FileImageDevice {
 
     fn supports_trim(&self) -> bool {
         false
+    }
+}
+
+fn apply_write_through(options: &mut std::fs::OpenOptions, enabled: bool) {
+    if !enabled {
+        return;
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
+        options.custom_flags(FILE_FLAG_WRITE_THROUGH);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_SYNC);
     }
 }
 

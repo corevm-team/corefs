@@ -282,9 +282,9 @@ fn save_volume_image_inner(
         entries.push(SegmentEntry {
             kind: segment.kind,
             offset: offset as u64,
-            length: segment.payload.len() as u64,
+            length: segment.on_disk_len() as u64,
         });
-        offset = align_up(offset + segment.payload.len(), SEGMENT_ALIGNMENT);
+        offset = align_up(offset + segment.on_disk_len(), SEGMENT_ALIGNMENT);
     }
 
     let total_size = offset;
@@ -466,6 +466,14 @@ pub fn repair_volume_image_superblocks(
 struct SegmentPayload {
     kind: [u8; 4],
     payload: Vec<u8>,
+    append: Option<SegmentAppend>,
+}
+
+#[derive(Debug, Clone)]
+struct SegmentAppend {
+    cached_len: usize,
+    full_len: usize,
+    payload_checksum: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -476,7 +484,58 @@ struct SegmentFrameHeader {
 }
 
 fn raw_segment_from_bytes(kind: [u8; 4], payload: Vec<u8>) -> SegmentPayload {
-    SegmentPayload { kind, payload }
+    SegmentPayload {
+        kind,
+        payload,
+        append: None,
+    }
+}
+
+fn framed_segment_from_bytes(kind: [u8; 4], payload: Vec<u8>) -> SegmentPayload {
+    SegmentPayload {
+        kind,
+        payload: encode_segment_frame(kind, &payload),
+        append: None,
+    }
+}
+
+fn framed_segment_append(
+    kind: [u8; 4],
+    cached_len: usize,
+    full_payload_len: usize,
+    payload_checksum: u64,
+    suffix: Vec<u8>,
+) -> SegmentPayload {
+    let mut payload = encode_segment_frame_header(kind, full_payload_len as u64, payload_checksum);
+    payload.extend_from_slice(&suffix);
+    SegmentPayload {
+        kind,
+        payload,
+        append: Some(SegmentAppend {
+            cached_len,
+            full_len: SEGMENT_FRAME_SIZE + full_payload_len,
+            payload_checksum,
+        }),
+    }
+}
+
+impl SegmentPayload {
+    fn on_disk_len(&self) -> usize {
+        self.append
+            .as_ref()
+            .map(|append| append.full_len)
+            .unwrap_or(self.payload.len())
+    }
+
+    fn payload_checksum_for_superblock(&self) -> u64 {
+        if self.kind == *b"SUPR" || self.kind == *b"SUP2" {
+            checksum(&self.payload)
+        } else if let Some(append) = &self.append {
+            append.payload_checksum
+        } else {
+            checksum(&self.payload[SEGMENT_FRAME_SIZE..])
+        }
+    }
 }
 
 fn serialize_segment<T: Serialize>(
@@ -491,10 +550,7 @@ fn serialize_segment<T: Serialize>(
             path.display()
         ))
     })?;
-    Ok(SegmentPayload {
-        kind,
-        payload: encode_segment_frame(kind, &payload),
-    })
+    Ok(framed_segment_from_bytes(kind, payload))
 }
 
 fn serialize_inode_segment(
@@ -509,10 +565,7 @@ fn serialize_inode_segment(
             path.display()
         ))
     })?;
-    Ok(SegmentPayload {
-        kind,
-        payload: encode_segment_frame(kind, &payload),
-    })
+    Ok(framed_segment_from_bytes(kind, payload))
 }
 
 fn serialize_journal_segment(
@@ -527,10 +580,7 @@ fn serialize_journal_segment(
             path.display()
         ))
     })?;
-    Ok(SegmentPayload {
-        kind,
-        payload: encode_segment_frame(kind, &payload),
-    })
+    Ok(framed_segment_from_bytes(kind, payload))
 }
 
 fn serialize_snapshot_segment(
@@ -545,10 +595,7 @@ fn serialize_snapshot_segment(
             path.display()
         ))
     })?;
-    Ok(SegmentPayload {
-        kind,
-        payload: encode_segment_frame(kind, &payload),
-    })
+    Ok(framed_segment_from_bytes(kind, payload))
 }
 
 fn serialize_bytes_segment(
@@ -556,10 +603,7 @@ fn serialize_bytes_segment(
     payload: &[u8],
     _path: &Path,
 ) -> CoreFsResult<SegmentPayload> {
-    Ok(SegmentPayload {
-        kind,
-        payload: encode_segment_frame(kind, payload),
-    })
+    Ok(framed_segment_from_bytes(kind, payload.to_vec()))
 }
 
 fn deserialize_segment<T: for<'de> Deserialize<'de>>(
@@ -679,7 +723,7 @@ fn split_blocks(
     block_bytes: &HashMap<InodeId, Vec<u8>>,
 ) -> (Vec<BlockDescriptor>, Vec<u8>) {
     let mut descriptors = Vec::with_capacity(block_records.len());
-    let block_size = block_size.max(1) as u64;
+    let _block_size = block_size.max(1) as u64;
 
     // Lay out blobs sequentially in the DATA segment (offset = cumulative bytes).
     let mut data: Vec<u8> = Vec::new();
@@ -790,6 +834,103 @@ fn split_blocks_partial(
     }
 
     Some((descriptors, data))
+}
+
+struct PartialBlockBuild {
+    descriptors: Vec<BlockDescriptor>,
+    data: Vec<u8>,
+    append: Option<DataAppendBuild>,
+}
+
+struct DataAppendBuild {
+    cached_len: usize,
+    full_payload_len: usize,
+    payload_checksum: u64,
+}
+
+/// Build only the appended DATA tail when every unchanged inode keeps its
+/// cached DATA position and all dirty inodes are new records appended at the
+/// end.  This is the common fsync pattern after a large sequential file:
+/// `seq.bin` remains cached, while tiny newly-created files contribute a tail.
+fn split_blocks_partial_append(
+    block_records: &[BlockRecord],
+    dirty_bytes: &HashMap<InodeId, Vec<u8>>,
+    cache: &DeviceImageCache,
+) -> Option<PartialBlockBuild> {
+    if dirty_bytes.is_empty() {
+        return None;
+    }
+
+    let cached_body_len = cache.cached_data_body_len()?;
+    let mut descriptors = Vec::with_capacity(block_records.len());
+    let mut suffix = Vec::new();
+    let mut offset = 0u64;
+    let mut appended_any = false;
+
+    for record in block_records {
+        if let Some(fresh) = dirty_bytes.get(&record.inode) {
+            // Existing dirty records are rewrites, not append-only growth.
+            if cache.cached_descriptor_for(record.inode).is_some() {
+                return None;
+            }
+            if offset != cached_body_len as u64 {
+                return None;
+            }
+            let length = fresh.len() as u64;
+            descriptors.push(BlockDescriptor {
+                inode: record.inode,
+                checksum: u64::from(record.content_crc),
+                device_block: record.first_physical_block(),
+                allocated_blocks: if length == 0 {
+                    record.logical_size
+                } else {
+                    record.total_blocks().max(1)
+                },
+                offset,
+                length,
+            });
+            suffix.extend_from_slice(fresh);
+            offset = offset.checked_add(length)?;
+            appended_any = true;
+            continue;
+        }
+
+        let cached = cache.cached_descriptor_for(record.inode)?;
+        if appended_any {
+            return None;
+        }
+        if cached.offset != offset {
+            return None;
+        }
+        descriptors.push(BlockDescriptor {
+            inode: record.inode,
+            checksum: u64::from(record.content_crc),
+            device_block: record.first_physical_block(),
+            allocated_blocks: if cached.length == 0 {
+                record.logical_size
+            } else {
+                record.total_blocks().max(1)
+            },
+            offset: cached.offset,
+            length: cached.length,
+        });
+        offset = offset.checked_add(cached.length)?;
+    }
+
+    if !appended_any || offset < cached_body_len as u64 {
+        return None;
+    }
+
+    let payload_checksum = checksum_continue(cache.cached_data_payload_checksum()?, &suffix);
+    Some(PartialBlockBuild {
+        descriptors,
+        data: suffix,
+        append: Some(DataAppendBuild {
+            cached_len: SEGMENT_FRAME_SIZE + cached_body_len,
+            full_payload_len: offset as usize,
+            payload_checksum,
+        }),
+    })
 }
 
 fn join_blocks(descriptors: Vec<BlockDescriptor>, data: &[u8]) -> CoreFsResult<Vec<BlockRecord>> {
@@ -1370,12 +1511,21 @@ fn encode_superblock(superblock: &Superblock) -> Vec<u8> {
 }
 
 fn encode_segment_frame(kind: [u8; 4], payload: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(SEGMENT_FRAME_SIZE + payload.len());
+    let mut bytes = encode_segment_frame_header(kind, payload.len() as u64, checksum(payload));
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+fn encode_segment_frame_header(
+    kind: [u8; 4],
+    payload_length: u64,
+    payload_checksum: u64,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(SEGMENT_FRAME_SIZE);
     bytes.extend_from_slice(&kind);
     bytes.extend_from_slice(&0u32.to_le_bytes());
-    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(&checksum(payload).to_le_bytes());
-    bytes.extend_from_slice(payload);
+    bytes.extend_from_slice(&payload_length.to_le_bytes());
+    bytes.extend_from_slice(&payload_checksum.to_le_bytes());
     bytes
 }
 
@@ -2260,7 +2410,11 @@ fn validate_required_segments(entries: &[SegmentEntry]) -> CoreFsResult<()> {
 }
 
 fn checksum(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0u64, |acc, byte| {
+    checksum_continue(0, bytes)
+}
+
+fn checksum_continue(seed: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(seed, |acc, byte| {
         acc.wrapping_mul(16777619).wrapping_add(u64::from(*byte))
     })
 }
@@ -2269,9 +2423,7 @@ fn checksum_of_payloads(segments: &[SegmentPayload]) -> u64 {
     segments
         .iter()
         .filter(|segment| segment.kind != *b"SUPR" && segment.kind != *b"SUP2")
-        .fold(0u64, |acc, segment| {
-            acc ^ checksum(segment_payload_for_checksum(segment))
-        })
+        .fold(0u64, |acc, segment| acc ^ segment.payload_checksum_for_superblock())
 }
 
 fn checksum_of_segment_data(
@@ -2288,14 +2440,6 @@ fn checksum_of_segment_data(
         value ^= checksum(segment_bytes(bytes, entry, path)?);
     }
     Ok(value)
-}
-
-fn segment_payload_for_checksum<'a>(segment: &'a SegmentPayload) -> &'a [u8] {
-    if segment.kind == *b"SUPR" || segment.kind == *b"SUP2" {
-        &segment.payload
-    } else {
-        &segment.payload[SEGMENT_FRAME_SIZE..]
-    }
 }
 
 fn current_generation() -> u64 {
@@ -2356,6 +2500,18 @@ fn build_image_with_partial(
 ) -> CoreFsResult<Option<BuiltImage>> {
     let label = "<device>";
     let path = Path::new(label);
+    if let Some(partial) = split_blocks_partial_append(&state.block_records, dirty_bytes, cache) {
+        return build_image_inner(
+            state,
+            sector_size,
+            capacity,
+            path,
+            partial.descriptors,
+            partial.data,
+            partial.append,
+        )
+        .map(Some);
+    }
     let Some((descriptors, block_data)) = split_blocks_partial(
         &state.block_records,
         state.volume.block_size,
@@ -2364,7 +2520,7 @@ fn build_image_with_partial(
     ) else {
         return Ok(None);
     };
-    build_image_inner(state, sector_size, capacity, path, descriptors, block_data).map(Some)
+    build_image_inner(state, sector_size, capacity, path, descriptors, block_data, None).map(Some)
 }
 
 /// Builds an in-memory image from the persisted state.  Does not perform I/O.
@@ -2377,7 +2533,7 @@ fn build_image_with_bytes(
     let label = "<device>";
     let path = Path::new(label);
     let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size, block_bytes);
-    build_image_inner(state, sector_size, capacity, path, descriptors, block_data)
+    build_image_inner(state, sector_size, capacity, path, descriptors, block_data, None)
 }
 
 fn build_image(
@@ -2388,7 +2544,7 @@ fn build_image(
     let label = "<device>";
     let path = Path::new(label);
     let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size, &HashMap::new());
-    build_image_inner(state, sector_size, capacity, path, descriptors, block_data)
+    build_image_inner(state, sector_size, capacity, path, descriptors, block_data, None)
 }
 
 fn build_image_inner(
@@ -2398,6 +2554,7 @@ fn build_image_inner(
     path: &Path,
     descriptors: Vec<BlockDescriptor>,
     block_data: Vec<u8>,
+    data_append: Option<DataAppendBuild>,
 ) -> CoreFsResult<BuiltImage> {
 
     let mut segments = vec![
@@ -2473,7 +2630,16 @@ fn build_image_inner(
             },
             path,
         )?,
-        serialize_bytes_segment(*b"DATA", &block_data, path)?,
+        match data_append {
+            Some(append) => framed_segment_append(
+                *b"DATA",
+                append.cached_len,
+                append.full_payload_len,
+                append.payload_checksum,
+                block_data,
+            ),
+            None => serialize_bytes_segment(*b"DATA", &block_data, path)?,
+        },
     ];
 
     let segment_count = segments.len();
@@ -2486,9 +2652,9 @@ fn build_image_inner(
         entries.push(SegmentEntry {
             kind: segment.kind,
             offset: offset as u64,
-            length: segment.payload.len() as u64,
+            length: segment.on_disk_len() as u64,
         });
-        offset = align_up(offset + segment.payload.len(), SEGMENT_ALIGNMENT);
+        offset = align_up(offset + segment.on_disk_len(), SEGMENT_ALIGNMENT);
     }
 
     let total_size = offset;
@@ -2684,6 +2850,32 @@ impl DeviceImageCache {
         }
     }
 
+    fn from_image_bytes(bytes: &[u8], entries: &[SegmentEntry], path: &Path) -> CoreFsResult<Self> {
+        let descriptors: BlockDescriptorSegment =
+            deserialize_segment(bytes, find_segment(entries, b"BLKD")?, path)?;
+        let mut segments = HashMap::new();
+        for entry in entries {
+            let start = entry.offset as usize;
+            let end = start
+                .checked_add(entry.length as usize)
+                .ok_or_else(|| CoreFsError::State("segment cache range overflow".to_string()))?;
+            let payload = bytes
+                .get(start..end)
+                .ok_or_else(|| {
+                    CoreFsError::State(format!(
+                        "truncated CoreFS segment {} while building device cache",
+                        String::from_utf8_lossy(&entry.kind)
+                    ))
+                })?
+                .to_vec();
+            segments.insert(entry.kind, (entry.offset, payload));
+        }
+        Ok(Self {
+            segments,
+            data_descriptors: descriptors.descriptors,
+        })
+    }
+
     /// Look up the cached DATA payload bytes for `inode`, if any.
     ///
     /// Returns a slice into the cached DATA segment's payload without
@@ -2696,13 +2888,85 @@ impl DeviceImageCache {
             .iter()
             .find(|d| d.inode == inode)?;
         let data = &self.segments.get(b"DATA")?.1;
-        let start = desc.offset as usize;
+        let start = SEGMENT_FRAME_SIZE.checked_add(desc.offset as usize)?;
         let end = start.checked_add(desc.length as usize)?;
         if end > data.len() {
             return None;
         }
         Some(&data[start..end])
     }
+
+    fn cached_descriptor_for(&self, inode: InodeId) -> Option<&BlockDescriptor> {
+        self.data_descriptors
+            .iter()
+            .find(|descriptor| descriptor.inode == inode)
+    }
+
+    fn cached_data_body_len(&self) -> Option<usize> {
+        self.segments
+            .get(b"DATA")?
+            .1
+            .len()
+            .checked_sub(SEGMENT_FRAME_SIZE)
+    }
+
+    fn cached_data_payload_checksum(&self) -> Option<u64> {
+        let data = &self.segments.get(b"DATA")?.1;
+        if data.len() < SEGMENT_FRAME_SIZE {
+            return None;
+        }
+        Some(u64::from_le_bytes(data[16..24].try_into().ok()?))
+    }
+}
+
+/// Builds an incremental persist cache from the image currently stored on a
+/// device.  Mount paths use this to avoid treating the first flush after mount
+/// as a full-image rewrite.
+pub fn load_device_image_cache(device: &dyn BlockDevice) -> CoreFsResult<DeviceImageCache> {
+    let path = Path::new("<device>");
+    let bytes = read_device_image_bytes(device)?;
+    let inspected = inspect_volume_image_bytes(&bytes, path)?;
+    DeviceImageCache::from_image_bytes(&bytes, &inspected.entries, path)
+}
+
+fn read_device_image_bytes(device: &dyn BlockDevice) -> CoreFsResult<Vec<u8>> {
+    let sector_size = device.sector_size() as u64;
+    let header_sector = device.read_at(0, sector_size)?;
+    if header_sector.len() < HEADER_SIZE {
+        return Err(CoreFsError::State(
+            "device too small for CoreFS header".to_string(),
+        ));
+    }
+    if &header_sector[..8] != MAGIC {
+        return Err(CoreFsError::State(
+            "device does not contain a CoreFS volume (invalid magic)".to_string(),
+        ));
+    }
+
+    let segment_count =
+        u32::from_le_bytes(header_sector[12..16].try_into().expect("fixed slice")) as usize;
+    let directory_end = HEADER_SIZE + segment_count * SEGMENT_ENTRY_SIZE;
+    let needed_for_directory = align_up(directory_end, sector_size as usize);
+
+    let mut bytes = if needed_for_directory as u64 > sector_size {
+        device.read_at(0, needed_for_directory as u64)?
+    } else {
+        header_sector
+    };
+
+    let entries = load_directory_from_header(&bytes, Path::new("<device>"))?;
+    let image_end = entries
+        .iter()
+        .map(|entry| entry.offset.saturating_add(entry.length))
+        .max()
+        .unwrap_or(directory_end as u64);
+    let total_read = align_up(image_end as usize, sector_size as usize)
+        .min(device.capacity() as usize);
+    if total_read > bytes.len() {
+        let more = device.read_at(bytes.len() as u64, (total_read - bytes.len()) as u64)?;
+        bytes.extend_from_slice(&more);
+    }
+    Ok(bytes)
 }
 
 /// Like [`persist_to_device_incremental`] but also carries block payload
@@ -2872,6 +3136,8 @@ fn persist_built_image_incremental(
     let mut segments_written = 0usize;
     let mut bytes_written = 0u64;
     let sector_size = device.sector_size() as u64;
+    let mut pending_writes: Vec<PendingWrite> = Vec::new();
+    let mut cache_updates: Vec<PendingCacheUpdate> = Vec::new();
 
     // Phase-2: the directory entries carry per-segment lengths, so a
     // length change on any segment requires the on-disk directory to
@@ -2883,11 +3149,52 @@ fn persist_built_image_incremental(
     // refreshed by the segment loop below (SUPR always changes because
     // of the generation counter).
     if !built.header.is_empty() {
-        write_segment_rmw(device, 0, &built.header, sector_size)?;
+        queue_segment_write(&mut pending_writes, 0, &built.header);
         bytes_written += built.header.len() as u64;
     }
 
     for (segment, entry) in built.segments.iter().zip(built.entries.iter()) {
+        if let Some(append) = &segment.append {
+            let Some((cached_offset, cached_payload)) = cache_ref.segments.get_mut(&segment.kind)
+            else {
+                return Err(CoreFsError::State(format!(
+                    "missing cached segment {} for append-only persist",
+                    String::from_utf8_lossy(&segment.kind)
+                )));
+            };
+            if *cached_offset != entry.offset || cached_payload.len() != append.cached_len {
+                return Err(CoreFsError::State(format!(
+                    "cached segment {} is not append-compatible",
+                    String::from_utf8_lossy(&segment.kind)
+                )));
+            }
+            let header = segment
+                .payload
+                .get(..SEGMENT_FRAME_SIZE)
+                .ok_or_else(|| CoreFsError::State("append segment header missing".to_string()))?;
+            let suffix = segment
+                .payload
+                .get(SEGMENT_FRAME_SIZE..)
+                .ok_or_else(|| CoreFsError::State("append segment suffix missing".to_string()))?;
+
+            queue_segment_write(&mut pending_writes, entry.offset, header);
+            if !suffix.is_empty() {
+                let suffix_offset = entry
+                    .offset
+                    .checked_add(append.cached_len as u64)
+                    .ok_or_else(|| CoreFsError::State("segment append offset overflow".to_string()))?;
+                queue_segment_write(&mut pending_writes, suffix_offset, suffix);
+            }
+            cache_updates.push(PendingCacheUpdate::AppendFrame {
+                kind: segment.kind,
+                header: header.to_vec(),
+                suffix: suffix.to_vec(),
+            });
+            segments_written += 1;
+            bytes_written += (SEGMENT_FRAME_SIZE + suffix.len()) as u64;
+            continue;
+        }
+
         // The cache was keyed by segment kind.  If a new segment kind
         // appeared (unlikely in the current format), fall through to
         // the general rewrite path by treating cache as missing.
@@ -2897,17 +3204,19 @@ fn persist_built_image_incremental(
             None => {
                 // Brand-new segment kind — write at the new offset,
                 // no suffix optimisation possible.
-                write_segment_rmw(device, entry.offset, &segment.payload, sector_size)?;
-                cache_ref
-                    .segments
-                    .insert(segment.kind, (entry.offset, segment.payload.clone()));
+                queue_segment_write(&mut pending_writes, entry.offset, &segment.payload);
+                cache_updates.push(PendingCacheUpdate::Replace {
+                    kind: segment.kind,
+                    offset: entry.offset,
+                    payload: segment.payload.clone(),
+                });
                 segments_written += 1;
-                bytes_written += segment.payload.len() as u64;
+                bytes_written += segment.on_disk_len() as u64;
                 continue;
             }
         };
         let cached_len = cached_bytes.len();
-        let new_len = segment.payload.len();
+        let new_len = segment.on_disk_len();
 
         // Offset unchanged and payload byte-identical → nothing to do.
         if cached_offset == entry.offset && cached_bytes == segment.payload.as_slice() {
@@ -2952,12 +3261,11 @@ fn persist_built_image_incremental(
                 == cached_bytes[SEGMENT_FRAME_SIZE..cached_len];
         if offset_ok && both_have_frame && body_prefix_ok {
             // Write the new frame header in place.
-            write_segment_rmw(
-                device,
+            queue_segment_write(
+                &mut pending_writes,
                 entry.offset,
                 &segment.payload[..SEGMENT_FRAME_SIZE],
-                sector_size,
-            )?;
+            );
             // Write only the appended body suffix.
             let suffix_start = cached_len;
             let suffix = &segment.payload[suffix_start..];
@@ -2965,11 +3273,12 @@ fn persist_built_image_incremental(
                 .offset
                 .checked_add(suffix_start as u64)
                 .ok_or_else(|| CoreFsError::State("segment suffix offset overflow".to_string()))?;
-            write_segment_rmw(device, suffix_offset, suffix, sector_size)?;
-            if let Some(entry_mut) = cache_ref.segments.get_mut(&segment.kind) {
-                entry_mut.0 = entry.offset;
-                entry_mut.1 = segment.payload.clone();
-            }
+            queue_segment_write(&mut pending_writes, suffix_offset, suffix);
+            cache_updates.push(PendingCacheUpdate::Replace {
+                kind: segment.kind,
+                offset: entry.offset,
+                payload: segment.payload.clone(),
+            });
             segments_written += 1;
             // Frame header (24 B) + appended suffix bytes.
             bytes_written += (SEGMENT_FRAME_SIZE + suffix.len()) as u64;
@@ -2989,11 +3298,12 @@ fn persist_built_image_incremental(
                 .offset
                 .checked_add(cached_len as u64)
                 .ok_or_else(|| CoreFsError::State("segment suffix offset overflow".to_string()))?;
-            write_segment_rmw(device, suffix_offset, suffix, sector_size)?;
-            if let Some(entry_mut) = cache_ref.segments.get_mut(&segment.kind) {
-                entry_mut.0 = entry.offset;
-                entry_mut.1.extend_from_slice(suffix);
-            }
+            queue_segment_write(&mut pending_writes, suffix_offset, suffix);
+            cache_updates.push(PendingCacheUpdate::Extend {
+                kind: segment.kind,
+                offset: entry.offset,
+                suffix: suffix.to_vec(),
+            });
             segments_written += 1;
             bytes_written += suffix.len() as u64;
             continue;
@@ -3001,16 +3311,19 @@ fn persist_built_image_incremental(
 
         // General case: rewrite the whole segment at the *new* offset
         // (not necessarily the cached one).
-        write_segment_rmw(device, entry.offset, &segment.payload, sector_size)?;
-        if let Some(entry_mut) = cache_ref.segments.get_mut(&segment.kind) {
-            entry_mut.0 = entry.offset;
-            entry_mut.1 = segment.payload.clone();
-        }
+        queue_segment_write(&mut pending_writes, entry.offset, &segment.payload);
+        cache_updates.push(PendingCacheUpdate::Replace {
+            kind: segment.kind,
+            offset: entry.offset,
+            payload: segment.payload.clone(),
+        });
         segments_written += 1;
-        bytes_written += segment.payload.len() as u64;
+        bytes_written += segment.on_disk_len() as u64;
     }
 
     if segments_written > 0 {
+        write_segment_rmw_batch(device, &pending_writes, sector_size)?;
+        apply_cache_updates(cache_ref, cache_updates);
         device.sync()?;
     }
 
@@ -3021,48 +3334,162 @@ fn persist_built_image_incremental(
     })
 }
 
+struct PendingWrite {
+    offset: u64,
+    payload: Vec<u8>,
+}
+
+enum PendingCacheUpdate {
+    Replace {
+        kind: [u8; 4],
+        offset: u64,
+        payload: Vec<u8>,
+    },
+    Extend {
+        kind: [u8; 4],
+        offset: u64,
+        suffix: Vec<u8>,
+    },
+    AppendFrame {
+        kind: [u8; 4],
+        header: Vec<u8>,
+        suffix: Vec<u8>,
+    },
+}
+
+fn queue_segment_write(writes: &mut Vec<PendingWrite>, offset: u64, payload: &[u8]) {
+    if payload.is_empty() {
+        return;
+    }
+    writes.push(PendingWrite {
+        offset,
+        payload: payload.to_vec(),
+    });
+}
+
+fn apply_cache_updates(cache: &mut DeviceImageCache, updates: Vec<PendingCacheUpdate>) {
+    for update in updates {
+        match update {
+            PendingCacheUpdate::Replace {
+                kind,
+                offset,
+                payload,
+            } => {
+                cache.segments.insert(kind, (offset, payload));
+            }
+            PendingCacheUpdate::Extend {
+                kind,
+                offset,
+                suffix,
+            } => {
+                if let Some(entry) = cache.segments.get_mut(&kind) {
+                    entry.0 = offset;
+                    entry.1.extend_from_slice(&suffix);
+                }
+            }
+            PendingCacheUpdate::AppendFrame {
+                kind,
+                header,
+                suffix,
+            } => {
+                if let Some(entry) = cache.segments.get_mut(&kind) {
+                    if entry.1.len() >= header.len() {
+                        entry.1[..header.len()].copy_from_slice(&header);
+                        entry.1.extend_from_slice(&suffix);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn write_segment_rmw_batch(
+    device: &mut dyn BlockDevice,
+    writes: &[PendingWrite],
+    sector_size: u64,
+) -> CoreFsResult<()> {
+    if writes.is_empty() {
+        return Ok(());
+    }
+
+    let mut ordered: Vec<&PendingWrite> = writes.iter().collect();
+    ordered.sort_by_key(|write| write.offset);
+
+    let mut index = 0usize;
+    while index < ordered.len() {
+        let mut group_end = aligned_end(
+            ordered[index].offset,
+            ordered[index].payload.len(),
+            sector_size,
+            device.capacity(),
+        )?;
+        let group_start = aligned_start(ordered[index].offset, sector_size);
+        let mut end_index = index + 1;
+
+        while end_index < ordered.len() {
+            let next_start = aligned_start(ordered[end_index].offset, sector_size);
+            let next_end = aligned_end(
+                ordered[end_index].offset,
+                ordered[end_index].payload.len(),
+                sector_size,
+                device.capacity(),
+            )?;
+            let merged_end = group_end.max(next_end);
+            let gap = next_start.saturating_sub(group_end);
+            let merged_span = merged_end.saturating_sub(group_start);
+            if gap > 1024 * 1024 || merged_span > 2 * 1024 * 1024 {
+                break;
+            }
+            group_end = merged_end;
+            end_index += 1;
+        }
+
+        let span = group_end.saturating_sub(group_start);
+        if span == 0 {
+            index = end_index;
+            continue;
+        }
+        let mut buf = device.read_at(group_start, span)?;
+        for write in &ordered[index..end_index] {
+            let start = (write.offset - group_start) as usize;
+            let end = start + write.payload.len();
+            if end > buf.len() {
+                return Err(CoreFsError::State(format!(
+                    "segment at offset {} (len {}) extends past device end",
+                    write.offset,
+                    write.payload.len()
+                )));
+            }
+            buf[start..end].copy_from_slice(&write.payload);
+        }
+        device.write_at(group_start, &buf)?;
+        index = end_index;
+    }
+
+    Ok(())
+}
+
+fn aligned_start(offset: u64, sector_size: u64) -> u64 {
+    (offset / sector_size) * sector_size
+}
+
+fn aligned_end(
+    offset: u64,
+    payload_len: usize,
+    sector_size: u64,
+    capacity: u64,
+) -> CoreFsResult<u64> {
+    let end_offset = offset
+        .checked_add(payload_len as u64)
+        .ok_or_else(|| CoreFsError::State("segment end offset overflow".to_string()))?;
+    Ok(end_offset.div_ceil(sector_size).saturating_mul(sector_size).min(capacity))
+}
+
 /// Writes `payload` at byte `offset` on a sector-aligned device using
 /// read-modify-write for partial-sector segments.  Segment offsets are
 /// 64-byte aligned (`SEGMENT_ALIGNMENT`) but device writes typically need
 /// sector alignment (512/4096), so we read the enclosing sector range,
 /// patch in the payload, and write it back.
-fn write_segment_rmw(
-    device: &mut dyn BlockDevice,
-    offset: u64,
-    payload: &[u8],
-    sector_size: u64,
-) -> CoreFsResult<()> {
-    let end_offset = offset + payload.len() as u64;
-    let sector_start = (offset / sector_size) * sector_size;
-    let sector_end = end_offset.div_ceil(sector_size) * sector_size;
-    let sector_end = sector_end.min(device.capacity());
-
-    let span = sector_end - sector_start;
-    if span == 0 {
-        return Ok(());
-    }
-
-    // Fast path: already sector-aligned and an exact multiple of sector_size.
-    if sector_start == offset && span == payload.len() as u64 {
-        device.write_at(offset, payload)?;
-        return Ok(());
-    }
-
-    // Read-modify-write path.
-    let mut buf = device.read_at(sector_start, span)?;
-    let offset_in_buf = (offset - sector_start) as usize;
-    let end_in_buf = offset_in_buf + payload.len();
-    if end_in_buf > buf.len() {
-        return Err(CoreFsError::State(format!(
-            "segment at offset {offset} (len {}) extends past device end",
-            payload.len()
-        )));
-    }
-    buf[offset_in_buf..end_in_buf].copy_from_slice(payload);
-    device.write_at(sector_start, &buf)?;
-    Ok(())
-}
-
 /// Result of a persist call — useful for telemetry and tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersistReport {
@@ -3318,9 +3745,9 @@ pub fn build_volume_image_bytes(state: &PersistedState) -> CoreFsResult<Vec<u8>>
         entries.push(SegmentEntry {
             kind: segment.kind,
             offset: offset as u64,
-            length: segment.payload.len() as u64,
+            length: segment.on_disk_len() as u64,
         });
-        offset = align_up(offset + segment.payload.len(), SEGMENT_ALIGNMENT);
+        offset = align_up(offset + segment.on_disk_len(), SEGMENT_ALIGNMENT);
     }
 
     let total_size = offset;

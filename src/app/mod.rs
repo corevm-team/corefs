@@ -470,19 +470,23 @@ impl CoreFsService {
             }
         }
 
-        let stored_size = self.blocks.write_range(inode_id, offset, bytes)?;
+        let outcome = self.blocks.write_range_report(inode_id, offset, bytes)?;
         let inode = self.catalog.get_mut(path).expect("path still exists");
-        inode.touch_modified();
+        if outcome.changed {
+            inode.touch_modified();
+        }
         inode.metadata.compressed = false;
         inode.metadata.encrypted = false;
-        inode.size = stored_size;
-        self.hot_paths.record_write(path, bytes.len());
-        self.journal.record(
-            "write_file_range",
-            path,
-            format!("offset={offset} bytes={}", bytes.len()),
-        );
-        self.dirty_inodes.insert(inode_id);
+        inode.size = outcome.size;
+        if outcome.changed {
+            self.hot_paths.record_write(path, bytes.len());
+            self.journal.record(
+                "write_file_range",
+                path,
+                format!("offset={offset} bytes={}", bytes.len()),
+            );
+            self.dirty_inodes.insert(inode_id);
+        }
         Ok(())
     }
 
@@ -1458,6 +1462,10 @@ impl CoreFsService {
 
     pub fn list_paths(&self) -> Vec<String> {
         self.catalog.list_paths()
+    }
+
+    pub fn logical_bytes_used(&self) -> usize {
+        self.catalog.quota_stats().1
     }
 
     pub fn recoverable_paths(&self) -> Vec<String> {

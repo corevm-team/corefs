@@ -5,7 +5,7 @@ use super::WindowsMountReport;
 use crate::app::CoreFsService;
 use crate::domain::inode::{Inode, InodeKind};
 use crate::error::{CoreFsError, CoreFsResult};
-use crate::storage::block_device::{BlockDevice as _, FileImageDevice};
+use crate::storage::block_device::FileImageDevice;
 use crate::storage::volume_image::{self, DeviceImageCache};
 use corefs_core::platform::Timestamp;
 use std::ffi::c_void;
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::NTSTATUS;
 use windows::Win32::System::Console::{
     CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
@@ -157,12 +157,17 @@ struct CoreFsHandle {
 impl CoreFsWinFsp {
     fn open_state(image_path: PathBuf, writable: bool) -> CoreFsResult<Arc<CoreFsState>> {
         let service = CoreFsService::load_image_from_path(&image_path)?;
-        let device = FileImageDevice::open(&image_path, !writable)?;
+        let device = FileImageDevice::open_with_write_through(&image_path, !writable, writable)?;
+        let cache = if writable {
+            volume_image::load_device_image_cache(&device).ok()
+        } else {
+            None
+        };
         Ok(Arc::new(CoreFsState {
             writable,
             service: Mutex::new(service),
             device: Mutex::new(device),
-            cache: Mutex::new(None),
+            cache: Mutex::new(cache),
             dirty: AtomicBool::new(false),
         }))
     }
@@ -226,6 +231,8 @@ impl CoreFsState {
         let state = service.persisted_state();
         let dirty = service.dirty_inodes_snapshot();
         let dirty_bytes = service.read_dirty_block_bytes(&dirty);
+        let trace = std::env::var_os("COREFS_PERF_TRACE").is_some();
+        let started = Instant::now();
         let result = volume_image::persist_to_device_incremental_partial_with_bytes_and_grow(
             &mut *device,
             &state,
@@ -239,7 +246,17 @@ impl CoreFsState {
                 dev.resize(aligned)
             },
         )
-        .and_then(|_| device.sync());
+        .map(|report| {
+            if trace {
+                eprintln!(
+                    "[winfsp persist] elapsed={:?} dirty_inodes={} dirty_data_inodes={} report={:?}",
+                    started.elapsed(),
+                    dirty.len(),
+                    dirty_bytes.len(),
+                    report
+                );
+            }
+        });
 
         if let Err(error) = result {
             self.dirty.store(true, Ordering::SeqCst);
@@ -548,6 +565,7 @@ impl FileSystemContext for CoreFsWinFsp {
             offset as usize
         };
 
+        let was_dirty = service.has_dirty_inodes();
         if start == current_size {
             service
                 .extend_file(&context.path, buffer)
@@ -557,19 +575,16 @@ impl FileSystemContext for CoreFsWinFsp {
                 .write_file_range(&context.path, start as u64, buffer)
                 .map_err(corefs_to_winfsp)?;
         }
-        self.state.mark_dirty();
+        if service.has_dirty_inodes() || was_dirty {
+            self.state.mark_dirty();
+        }
         Self::fill_file_info(&service, &context.path, file_info)?;
         Ok(buffer.len() as u32)
     }
 
     fn get_volume_info(&self, out_volume_info: &mut VolumeInfo) -> winfsp::Result<()> {
         let service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
-        let used: u64 = service
-            .list_paths()
-            .into_iter()
-            .filter_map(|path| service.read_file(&path).ok())
-            .map(|bytes| bytes.len() as u64)
-            .sum();
+        let used = service.logical_bytes_used() as u64;
         out_volume_info.total_size = VOLUME_SIZE_BYTES;
         out_volume_info.free_size = VOLUME_SIZE_BYTES.saturating_sub(used);
         out_volume_info.set_volume_label(service.volume_name());
@@ -596,10 +611,7 @@ fn fill_root_info(service: &CoreFsService, info: &mut FileInfo) {
 fn fill_inode_info(service: &CoreFsService, inode: &Inode, info: &mut FileInfo) -> winfsp::Result<()> {
     let size = match inode.kind {
         InodeKind::Directory => 0,
-        InodeKind::File | InodeKind::Symlink => service
-            .read_file(&inode.path)
-            .map(|bytes| bytes.len() as u64)
-            .unwrap_or(inode.size as u64),
+        InodeKind::File | InodeKind::Symlink => inode.size as u64,
     };
     info.file_attributes = match inode.kind {
         InodeKind::Directory => FILE_ATTRIBUTE_DIRECTORY,
@@ -625,6 +637,7 @@ fn fill_inode_info(service: &CoreFsService, inode: &Inode, info: &mut FileInfo) 
     info.index_number = inode.id.0.saturating_add(1);
     info.hard_links = 0;
     info.ea_size = 0;
+    let _ = service;
     Ok(())
 }
 
