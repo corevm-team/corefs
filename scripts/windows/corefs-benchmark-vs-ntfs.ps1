@@ -102,7 +102,7 @@ function Invoke-CoreFsWindowsWorkload {
 
     $benchDir = Join-Path $RootPath "bench"
     if (Test-Path $benchDir) {
-        Remove-CoreFsTreeRobust -Path $benchDir
+        Remove-CoreFsTreeBestEffort -Path $benchDir
     }
     New-Item -ItemType Directory -Force -Path $benchDir | Out-Null
 
@@ -153,7 +153,7 @@ function Invoke-CoreFsWindowsWorkload {
     }
     $fsyncColdMs = Convert-ToSafeDurationMs $fsyncCold.TotalMilliseconds
     Write-ResultRow $ResultsPath $FsName "fsync_cold_${FsyncFiles}x${PayloadBytes}B" $fsyncColdMs (Format-Metric (($FsyncFiles * 1000.0) / $fsyncColdMs) "ops/s")
-    Remove-CoreFsTreeRobust -Path $fsyncColdDir
+    Remove-CoreFsTreeBestEffort -Path $fsyncColdDir
 
     $seqPath = Join-Path $benchDir "seq.bin"
     $chunk = New-Object byte[] (1024 * 1024)
@@ -240,7 +240,7 @@ function Invoke-CoreFsWindowsWorkload {
         foreach ($file in $filesToDelete) {
             Remove-Item -LiteralPath $file.FullName -Force
         }
-        Remove-CoreFsTreeRobust -Path $fsyncDir
+        Remove-CoreFsTreeBestEffort -Path $fsyncDir
     }
     Write-ResultRow $ResultsPath $FsName "delete_${Files}_small" (Convert-ToSafeDurationMs $delete.TotalMilliseconds) "-"
 
@@ -254,7 +254,7 @@ function Invoke-CoreFsWindowsWorkload {
     }
     $bigDirMs = Convert-ToSafeDurationMs $bigDirCreate.TotalMilliseconds
     Write-ResultRow $ResultsPath $FsName "bigdir_create_${BigDirFiles}" $bigDirMs (Format-Metric (($BigDirFiles * 1000.0) / $bigDirMs) "ops/s")
-    Remove-CoreFsTreeRobust -Path $bigDir
+    Remove-CoreFsTreeBestEffort -Path $bigDir
 
     $appendPath = Join-Path $benchDir "log.bin"
     $appendRecord = New-Object byte[] 1024
@@ -275,7 +275,7 @@ function Invoke-CoreFsWindowsWorkload {
     Write-ResultRow $ResultsPath $FsName "append_log_${AppendOps}x1KiB" $appendMs (Format-Metric (($AppendOps * 1000.0) / $appendMs) "ops/s")
 
     try {
-        Remove-CoreFsTreeRobust -Path $benchDir
+        Remove-CoreFsTreeBestEffort -Path $benchDir
     }
     catch {
         Write-Host "  cleanup warning for ${FsName}: $($_.Exception.Message)"

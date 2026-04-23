@@ -160,7 +160,7 @@ try {
 
     $benchDir = Join-Path $drivePath ".corefs-bench"
     if (Test-Path $benchDir) {
-        Remove-CoreFsTreeRobust -Path $benchDir
+        Remove-CoreFsTreeBestEffort -Path $benchDir
     }
     New-Item -ItemType Directory -Force -Path $benchDir | Out-Null
 

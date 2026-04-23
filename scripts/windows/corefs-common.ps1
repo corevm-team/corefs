@@ -250,6 +250,76 @@ function Remove-CoreFsTreeRobust {
     }
 }
 
+function Remove-CoreFsTreeBestEffort {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [int]$Retries = 5,
+        [int]$DelayMs = 120
+    )
+
+    function Test-BenignCoreFsDeleteError {
+        param([object]$ErrorRecord)
+
+        if (-not $ErrorRecord -or -not $ErrorRecord.Exception) {
+            return $false
+        }
+
+        $message = $ErrorRecord.Exception.Message
+        return ($message -match "nicht finden" `
+            -or $message -match "cannot find" `
+            -or $message -match "Could not find" `
+            -or $message -match "not found")
+    }
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return
+        }
+
+        try {
+            Remove-CoreFsTreeRobust -Path $Path
+            return
+        }
+        catch {
+            $lastError = $_
+            if (Test-BenignCoreFsDeleteError -ErrorRecord $lastError -and -not (Test-Path -LiteralPath $Path)) {
+                return
+            }
+        }
+
+        try {
+            if (Test-Path -LiteralPath $Path) {
+                Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            }
+            return
+        }
+        catch {
+            $lastError = $_
+            if (Test-BenignCoreFsDeleteError -ErrorRecord $lastError -and -not (Test-Path -LiteralPath $Path)) {
+                return
+            }
+        }
+
+        Start-Sleep -Milliseconds $DelayMs
+    }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    $remaining = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)
+    if ($remaining.Count -eq 0) {
+        return
+    }
+
+    if ($lastError) {
+        throw $lastError
+    }
+    throw "Failed to remove $Path"
+}
+
 function Get-CoreFsPerfHistoryDir {
     param(
         [string]$HistoryDir = ""
