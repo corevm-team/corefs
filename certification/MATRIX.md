@@ -43,6 +43,12 @@ explicit platform command listed below.
 | `cert_122` | Secure delete and expunge irrecoverability |
 | `cert_123` | File overwrite, range write, append, truncate shrink/grow exact semantics |
 | `cert_124` | Forced flush/fsync persistence boundary |
+| `cert_130` | Generated daily-use matrix: 1,200 executable tests across file, folder, rename, quota, versioning, snapshot, recovery, dedup and persistence semantics |
+| `cert_140` | Single-folder portable service load, duplicate rejection, inventory, throughput and fsck |
+| `cert_141` | Many-folder breadth/depth load, deep leaf access, directory throughput and fsck |
+| `cert_142` | Very large file write, range patch, truncate shrink/grow, zero-fill and throughput |
+| `cert_143` | Mass identical-file deduplication plus copy-on-write clone sharing/divergence |
+| `cert_144` | Heavy lab certification test: more than 100,000 files in one directory (`#[ignore]`, run explicitly) |
 
 ## Platform Commands
 
@@ -74,6 +80,18 @@ AnyOS:
 ```bash
 cargo check -p corefs-core --no-default-features
 cargo check -p corefs-core --no-default-features --features crypto
+```
+
+Scale knobs for certification labs:
+
+```bash
+COREFS_CERT_MASS_FILES=10000
+COREFS_CERT_HEAVY_MASS_FILES=100001
+COREFS_CERT_MASS_DIRS=2500
+COREFS_CERT_DEEP_DIRS=128
+COREFS_CERT_LARGE_FILE_BYTES=16777216
+COREFS_CERT_DEDUP_IDENTICAL_FILES=1000
+COREFS_CERT_DEDUP_COW_CLONES=1000
 ```
 
 The external Linux suites remain outside the Rust certification crate because

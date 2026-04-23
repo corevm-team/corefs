@@ -57,6 +57,12 @@ cargo test -p corefs-certification -- --nocapture
 | `cert_122` | Secure delete and expunge are irrecoverable |
 | `cert_123` | Overwrite, range write, append and truncate exact semantics |
 | `cert_124` | Forced flush/fsync persistence boundary |
+| `cert_130` | 1,200 generated daily-use tests across file, folder, rename, quota, versioning, snapshot, recovery, dedup and persistence semantics |
+| `cert_140` | Single-folder portable load, duplicate rejection, inventory, throughput and fsck |
+| `cert_141` | Many-folder breadth/depth load, deep leaf access, directory throughput and fsck |
+| `cert_142` | Very large file write, range patch, truncate shrink/grow, zero-fill and throughput |
+| `cert_143` | Mass identical-file deduplication plus copy-on-write clone sharing/divergence |
+| `cert_144` | Heavy lab load with more than 100,000 files in one directory, run explicitly with ignored tests |
 
 ## Performance Gates
 
@@ -74,6 +80,23 @@ tighten them per platform by setting:
 - `COREFS_CERT_IO_READERS`
 - `COREFS_CERT_MIN_IO_WRITE_MIB_S`
 - `COREFS_CERT_MIN_IO_READ_MIB_S`
+- `COREFS_CERT_MASS_FILES` (default: `10000`)
+- `COREFS_CERT_HEAVY_MASS_FILES` (default: `100001`, used by ignored heavy lab test)
+- `COREFS_CERT_MASS_DIRS`
+- `COREFS_CERT_DEEP_DIRS`
+- `COREFS_CERT_LARGE_FILE_BYTES`
+- `COREFS_CERT_DEDUP_IDENTICAL_FILES`
+- `COREFS_CERT_DEDUP_COW_CLONES`
+- `COREFS_CERT_MIN_MASS_CREATE_OPS_S`
+- `COREFS_CERT_MIN_DIR_CREATE_OPS_S`
+- `COREFS_CERT_MIN_LARGE_FILE_MIB_S`
+
+Heavy lab tests are intentionally excluded from the default Rust test run. Run
+them explicitly when the certification host has the needed time and memory:
+
+```bash
+cargo test -p corefs-certification --test scale_load_suite -- --ignored --nocapture
+```
 
 ## Platform Scope
 
