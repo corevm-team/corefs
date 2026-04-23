@@ -98,7 +98,12 @@ impl MiniHandler {
         }
     }
 
-    fn create(&mut self, parent: InodeNo, name: &str, kind: InodeKind) -> Result<(InodeNo, u64), HandlerErr> {
+    fn create(
+        &mut self,
+        parent: InodeNo,
+        name: &str,
+        kind: InodeKind,
+    ) -> Result<(InodeNo, u64), HandlerErr> {
         let parent_path = self.path_of(parent).ok_or(HandlerErr::Errno(ENOENT))?;
         let child = Self::child_path(&parent_path, name);
         let now = Timestamp::EPOCH;
@@ -127,7 +132,11 @@ impl MiniHandler {
         let (id, _) = res.map_err(|_| HandlerErr::Errno(5))?;
         let inode = {
             let st = self.session.state();
-            st.active_inodes.iter().find(|i| i.id == id).cloned().unwrap()
+            st.active_inodes
+                .iter()
+                .find(|i| i.id == id)
+                .cloned()
+                .unwrap()
         };
         let no = self.intern(&inode);
         let fh = self.next_fh;
@@ -233,7 +242,11 @@ impl MiniHandler {
             if st.active_inodes[idx].kind != InodeKind::Directory {
                 return Err(CoreFsError::InvalidCommand("not a directory".into()));
             }
-            if st.active_inodes.iter().any(|i| i.path.starts_with(prefix.as_str())) {
+            if st
+                .active_inodes
+                .iter()
+                .any(|i| i.path.starts_with(prefix.as_str()))
+            {
                 return Err(CoreFsError::InvalidCommand("directory not empty".into()));
             }
             let removed = st.active_inodes.remove(idx);
@@ -250,7 +263,13 @@ impl MiniHandler {
         }
     }
 
-    fn rename(&mut self, parent: InodeNo, old: &str, new_parent: InodeNo, new: &str) -> Result<(), HandlerErr> {
+    fn rename(
+        &mut self,
+        parent: InodeNo,
+        old: &str,
+        new_parent: InodeNo,
+        new: &str,
+    ) -> Result<(), HandlerErr> {
         let op = self.path_of(parent).ok_or(HandlerErr::Errno(ENOENT))?;
         let np = self.path_of(new_parent).ok_or(HandlerErr::Errno(ENOENT))?;
         let old_path = Self::child_path(&op, old);
@@ -286,8 +305,16 @@ impl MiniHandler {
             self.inode_by_no
                 .iter()
                 .filter_map(|(no, old)| {
-                    let id = self.no_by_id.iter().find(|(_, n)| *n == no).map(|(id, _)| *id)?;
-                    let cur = st.active_inodes.iter().find(|i| i.id == id).map(|i| i.path.clone())?;
+                    let id = self
+                        .no_by_id
+                        .iter()
+                        .find(|(_, n)| *n == no)
+                        .map(|(id, _)| *id)?;
+                    let cur = st
+                        .active_inodes
+                        .iter()
+                        .find(|i| i.id == id)
+                        .map(|i| i.path.clone())?;
                     if cur != *old { Some((*no, cur)) } else { None }
                 })
                 .collect()
@@ -331,7 +358,12 @@ impl MiniHandler {
         Ok(())
     }
 
-    fn symlink(&mut self, parent: InodeNo, name: &str, target: &str) -> Result<InodeNo, HandlerErr> {
+    fn symlink(
+        &mut self,
+        parent: InodeNo,
+        name: &str,
+        target: &str,
+    ) -> Result<InodeNo, HandlerErr> {
         let parent_path = self.path_of(parent).ok_or(HandlerErr::Errno(ENOENT))?;
         let child = Self::child_path(&parent_path, name);
         let target_bytes = target.as_bytes().to_vec();
@@ -373,7 +405,11 @@ impl MiniHandler {
         self.byte_store.insert(id, target_bytes);
         let inode = {
             let st = self.session.state();
-            st.active_inodes.iter().find(|i| i.id == id).cloned().unwrap()
+            st.active_inodes
+                .iter()
+                .find(|i| i.id == id)
+                .cloned()
+                .unwrap()
         };
         Ok(self.intern(&inode))
     }
@@ -415,7 +451,12 @@ impl MiniHandler {
     fn stat_size(&self, ino: InodeNo) -> Result<usize, HandlerErr> {
         let path = self.path_of(ino).ok_or(HandlerErr::Errno(ENOENT))?;
         let st = self.session.state();
-        Ok(st.active_inodes.iter().find(|i| i.path == path).unwrap().size)
+        Ok(st
+            .active_inodes
+            .iter()
+            .find(|i| i.path == path)
+            .unwrap()
+            .size)
     }
 }
 
@@ -462,7 +503,11 @@ fn e2e_directory_mkdir_create_readdir_rmdir_cycle() {
     let (_inner, _) = h.create(sub_ino, "inner.txt", InodeKind::File).unwrap();
     // Readdir /subdir should include "inner.txt".
     let entries = h.readdir(sub_ino).unwrap();
-    assert!(entries.iter().any(|n| n == "inner.txt"), "entries: {:?}", entries);
+    assert!(
+        entries.iter().any(|n| n == "inner.txt"),
+        "entries: {:?}",
+        entries
+    );
     // Rmdir with a child → ENOTEMPTY.
     match h.rmdir(1, "subdir") {
         Err(HandlerErr::Errno(e)) => assert_eq!(e, ENOTEMPTY),

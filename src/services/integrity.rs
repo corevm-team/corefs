@@ -222,7 +222,9 @@ impl IntegrityService {
         let mut expected_refs: std::collections::HashMap<u64, usize> =
             std::collections::HashMap::new();
         for record in blocks.records() {
-            *expected_refs.entry(u64::from(record.content_crc)).or_insert(0) += 1;
+            *expected_refs
+                .entry(u64::from(record.content_crc))
+                .or_insert(0) += 1;
         }
         let cow = blocks.cow_stats();
         // We can detect mismatches by checking if total shared refs match.

@@ -86,7 +86,10 @@ fn touch_accessed_at_updates_only_atime() {
     );
     inode.touch_accessed_at(t1);
     assert_eq!(inode.accessed_at, t1);
-    assert_eq!(inode.modified_at, t0, "mtime must not change on atime touch");
+    assert_eq!(
+        inode.modified_at, t0,
+        "mtime must not change on atime touch"
+    );
     assert_eq!(inode.changed_at, t0, "ctime must not change on atime touch");
     assert_eq!(inode.created_at, t0);
 }

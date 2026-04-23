@@ -44,8 +44,7 @@ fn e2e_mkfs_fsck_scrub_roundtrip() {
         layout_mode: LayoutMode::Native,
         ..Default::default()
     };
-    let mkfs_report =
-        mkfs::format_image(&path, capacity, &opts).expect("mkfs succeeds");
+    let mkfs_report = mkfs::format_image(&path, capacity, &opts).expect("mkfs succeeds");
     assert_eq!(mkfs_report.label, "e2e");
     assert!(mkfs_report.total_blocks > 0);
 
@@ -58,8 +57,7 @@ fn e2e_mkfs_fsck_scrub_roundtrip() {
     );
 
     // 3. scrub full mode — clean pass expected.
-    let scrub_report =
-        scrub::scrub_image(&path, ScrubMode::Full).expect("scrub runs");
+    let scrub_report = scrub::scrub_image(&path, ScrubMode::Full).expect("scrub runs");
     assert!(
         scrub_report.is_clean,
         "scrub on a clean image must be clean: {:?}",

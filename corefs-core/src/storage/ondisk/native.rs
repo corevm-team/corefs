@@ -942,10 +942,9 @@ fn free_inode_payload(
         }
     }
     if on_disk.flags & FLAG_HAS_EXTENT_INDEX != 0 && on_disk.index_block_addr != 0 {
-        for block in super::extent_tree::ExtentChain::read_chain_blocks(
-            device,
-            on_disk.index_block_addr,
-        )? {
+        for block in
+            super::extent_tree::ExtentChain::read_chain_blocks(device, on_disk.index_block_addr)?
+        {
             alloc.free_extent(Extent {
                 logical_block: 0,
                 length_blocks: 1,

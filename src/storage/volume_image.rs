@@ -8,7 +8,6 @@ use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::domain::metadata::{ContentClass, FileMetadata};
 use crate::domain::snapshot::{Snapshot, SnapshotInode};
 use crate::domain::volume::VolumeDescriptor;
-use corefs_core::platform::Timestamp;
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::services::hot_paths::HotPathRecord;
 use crate::services::journal::JournalEntry;
@@ -18,6 +17,7 @@ use crate::services::sync::SyncStatus;
 use crate::services::versioning::FileVersion;
 use crate::storage::block_store::{AllocatorPolicy, BlockRecord, ExtentRef, FreeExtentRecord};
 use crate::storage::volume_wal::VolumeWal;
+use corefs_core::platform::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -194,7 +194,8 @@ fn save_volume_image_inner(
     state: &PersistedState,
     block_bytes: &HashMap<InodeId, Vec<u8>>,
 ) -> CoreFsResult<()> {
-    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size, block_bytes);
+    let (descriptors, block_data) =
+        split_blocks(&state.block_records, state.volume.block_size, block_bytes);
 
     let mut segments = vec![
         raw_segment_from_bytes(*b"SUPR", vec![0; SUPERBLOCK_SIZE]),
@@ -745,7 +746,7 @@ fn split_blocks(
         // `allocated_blocks` so the round-trip can recover it.  When bytes
         // are present, `allocated_blocks` carries the block count as usual.
         let allocated_blocks = if length == 0 {
-            record.logical_size  // encode logical_size for round-trip
+            record.logical_size // encode logical_size for round-trip
         } else {
             record.total_blocks().max(1)
         };
@@ -1799,7 +1800,10 @@ fn persisted_state_from_entries_with_bytes(
         .unwrap_or_default();
     let snapshots = match find_segment(entries, b"SNAP") {
         Ok(e) => deserialize_snapshot_segment(bytes, e, path)?,
-        Err(_) => SnapshotSegment { snapshots: Vec::new(), next_snapshot_id: 0 },
+        Err(_) => SnapshotSegment {
+            snapshots: Vec::new(),
+            next_snapshot_id: 0,
+        },
     };
     let journal_runtime =
         deserialize_optional_segment::<JournalRuntimeSegment>(bytes, entries, b"TXNJ", path)?
@@ -2423,7 +2427,9 @@ fn checksum_of_payloads(segments: &[SegmentPayload]) -> u64 {
     segments
         .iter()
         .filter(|segment| segment.kind != *b"SUPR" && segment.kind != *b"SUP2")
-        .fold(0u64, |acc, segment| acc ^ segment.payload_checksum_for_superblock())
+        .fold(0u64, |acc, segment| {
+            acc ^ segment.payload_checksum_for_superblock()
+        })
 }
 
 fn checksum_of_segment_data(
@@ -2520,7 +2526,16 @@ fn build_image_with_partial(
     ) else {
         return Ok(None);
     };
-    build_image_inner(state, sector_size, capacity, path, descriptors, block_data, None).map(Some)
+    build_image_inner(
+        state,
+        sector_size,
+        capacity,
+        path,
+        descriptors,
+        block_data,
+        None,
+    )
+    .map(Some)
 }
 
 /// Builds an in-memory image from the persisted state.  Does not perform I/O.
@@ -2532,8 +2547,17 @@ fn build_image_with_bytes(
 ) -> CoreFsResult<BuiltImage> {
     let label = "<device>";
     let path = Path::new(label);
-    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size, block_bytes);
-    build_image_inner(state, sector_size, capacity, path, descriptors, block_data, None)
+    let (descriptors, block_data) =
+        split_blocks(&state.block_records, state.volume.block_size, block_bytes);
+    build_image_inner(
+        state,
+        sector_size,
+        capacity,
+        path,
+        descriptors,
+        block_data,
+        None,
+    )
 }
 
 fn build_image(
@@ -2543,8 +2567,20 @@ fn build_image(
 ) -> CoreFsResult<BuiltImage> {
     let label = "<device>";
     let path = Path::new(label);
-    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size, &HashMap::new());
-    build_image_inner(state, sector_size, capacity, path, descriptors, block_data, None)
+    let (descriptors, block_data) = split_blocks(
+        &state.block_records,
+        state.volume.block_size,
+        &HashMap::new(),
+    );
+    build_image_inner(
+        state,
+        sector_size,
+        capacity,
+        path,
+        descriptors,
+        block_data,
+        None,
+    )
 }
 
 fn build_image_inner(
@@ -2556,7 +2592,6 @@ fn build_image_inner(
     block_data: Vec<u8>,
     data_append: Option<DataAppendBuild>,
 ) -> CoreFsResult<BuiltImage> {
-
     let mut segments = vec![
         raw_segment_from_bytes(*b"SUPR", vec![0; SUPERBLOCK_SIZE]),
         raw_segment_from_bytes(*b"SUP2", vec![0; SUPERBLOCK_SIZE]),
@@ -2763,7 +2798,12 @@ pub fn save_to_device_with_bytes(
     state: &PersistedState,
     block_bytes: &HashMap<InodeId, Vec<u8>>,
 ) -> CoreFsResult<()> {
-    let mut built = build_image_with_bytes(state, device.sector_size() as usize, device.capacity(), block_bytes)?;
+    let mut built = build_image_with_bytes(
+        state,
+        device.sector_size() as usize,
+        device.capacity(),
+        block_bytes,
+    )?;
     write_full_image(device, &mut built)
 }
 
@@ -2777,16 +2817,23 @@ pub fn load_from_device_with_bytes(
     let sector_size = device.sector_size() as u64;
     let header_sector = device.read_at(0, sector_size)?;
     if header_sector.len() < HEADER_SIZE {
-        return Err(CoreFsError::State("device too small for CoreFS header".to_string()));
+        return Err(CoreFsError::State(
+            "device too small for CoreFS header".to_string(),
+        ));
     }
     if &header_sector[..8] != MAGIC {
-        return Err(CoreFsError::State("device does not contain a CoreFS volume (invalid magic)".to_string()));
+        return Err(CoreFsError::State(
+            "device does not contain a CoreFS volume (invalid magic)".to_string(),
+        ));
     }
     let version = u32::from_le_bytes(header_sector[8..12].try_into().expect("fixed slice"));
     if version != FORMAT_VERSION {
-        return Err(CoreFsError::State(format!("unsupported CoreFS format version {version} on device")));
+        return Err(CoreFsError::State(format!(
+            "unsupported CoreFS format version {version} on device"
+        )));
     }
-    let segment_count = u32::from_le_bytes(header_sector[12..16].try_into().expect("fixed slice")) as usize;
+    let segment_count =
+        u32::from_le_bytes(header_sector[12..16].try_into().expect("fixed slice")) as usize;
     let directory_offset = HEADER_SIZE;
     let directory_length = segment_count * SEGMENT_ENTRY_SIZE;
     let directory_end = directory_offset + directory_length;
@@ -2801,8 +2848,13 @@ pub fn load_from_device_with_bytes(
         .get(directory_offset..directory_end)
         .ok_or_else(|| CoreFsError::State("truncated CoreFS directory on device".to_string()))?;
     let entries = parse_directory(directory)?;
-    let image_end = entries.iter().map(|e| e.offset + e.length).max().unwrap_or(directory_end as u64);
-    let total_read = align_up(image_end as usize, sector_size as usize).min(device.capacity() as usize);
+    let image_end = entries
+        .iter()
+        .map(|e| e.offset + e.length)
+        .max()
+        .unwrap_or(directory_end as u64);
+    let total_read =
+        align_up(image_end as usize, sector_size as usize).min(device.capacity() as usize);
     let bytes = if total_read as u64 > header_bytes.len() as u64 {
         let remaining_offset = header_bytes.len() as u64;
         let remaining = device.read_at(remaining_offset, total_read as u64 - remaining_offset)?;
@@ -2815,7 +2867,10 @@ pub fn load_from_device_with_bytes(
     let inspected = inspect_volume_image_bytes(&bytes, path)?;
     let superblock = inspected.superblock;
     if superblock.alignment as usize != SEGMENT_ALIGNMENT {
-        return Err(CoreFsError::State(format!("unsupported CoreFS alignment {} on device", superblock.alignment)));
+        return Err(CoreFsError::State(format!(
+            "unsupported CoreFS alignment {} on device",
+            superblock.alignment
+        )));
     }
     persisted_state_from_entries_with_bytes(&bytes, &inspected.entries, path)
 }
@@ -2883,10 +2938,7 @@ impl DeviceImageCache {
     /// the slice into a fresh output buffer (common case) or, once the
     /// DATA-reuse zero-copy path lands, reuse it directly.
     fn cached_bytes_for(&self, inode: InodeId) -> Option<&[u8]> {
-        let desc = self
-            .data_descriptors
-            .iter()
-            .find(|d| d.inode == inode)?;
+        let desc = self.data_descriptors.iter().find(|d| d.inode == inode)?;
         let data = &self.segments.get(b"DATA")?.1;
         let start = SEGMENT_FRAME_SIZE.checked_add(desc.offset as usize)?;
         let end = start.checked_add(desc.length as usize)?;
@@ -2960,8 +3012,8 @@ fn read_device_image_bytes(device: &dyn BlockDevice) -> CoreFsResult<Vec<u8>> {
         .map(|entry| entry.offset.saturating_add(entry.length))
         .max()
         .unwrap_or(directory_end as u64);
-    let total_read = align_up(image_end as usize, sector_size as usize)
-        .min(device.capacity() as usize);
+    let total_read =
+        align_up(image_end as usize, sector_size as usize).min(device.capacity() as usize);
     if total_read > bytes.len() {
         let more = device.read_at(bytes.len() as u64, (total_read - bytes.len()) as u64)?;
         bytes.extend_from_slice(&more);
@@ -3099,7 +3151,6 @@ fn persist_built_image_incremental(
     mut built: BuiltImage,
     cache: &mut Option<DeviceImageCache>,
 ) -> CoreFsResult<PersistReport> {
-
     // Phase-2 relaxation: the incremental path is valid whenever we
     // have a cache at all.  Per-segment logic below handles all three
     // cases:
@@ -3182,7 +3233,9 @@ fn persist_built_image_incremental(
                 let suffix_offset = entry
                     .offset
                     .checked_add(append.cached_len as u64)
-                    .ok_or_else(|| CoreFsError::State("segment append offset overflow".to_string()))?;
+                    .ok_or_else(|| {
+                        CoreFsError::State("segment append offset overflow".to_string())
+                    })?;
                 queue_segment_write(&mut pending_writes, suffix_offset, suffix);
             }
             cache_updates.push(PendingCacheUpdate::AppendFrame {
@@ -3482,7 +3535,10 @@ fn aligned_end(
     let end_offset = offset
         .checked_add(payload_len as u64)
         .ok_or_else(|| CoreFsError::State("segment end offset overflow".to_string()))?;
-    Ok(end_offset.div_ceil(sector_size).saturating_mul(sector_size).min(capacity))
+    Ok(end_offset
+        .div_ceil(sector_size)
+        .saturating_mul(sector_size)
+        .min(capacity))
 }
 
 /// Writes `payload` at byte `offset` on a sector-aligned device using
@@ -3657,7 +3713,11 @@ pub fn inspect_device(device: &dyn BlockDevice) -> CoreFsResult<VolumeImageInspe
 pub fn build_volume_image_bytes(state: &PersistedState) -> CoreFsResult<Vec<u8>> {
     let label = "<memory>";
     let path = Path::new(label);
-    let (descriptors, block_data) = split_blocks(&state.block_records, state.volume.block_size, &HashMap::new());
+    let (descriptors, block_data) = split_blocks(
+        &state.block_records,
+        state.volume.block_size,
+        &HashMap::new(),
+    );
 
     let mut segments = vec![
         raw_segment_from_bytes(*b"SUPR", vec![0; SUPERBLOCK_SIZE]),

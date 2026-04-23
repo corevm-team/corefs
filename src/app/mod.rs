@@ -3,7 +3,6 @@
 
 use crate::config::CoreFsConfig;
 use crate::domain::acl::{AclEntry, Principal};
-use corefs_core::platform::Timestamp;
 use crate::domain::inode::{Inode, InodeId, InodeKind};
 use crate::domain::metadata::FileMetadata;
 use crate::domain::snapshot::{Snapshot, SnapshotInode};
@@ -30,6 +29,7 @@ use crate::storage::block_store::{
 use crate::storage::catalog::Catalog;
 use crate::storage::volume_image;
 use crate::storage::volume_wal::{self, VolumeWal};
+use corefs_core::platform::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -194,7 +194,9 @@ impl CoreFsService {
     /// mutated since the previous call.  Intended to be called once per
     /// checkpoint by the persist path — unchanged inodes can then be
     /// served from the cached DATA segment instead of rematerialised.
-    pub fn take_dirty_inodes(&mut self) -> std::collections::HashSet<crate::domain::inode::InodeId> {
+    pub fn take_dirty_inodes(
+        &mut self,
+    ) -> std::collections::HashSet<crate::domain::inode::InodeId> {
         core::mem::take(&mut self.dirty_inodes)
     }
 
@@ -205,7 +207,9 @@ impl CoreFsService {
     }
 
     /// Returns a snapshot of dirty block-content inodes without clearing it.
-    pub fn dirty_inodes_snapshot(&self) -> std::collections::HashSet<crate::domain::inode::InodeId> {
+    pub fn dirty_inodes_snapshot(
+        &self,
+    ) -> std::collections::HashSet<crate::domain::inode::InodeId> {
         self.dirty_inodes.clone()
     }
 
@@ -638,12 +642,7 @@ impl CoreFsService {
         }
     }
 
-    pub fn read_file_range(
-        &self,
-        path: &str,
-        offset: u64,
-        length: usize,
-    ) -> CoreFsResult<Vec<u8>> {
+    pub fn read_file_range(&self, path: &str, offset: u64, length: usize) -> CoreFsResult<Vec<u8>> {
         let inode = self
             .catalog
             .get(path)
@@ -1648,7 +1647,9 @@ impl CoreFsService {
     /// Returns a map of `InodeId → raw stored bytes` for every inode that has
     /// a block record in the compat device.  Used by code paths (e.g. FUSE) that
     /// need to materialise file content without going through the full read pipeline.
-    pub fn read_all_block_bytes(&self) -> std::collections::HashMap<crate::domain::inode::InodeId, Vec<u8>> {
+    pub fn read_all_block_bytes(
+        &self,
+    ) -> std::collections::HashMap<crate::domain::inode::InodeId, Vec<u8>> {
         self.catalog
             .list_paths()
             .into_iter()

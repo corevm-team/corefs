@@ -71,7 +71,12 @@ fn mkfs_creates_image_file() {
         &mut out,
         &mut err,
     );
-    assert_eq!(status, ExitStatus::Ok, "stderr: {}", String::from_utf8_lossy(&err));
+    assert_eq!(
+        status,
+        ExitStatus::Ok,
+        "stderr: {}",
+        String::from_utf8_lossy(&err)
+    );
     assert!(path.exists());
     assert!(String::from_utf8(out).unwrap().contains("mkfs report"));
 
@@ -272,7 +277,11 @@ fn snapshot_without_subcommand_is_usage_error() {
     let (mut out, mut err) = capture();
     let status = dispatch(&args(&["snapshot"]), &mut out, &mut err);
     assert_eq!(status, ExitStatus::UsageError);
-    assert!(String::from_utf8(err).unwrap().contains("missing subcommand"));
+    assert!(
+        String::from_utf8(err)
+            .unwrap()
+            .contains("missing subcommand")
+    );
 }
 
 #[test]
@@ -280,7 +289,11 @@ fn snapshot_unknown_subcommand_is_usage_error() {
     let (mut out, mut err) = capture();
     let status = dispatch(&args(&["snapshot", "nope"]), &mut out, &mut err);
     assert_eq!(status, ExitStatus::UsageError);
-    assert!(String::from_utf8(err).unwrap().contains("unknown subcommand"));
+    assert!(
+        String::from_utf8(err)
+            .unwrap()
+            .contains("unknown subcommand")
+    );
 }
 
 #[test]
@@ -317,8 +330,8 @@ fn snapshot_create_then_list_shows_one_entry() {
         &mut err,
     );
     assert_eq!(status, ExitStatus::Ok);
-    let parsed: serde_json::Value = serde_json::from_str(String::from_utf8(out).unwrap().trim())
-        .expect("valid json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out).unwrap().trim()).expect("valid json");
     assert_eq!(parsed["snapshots"].as_array().unwrap().len(), 1);
     assert_eq!(parsed["snapshots"][0]["name"], "v1");
 
@@ -344,7 +357,13 @@ fn snapshot_delete_unknown_id_is_tool_error() {
     let path = fresh_image("snap_del_unknown");
     let (mut out, mut err) = capture();
     let status = dispatch(
-        &args(&["snapshot", "delete", &path.display().to_string(), "--id", "9999"]),
+        &args(&[
+            "snapshot",
+            "delete",
+            &path.display().to_string(),
+            "--id",
+            "9999",
+        ]),
         &mut out,
         &mut err,
     );

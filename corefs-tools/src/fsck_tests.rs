@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::{Report, ToolsError};
 use crate::mkfs::{FormatImageOptions, format_image};
+use crate::{Report, ToolsError};
 use std::path::PathBuf;
 
 fn tmp_image_path(tag: &str) -> PathBuf {

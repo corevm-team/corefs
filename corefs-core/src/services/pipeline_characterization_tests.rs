@@ -52,7 +52,10 @@ mod compression_char_tests {
         // Random data may or may not compress — we don't assert size.
         let compressed = svc.compress(&data).expect("compress random");
         let restored = svc.decompress(&compressed).expect("decompress random");
-        assert_eq!(restored, data, "decompressed random bytes must equal original");
+        assert_eq!(
+            restored, data,
+            "decompressed random bytes must equal original"
+        );
     }
 
     #[test]
@@ -112,7 +115,10 @@ mod encryption_char_tests {
         let plaintext = b"same plaintext";
         let ct1 = svc.encrypt(plaintext).expect("encrypt 1");
         let ct2 = svc.encrypt(plaintext).expect("encrypt 2");
-        assert_ne!(ct1, ct2, "two encryptions of the same plaintext must produce different ciphertexts due to nonce randomness");
+        assert_ne!(
+            ct1, ct2,
+            "two encryptions of the same plaintext must produce different ciphertexts due to nonce randomness"
+        );
         // Both must decrypt back to the original.
         assert_eq!(svc.decrypt(&ct1).expect("decrypt 1"), plaintext);
         assert_eq!(svc.decrypt(&ct2).expect("decrypt 2"), plaintext);

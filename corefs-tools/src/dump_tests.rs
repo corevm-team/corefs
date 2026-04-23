@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::{Report, ToolsError};
 use crate::mkfs::{FormatImageOptions, format_image};
+use crate::{Report, ToolsError};
 use std::path::PathBuf;
 
 fn tmp_image_path(tag: &str) -> PathBuf {
@@ -29,7 +29,11 @@ fn superblock_decodes_after_format() {
     // mkfs::format_image now produces a NATIVE-mode volume by default. The
     // initial format bumps the generation once (1), and the subsequent
     // save_state_native bumps it again (2).
-    assert!(report.generation >= 2, "got generation {}", report.generation);
+    assert!(
+        report.generation >= 2,
+        "got generation {}",
+        report.generation
+    );
     assert_eq!(report.layout_mode, "native");
     assert_eq!(report.uuid_hex.len(), 32);
 

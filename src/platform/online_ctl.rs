@@ -240,7 +240,12 @@ mod tests {
         };
         let json = serde_json::to_vec(&req).unwrap();
         let decoded: OnlineRequest = serde_json::from_slice(&json).unwrap();
-        assert!(matches!(decoded, OnlineRequest::Scrub { mode: ScrubMode::Full }));
+        assert!(matches!(
+            decoded,
+            OnlineRequest::Scrub {
+                mode: ScrubMode::Full
+            }
+        ));
     }
 
     #[test]
@@ -261,7 +266,10 @@ mod tests {
         });
 
         // Daemon side: drain and reply.
-        let pending = listener.rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let pending = listener
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         assert!(matches!(pending.request, OnlineRequest::Status));
         pending
             .reply_tx

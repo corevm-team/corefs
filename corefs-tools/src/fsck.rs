@@ -113,9 +113,7 @@ impl Report for FsckCheckReport {
                 self.issues.len()
             )
         } else {
-            format!(
-                "fsck FAIL ({errors} errors, {warnings} warnings, {infos} info)"
-            )
+            format!("fsck FAIL ({errors} errors, {warnings} warnings, {infos} info)")
         }
     }
 
@@ -161,7 +159,10 @@ pub fn check_image(path: impl AsRef<Path>) -> ToolsResult<FsckCheckReport> {
     let path = path.as_ref();
     let device = FileImageDevice::open(path, true)?;
     let inner = check(&device)?;
-    Ok(FsckCheckReport::from_inner(path.display().to_string(), &inner))
+    Ok(FsckCheckReport::from_inner(
+        path.display().to_string(),
+        &inner,
+    ))
 }
 
 #[cfg(test)]

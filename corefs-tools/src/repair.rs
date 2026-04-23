@@ -65,7 +65,11 @@ impl Report for RepairImageReport {
         out.push_str("─────────────\n");
         out.push_str(&format!("image path        : {}\n", self.image_path));
         out.push_str(&format!("ops committed     : {}\n", self.ops_committed));
-        out.push_str(&format!("fixed             : {} ({})\n", self.fixed.len(), self.fixed.join(", ")));
+        out.push_str(&format!(
+            "fixed             : {} ({})\n",
+            self.fixed.len(),
+            self.fixed.join(", ")
+        ));
         out.push_str(&format!("unfixable         : {}\n", self.unfixable.len()));
         for i in &self.unfixable {
             out.push_str(&format!(

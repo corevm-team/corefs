@@ -43,7 +43,8 @@ fn cli_supports_successful_commands() {
     repair_bytes[primary_offset] ^= 0xFF;
     fs::write(&repair_image_path, repair_bytes).expect("corrupted repair image should save");
 
-    let successful = [
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut successful = vec![
         vec!["corefs".to_string(), "mkfs".to_string()],
         vec!["corefs".to_string(), "status".to_string()],
         vec!["corefs".to_string(), "ls".to_string()],
@@ -98,21 +99,6 @@ fn cli_supports_successful_commands() {
             "optimize-image".to_string(),
             fsck_image_path.clone(),
         ],
-        vec![
-            "corefs".to_string(),
-            "diagnose-mount".to_string(),
-            fsck_image_path.clone(),
-            diagnose_mountpoint.clone(),
-        ],
-        vec![
-            "corefs".to_string(),
-            "diagnose-mount".to_string(),
-            temp_path("diagnose-create", "img"),
-            diagnose_mountpoint.clone(),
-            "--create".to_string(),
-            "--threads".to_string(),
-            "4".to_string(),
-        ],
         vec!["corefs".to_string(), "benchmark".to_string()],
         vec![
             "corefs".to_string(),
@@ -150,6 +136,25 @@ fn cli_supports_successful_commands() {
             "--secure".to_string(),
         ],
     ];
+
+    #[cfg(target_os = "linux")]
+    {
+        successful.push(vec![
+            "corefs".to_string(),
+            "diagnose-mount".to_string(),
+            fsck_image_path.clone(),
+            diagnose_mountpoint.clone(),
+        ]);
+        successful.push(vec![
+            "corefs".to_string(),
+            "diagnose-mount".to_string(),
+            temp_path("diagnose-create", "img"),
+            diagnose_mountpoint.clone(),
+            "--create".to_string(),
+            "--threads".to_string(),
+            "4".to_string(),
+        ]);
+    }
 
     for args in successful {
         assert!(run(args).is_ok());

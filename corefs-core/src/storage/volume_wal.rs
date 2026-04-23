@@ -135,13 +135,7 @@ mod tests {
             path: "/a".to_string(),
         });
         assert_eq!(wal.operations.len(), 2);
-        assert!(matches!(
-            wal.operations[0],
-            WalOperation::CreateFile { .. }
-        ));
-        assert!(matches!(
-            wal.operations[1],
-            WalOperation::DeletePath { .. }
-        ));
+        assert!(matches!(wal.operations[0], WalOperation::CreateFile { .. }));
+        assert!(matches!(wal.operations[1], WalOperation::DeletePath { .. }));
     }
 }

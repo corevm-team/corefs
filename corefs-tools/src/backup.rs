@@ -18,8 +18,8 @@ use corefs::storage::ondisk::session::OdfFileSession;
 use corefs_core::error::CoreFsError;
 use corefs_core::platform::Timestamp;
 use corefs_core::storage::backup::{
-    BackupReader, BackupWriter, DumpReport as CoreDumpReport,
-    RestoreReport as CoreRestoreReport, SliceReader, stream_dump, stream_restore,
+    BackupReader, BackupWriter, DumpReport as CoreDumpReport, RestoreReport as CoreRestoreReport,
+    SliceReader, stream_dump, stream_restore,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -119,7 +119,11 @@ impl Report for BackupDumpReport {
         out.push_str(&format!("  output          : {}\n", self.output_path));
         out.push_str(&format!(
             "  mode            : {}\n",
-            if self.incremental { "incremental" } else { "full" }
+            if self.incremental {
+                "incremental"
+            } else {
+                "full"
+            }
         ));
         if let Some(base) = self.base_snapshot_id {
             out.push_str(&format!("  base snapshot   : {}\n", base));
@@ -152,46 +156,44 @@ pub fn dump(
     let state = sess.service().persisted_state();
 
     // Output-Ziel: Datei oder stdout
-    let (output_path_str, bytes_written, core_report): (String, u64, CoreDumpReport) =
-        match output {
-            Some(path) => {
-                let file = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(path)
-                    .map_err(|e| {
-                        te(format!("open output {}: {e}", path.display()))
-                    })?;
-                let mut counting = CountingWriter::new(BufWriter::new(file));
-                let core_report = {
-                    let mut adapter = IoWriter {
-                        inner: &mut counting,
-                    };
-                    stream_dump(&state, since, &mut adapter, now())
-                        .map_err(|e| te(format!("backup dump: {e}")))?
+    let (output_path_str, bytes_written, core_report): (String, u64, CoreDumpReport) = match output
+    {
+        Some(path) => {
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(path)
+                .map_err(|e| te(format!("open output {}: {e}", path.display())))?;
+            let mut counting = CountingWriter::new(BufWriter::new(file));
+            let core_report = {
+                let mut adapter = IoWriter {
+                    inner: &mut counting,
                 };
-                // Flush BufWriter
-                counting
-                    .inner
-                    .flush()
-                    .map_err(|e| te(format!("flush output: {e}")))?;
-                (path.display().to_string(), counting.count, core_report)
-            }
-            None => {
-                let stdout = std::io::stdout();
-                let mut lock = stdout.lock();
-                let mut counting = CountingWriter::new(&mut lock);
-                let core_report = {
-                    let mut adapter = IoWriter {
-                        inner: &mut counting,
-                    };
-                    stream_dump(&state, since, &mut adapter, now())
-                        .map_err(|e| te(format!("backup dump: {e}")))?
+                stream_dump(&state, since, &mut adapter, now())
+                    .map_err(|e| te(format!("backup dump: {e}")))?
+            };
+            // Flush BufWriter
+            counting
+                .inner
+                .flush()
+                .map_err(|e| te(format!("flush output: {e}")))?;
+            (path.display().to_string(), counting.count, core_report)
+        }
+        None => {
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            let mut counting = CountingWriter::new(&mut lock);
+            let core_report = {
+                let mut adapter = IoWriter {
+                    inner: &mut counting,
                 };
-                ("-".to_string(), counting.count, core_report)
-            }
-        };
+                stream_dump(&state, since, &mut adapter, now())
+                    .map_err(|e| te(format!("backup dump: {e}")))?
+            };
+            ("-".to_string(), counting.count, core_report)
+        }
+    };
 
     Ok(BackupDumpReport {
         image_path: image.display().to_string(),
@@ -252,7 +254,11 @@ impl Report for BackupRestoreReport {
         out.push_str(&format!("  input           : {}\n", self.input_path));
         out.push_str(&format!(
             "  mode            : {}\n",
-            if self.incremental { "incremental" } else { "full" }
+            if self.incremental {
+                "incremental"
+            } else {
+                "full"
+            }
         ));
         out.push_str(&format!("  entries read    : {}\n", self.entries_read));
         out.push_str(&format!("    inodes        : {}\n", self.inodes_applied));
@@ -279,9 +285,8 @@ pub fn restore(image: &Path, input: Option<&Path>) -> ToolsResult<BackupRestoreR
     // abarbeiten (single-pass, kein Seek nötig).
     let (input_path_str, payload) = match input {
         Some(path) => {
-            let mut f = File::open(path).map_err(|e| {
-                te(format!("open input {}: {e}", path.display()))
-            })?;
+            let mut f =
+                File::open(path).map_err(|e| te(format!("open input {}: {e}", path.display())))?;
             let mut buf = Vec::new();
             f.read_to_end(&mut buf)
                 .map_err(|e| te(format!("read input: {e}")))?;

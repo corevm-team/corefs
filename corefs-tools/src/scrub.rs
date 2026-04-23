@@ -138,18 +138,33 @@ impl Report for ScrubImageReport {
         out.push_str("────────────\n");
         out.push_str(&format!("image path             : {}\n", self.image_path));
         out.push_str(&format!("mode                   : {:?}\n", self.mode));
-        out.push_str(&format!("extents verified       : {}\n", self.extents_verified));
-        out.push_str(&format!("blocks verified        : {}\n", self.blocks_verified));
-        out.push_str(&format!("fsck issues (before)   : {}\n", self.fsck_issues_before));
-        out.push_str(&format!("repair ops committed   : {}\n", self.repair_ops_committed));
-        out.push_str(&format!("data corruptions       : {}\n", self.data_corruptions.len()));
+        out.push_str(&format!(
+            "extents verified       : {}\n",
+            self.extents_verified
+        ));
+        out.push_str(&format!(
+            "blocks verified        : {}\n",
+            self.blocks_verified
+        ));
+        out.push_str(&format!(
+            "fsck issues (before)   : {}\n",
+            self.fsck_issues_before
+        ));
+        out.push_str(&format!(
+            "repair ops committed   : {}\n",
+            self.repair_ops_committed
+        ));
+        out.push_str(&format!(
+            "data corruptions       : {}\n",
+            self.data_corruptions.len()
+        ));
         for c in &self.data_corruptions {
-            out.push_str(&format!(
-                "  slot={} inode={}\n",
-                c.slot, c.domain_inode_id
-            ));
+            out.push_str(&format!("  slot={} inode={}\n", c.slot, c.domain_inode_id));
         }
-        out.push_str(&format!("residual issues        : {}\n", self.residual_issues.len()));
+        out.push_str(&format!(
+            "residual issues        : {}\n",
+            self.residual_issues.len()
+        ));
         for i in &self.residual_issues {
             out.push_str(&format!(
                 "  [{:?}] {} — {}\n",

@@ -113,10 +113,7 @@ impl BlockRecord {
 
     /// Liefert den Device-Block des ersten Extents (oder 0).
     pub fn first_physical_block(&self) -> u64 {
-        self.extents
-            .first()
-            .map(|e| e.physical_block)
-            .unwrap_or(0)
+        self.extents.first().map(|e| e.physical_block).unwrap_or(0)
     }
 }
 
@@ -346,7 +343,8 @@ impl BlockStore {
         };
         // Compat device must be a multiple of sector_size.
         // Use at least 64 MiB aligned to sector_size.
-        let cap = ((COMPAT_DEVICE_BYTES / u64::from(sector_size)) * u64::from(sector_size)).max(u64::from(sector_size));
+        let cap = ((COMPAT_DEVICE_BYTES / u64::from(sector_size)) * u64::from(sector_size))
+            .max(u64::from(sector_size));
         let compat_device = MemoryDevice::new(cap, sector_size).expect("compat device");
         Self {
             block_size: block_size.max(1),
@@ -369,11 +367,19 @@ impl BlockStore {
     /// Gibt die Anzahl geschriebener Bytes zurück.
     pub fn write(&mut self, inode: InodeId, bytes: Vec<u8>) -> usize {
         let size = bytes.len();
-        let crc = if bytes.is_empty() { 0 } else { Crc32c::hash(&bytes) };
+        let crc = if bytes.is_empty() {
+            0
+        } else {
+            Crc32c::hash(&bytes)
+        };
 
         // Block-aligned size
         let bs = self.block_size as u64;
-        let needed_blocks = if size == 0 { 1 } else { (size as u64).div_ceil(bs) };
+        let needed_blocks = if size == 0 {
+            1
+        } else {
+            (size as u64).div_ceil(bs)
+        };
 
         // Check if existing record can be reused
         let existing = self.records.get(&inode).cloned();
@@ -529,7 +535,10 @@ impl BlockStore {
             let aligned_start = align_down_u64(byte_offset, sector);
             let aligned_end = align_up_u64(byte_offset.saturating_add(read_len), sector);
             if aligned_end <= self.compat_device.capacity() {
-                if let Ok(buf) = self.compat_device.read_at(aligned_start, aligned_end - aligned_start) {
+                if let Ok(buf) = self
+                    .compat_device
+                    .read_at(aligned_start, aligned_end - aligned_start)
+                {
                     let start = (byte_offset - aligned_start) as usize;
                     let end = start + read_len as usize;
                     out.extend_from_slice(&buf[start..end]);
@@ -546,12 +555,7 @@ impl BlockStore {
     /// in-place overwrites update only the touched device sectors instead of
     /// materialising and rewriting the whole file.  Sparse writes and writes
     /// beyond EOF intentionally fall back to the full compat path for now.
-    pub fn write_range(
-        &mut self,
-        inode: InodeId,
-        offset: u64,
-        data: &[u8],
-    ) -> CoreFsResult<usize> {
+    pub fn write_range(&mut self, inode: InodeId, offset: u64, data: &[u8]) -> CoreFsResult<usize> {
         self.write_range_report(inode, offset, data)
             .map(|outcome| outcome.size)
     }
@@ -703,7 +707,9 @@ impl BlockStore {
                 "block store truncate would materialize {new_size} bytes"
             )));
         }
-        let prefix = self.read_range(inode, 0, new_size as usize).unwrap_or_default();
+        let prefix = self
+            .read_range(inode, 0, new_size as usize)
+            .unwrap_or_default();
         Ok(self.write(inode, prefix))
     }
 
@@ -880,11 +886,7 @@ impl BlockStore {
         // preceding extents.  We use length_blocks (allocated) rather than
         // logical_len / bs so the mapping matches how read_bytes_internal
         // iterates device blocks.
-        let logical_block_start: u32 = existing
-            .extents
-            .iter()
-            .map(|e| e.length_blocks)
-            .sum();
+        let logical_block_start: u32 = existing.extents.iter().map(|e| e.length_blocks).sum();
 
         let new_extent = ExtentRef {
             logical_block: logical_block_start,
@@ -1012,8 +1014,16 @@ impl BlockStore {
     ) -> CoreFsResult<()> {
         let size = data.len();
         let bs = BLOCK_SIZE;
-        let needed_blocks = if size == 0 { 1u64 } else { (size as u64).div_ceil(bs) };
-        let crc = if data.is_empty() { 0 } else { Crc32c::hash(data) };
+        let needed_blocks = if size == 0 {
+            1u64
+        } else {
+            (size as u64).div_ceil(bs)
+        };
+        let crc = if data.is_empty() {
+            0
+        } else {
+            Crc32c::hash(data)
+        };
 
         // Remove old record and free its blocks
         if let Some(old_rec) = self.records.remove(&inode) {
@@ -1164,7 +1174,11 @@ impl BlockStore {
         extra: &[u8],
     ) -> CoreFsResult<usize> {
         if extra.is_empty() {
-            return Ok(self.records.get(&inode).map(|r| r.logical_size as usize).unwrap_or(0));
+            return Ok(self
+                .records
+                .get(&inode)
+                .map(|r| r.logical_size as usize)
+                .unwrap_or(0));
         }
 
         let Some(existing) = self.records.get(&inode).cloned() else {
@@ -1190,7 +1204,11 @@ impl BlockStore {
         let combined_crc = !Crc32c::update(!existing.content_crc, extra);
 
         if let Some(first) = existing.extents.first() {
-            self.dedup_release(existing.content_crc, first.physical_block, first.length_blocks);
+            self.dedup_release(
+                existing.content_crc,
+                first.physical_block,
+                first.length_blocks,
+            );
         }
 
         let mut rec = existing;
@@ -1291,7 +1309,11 @@ impl BlockStore {
             Ok(b) => b,
             Err(_) => return false,
         };
-        let crc = if bytes.is_empty() { 0 } else { Crc32c::hash(&bytes) };
+        let crc = if bytes.is_empty() {
+            0
+        } else {
+            Crc32c::hash(&bytes)
+        };
         crc == rec.content_crc
     }
 
@@ -1331,7 +1353,11 @@ impl BlockStore {
             None => return false,
         };
         let bytes = self.read_bytes_internal(rec);
-        let crc = if bytes.is_empty() { 0 } else { Crc32c::hash(&bytes) };
+        let crc = if bytes.is_empty() {
+            0
+        } else {
+            Crc32c::hash(&bytes)
+        };
         crc == rec.content_crc
     }
 
@@ -1459,7 +1485,11 @@ impl BlockStore {
         // Allocate new extent for target
         let size = bytes.len();
         let bs = self.block_size as u64;
-        let needed_blocks = if size == 0 { 1u64 } else { (size as u64).div_ceil(bs) };
+        let needed_blocks = if size == 0 {
+            1u64
+        } else {
+            (size as u64).div_ceil(bs)
+        };
         let (phys_block, allocated_blocks) = self.allocate_extent(needed_blocks.max(1));
 
         // Write to compat device
@@ -1487,12 +1517,15 @@ impl BlockStore {
             entry.ref_count += 1;
         } else {
             // No existing entry (e.g. source was empty) — create one with ref_count=2.
-            self.dedup_table.insert(crc, DedupEntry {
-                physical_block: phys_block,
-                length_blocks: allocated_blocks as u32,
-                physical_len: size as u32,
-                ref_count: 2,
-            });
+            self.dedup_table.insert(
+                crc,
+                DedupEntry {
+                    physical_block: phys_block,
+                    length_blocks: allocated_blocks as u32,
+                    physical_len: size as u32,
+                    ref_count: 2,
+                },
+            );
         }
 
         let extent = ExtentRef {
@@ -1532,8 +1565,7 @@ impl BlockStore {
             let size = entry.physical_len as usize;
             if rc > 1 {
                 shared_blobs += 1;
-                shared_logical_bytes =
-                    shared_logical_bytes.saturating_add(size.saturating_mul(rc));
+                shared_logical_bytes = shared_logical_bytes.saturating_add(size.saturating_mul(rc));
                 bytes_saved_by_sharing =
                     bytes_saved_by_sharing.saturating_add(size.saturating_mul(rc - 1));
             } else if rc == 1 {
@@ -1750,9 +1782,11 @@ impl BlockStore {
         entries.sort_by(|left, right| {
             let left_rank = priority_map.get(&left.0).copied().unwrap_or(usize::MAX);
             let right_rank = priority_map.get(&right.0).copied().unwrap_or(usize::MAX);
-            left_rank
-                .cmp(&right_rank)
-                .then_with(|| left.1.first_physical_block().cmp(&right.1.first_physical_block()))
+            left_rank.cmp(&right_rank).then_with(|| {
+                left.1
+                    .first_physical_block()
+                    .cmp(&right.1.first_physical_block())
+            })
         });
 
         let mut cursor = 0u64;
@@ -1981,9 +2015,7 @@ impl BlockStore {
             .max()
             .unwrap_or(0);
         let max_occ_end = occupied.iter().map(|(_, end)| *end).max().unwrap_or(0);
-        self.next_device_block = self
-            .next_device_block
-            .max(max_free_end.max(max_occ_end));
+        self.next_device_block = self.next_device_block.max(max_free_end.max(max_occ_end));
         Ok(())
     }
 
@@ -1991,7 +2023,13 @@ impl BlockStore {
     // Dedup table helpers
     // -----------------------------------------------------------------------
 
-    fn dedup_insert(&mut self, crc: u32, physical_block: u64, length_blocks: u32, physical_len: u32) {
+    fn dedup_insert(
+        &mut self,
+        crc: u32,
+        physical_block: u64,
+        length_blocks: u32,
+        physical_len: u32,
+    ) {
         if let Some(entry) = self.dedup_table.get_mut(&crc) {
             entry.ref_count += 1;
         } else {

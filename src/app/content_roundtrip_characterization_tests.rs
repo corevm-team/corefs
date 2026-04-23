@@ -94,10 +94,7 @@ fn char_service_write_file_replaces_content() {
     let mut fs = test_fs();
     fs.create_file("/rw.txt", b"original content", &[]).unwrap();
     fs.write_file("/rw.txt", b"replaced content").unwrap();
-    assert_eq!(
-        fs.read_file("/rw.txt").unwrap(),
-        b"replaced content"
-    );
+    assert_eq!(fs.read_file("/rw.txt").unwrap(), b"replaced content");
 }
 
 #[test]
@@ -119,10 +116,7 @@ fn char_service_extend_file_appends_bytes() {
     let mut fs = test_fs_no_encryption();
     fs.create_file("/append.txt", b"hello", &[]).unwrap();
     fs.extend_file("/append.txt", b" world").unwrap();
-    assert_eq!(
-        fs.read_file("/append.txt").unwrap(),
-        b"hello world"
-    );
+    assert_eq!(fs.read_file("/append.txt").unwrap(), b"hello world");
 }
 
 #[test]
@@ -221,7 +215,12 @@ fn char_service_encrypt_roundtrip() {
 fn char_service_compress_then_encrypt_pipeline() {
     // Default config: both compression and encryption enabled.
     let mut fs = test_fs();
-    let payload: Vec<u8> = b"compress-then-encrypt-me".iter().copied().cycle().take(512).collect();
+    let payload: Vec<u8> = b"compress-then-encrypt-me"
+        .iter()
+        .copied()
+        .cycle()
+        .take(512)
+        .collect();
     fs.create_file("/pipeline.bin", &payload, &[]).unwrap();
     assert_eq!(
         fs.read_file("/pipeline.bin").unwrap(),
@@ -303,7 +302,8 @@ fn char_service_save_then_load_image_preserves_all_files() {
 fn char_service_integrity_scrub_passes_on_clean_image() {
     let mut fs = test_fs();
     fs.create_file("/a.txt", b"clean data", &[]).unwrap();
-    fs.create_file("/b.bin", &prng_bytes(0x1111, 1024), &[]).unwrap();
+    fs.create_file("/b.bin", &prng_bytes(0x1111, 1024), &[])
+        .unwrap();
     let report = fs.scrub();
     assert_eq!(
         report.invalid_blocks, 0,
@@ -316,7 +316,8 @@ fn char_service_integrity_scrub_detects_corrupted_checksum() {
     // Simulate a corrupted block by manipulating the persisted state:
     // keep bytes intact but break the content_crc so verify() returns false.
     let mut fs = test_fs();
-    fs.create_file("/corrupt.bin", b"some content here", &[]).unwrap();
+    fs.create_file("/corrupt.bin", b"some content here", &[])
+        .unwrap();
 
     let mut state = fs.persisted_state();
     // Corrupt the content_crc of the first block record.

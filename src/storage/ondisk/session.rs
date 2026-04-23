@@ -33,15 +33,15 @@ use crate::error::{CoreFsError, CoreFsResult};
 use crate::storage::block_device::{BlockDevice, FileImageDevice};
 
 use super::journaled::recover_pending_transactions;
-use crate::app::PersistedState;
-use crate::domain::inode::InodeId;
-use crate::storage::block_store::{BlockRecord, ExtentRef};
 use super::layout::{BLOCK_SIZE, DEFAULT_INODE_COUNT, DEFAULT_JOURNAL_BLOCKS};
 use super::native::{
     IncrementalSaveReport, load_state_native, save_state_native, save_state_native_incremental,
 };
-use super::volume::{FormatOptions, format_device};
 use super::volume::read_sb_with_fallbacks;
+use super::volume::{FormatOptions, format_device};
+use crate::app::PersistedState;
+use crate::domain::inode::InodeId;
+use crate::storage::block_store::{BlockRecord, ExtentRef};
 
 /// Minimum capacity in bytes for a freshly-formatted ODF volume.
 pub const MIN_ODF_CAPACITY_BYTES: u64 = super::layout::MIN_VOLUME_BLOCKS * BLOCK_SIZE;
@@ -189,7 +189,12 @@ impl OdfFileSession {
     /// inodes + the ancillary slot + the superblock are rewritten.
     pub fn flush(&mut self) -> CoreFsResult<FlushReport> {
         let state = self.service.persisted_state();
-        let state = write_bytes_to_odf_device(&mut self.device, &self.service, state, &mut self.odf_extents)?;
+        let state = write_bytes_to_odf_device(
+            &mut self.device,
+            &self.service,
+            state,
+            &mut self.odf_extents,
+        )?;
         let incremental = save_state_native_incremental(&mut self.device, &state)?;
         Ok(FlushReport { incremental })
     }
@@ -244,7 +249,11 @@ impl OdfDeviceSession {
         let service = CoreFsService::format(options.config.clone());
         let state = service.persisted_state();
         save_state_native(device.as_mut(), &state)?;
-        Ok(Self { device, service, odf_extents: std::collections::HashMap::new() })
+        Ok(Self {
+            device,
+            service,
+            odf_extents: std::collections::HashMap::new(),
+        })
     }
 
     /// Open an existing ODF volume from `device`, replaying any
@@ -257,7 +266,11 @@ impl OdfDeviceSession {
         // Restore file bytes from ODF device into the compat device so
         // CoreFsService::read_file() works after open.
         restore_bytes_from_odf_device(device.as_ref(), &mut service)?;
-        Ok(Self { device, service, odf_extents })
+        Ok(Self {
+            device,
+            service,
+            odf_extents,
+        })
     }
 
     pub fn service(&self) -> &CoreFsService {
@@ -275,7 +288,12 @@ impl OdfDeviceSession {
     /// Incrementally flush.
     pub fn flush(&mut self) -> CoreFsResult<FlushReport> {
         let state = self.service.persisted_state();
-        let state = write_bytes_to_odf_device(self.device.as_mut(), &self.service, state, &mut self.odf_extents)?;
+        let state = write_bytes_to_odf_device(
+            self.device.as_mut(),
+            &self.service,
+            state,
+            &mut self.odf_extents,
+        )?;
         let incremental = save_state_native_incremental(self.device.as_mut(), &state)?;
         Ok(FlushReport { incremental })
     }
@@ -385,8 +403,8 @@ fn write_bytes_to_odf_device(
     mut state: PersistedState,
     odf_extents_cache: &mut std::collections::HashMap<InodeId, (u32, Vec<ExtentRef>)>,
 ) -> crate::error::CoreFsResult<PersistedState> {
-    use super::checksum::Crc32c;
     use super::bitmap::Bitmap;
+    use super::checksum::Crc32c;
     use std::collections::HashMap;
 
     let block_bytes: HashMap<InodeId, Vec<u8>> = service.read_all_block_bytes();
@@ -411,13 +429,14 @@ fn write_bytes_to_odf_device(
     // To avoid conflicts with inodes already saved, we start at the end
     // of the data region and work backwards … actually: read the block
     // bitmap to find free blocks.  For simplicity, scan from data_start.
-    let bbm_bytes = device.read_at(
-        geom.block_bitmap_start * BLOCK_SIZE,
-        geom.block_bitmap_blocks * BLOCK_SIZE,
-    ).unwrap_or_else(|_| vec![0u8; (geom.block_bitmap_blocks * BLOCK_SIZE) as usize]);
-    let mut bbm = Bitmap::from_bytes(
-        bbm_bytes, geom.total_blocks,
-    ).unwrap_or_else(|_| Bitmap::new(geom.total_blocks));
+    let bbm_bytes = device
+        .read_at(
+            geom.block_bitmap_start * BLOCK_SIZE,
+            geom.block_bitmap_blocks * BLOCK_SIZE,
+        )
+        .unwrap_or_else(|_| vec![0u8; (geom.block_bitmap_blocks * BLOCK_SIZE) as usize]);
+    let mut bbm = Bitmap::from_bytes(bbm_bytes, geom.total_blocks)
+        .unwrap_or_else(|_| Bitmap::new(geom.total_blocks));
 
     // Find the first free data block.
     let mut next_data_block = geom.data_start;
@@ -476,9 +495,7 @@ fn write_bytes_to_odf_device(
         let mut scan = next_data_block;
         while scan + needed_blocks <= geom.total_blocks {
             // Check if all needed_blocks starting at `scan` are free.
-            let all_free = (0..needed_blocks).all(|b| {
-                !bbm.is_set(scan + b).unwrap_or(true)
-            });
+            let all_free = (0..needed_blocks).all(|b| !bbm.is_set(scan + b).unwrap_or(true));
             if all_free {
                 found_block = Some(scan);
                 break;
@@ -524,10 +541,7 @@ fn write_bytes_to_odf_device(
 
     // Write the updated bitmap back to the device so that save_state_native_incremental
     // doesn't re-allocate the blocks we just wrote file data to.
-    device.write_at(
-        geom.block_bitmap_start * BLOCK_SIZE,
-        bbm.as_bytes(),
-    )?;
+    device.write_at(geom.block_bitmap_start * BLOCK_SIZE, bbm.as_bytes())?;
 
     Ok(state)
 }

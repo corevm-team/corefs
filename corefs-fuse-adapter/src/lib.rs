@@ -228,7 +228,12 @@ mod tests {
     #[test]
     fn loop_terminates_on_destroy() {
         let transport = MockTransport::new(vec![
-            req(1, Request::Init { version: PROTOCOL_VERSION }),
+            req(
+                1,
+                Request::Init {
+                    version: PROTOCOL_VERSION,
+                },
+            ),
             req(2, Request::Destroy),
             // Should never be processed:
             req(3, Request::Getattr { ino: 1 }),
@@ -253,7 +258,15 @@ mod tests {
     #[test]
     fn handler_err_becomes_err_payload() {
         let transport = MockTransport::new(vec![
-            req(1, Request::Read { ino: 1, fh: 1, offset: 0, size: 4 }),
+            req(
+                1,
+                Request::Read {
+                    ino: 1,
+                    fh: 1,
+                    offset: 0,
+                    size: 4,
+                },
+            ),
             req(2, Request::Destroy),
         ]);
         let mut session = SessionLoop::new(transport, StubHandler);
@@ -267,7 +280,12 @@ mod tests {
     #[test]
     fn handler_ok_becomes_ok_payload() {
         let transport = MockTransport::new(vec![
-            req(1, Request::Init { version: PROTOCOL_VERSION }),
+            req(
+                1,
+                Request::Init {
+                    version: PROTOCOL_VERSION,
+                },
+            ),
             req(2, Request::Destroy),
         ]);
         let mut session = SessionLoop::new(transport, StubHandler);

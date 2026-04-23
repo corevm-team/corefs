@@ -95,7 +95,9 @@ fn rotation_does_not_change_file_keys() {
 #[test]
 fn export_import_roundtrip() {
     let ks = Keystore::new(VK, SALT, UUID);
-    let file = ks.export_file(&ZERO_MK, NONCE_A, Timestamp::from_secs(1000)).unwrap();
+    let file = ks
+        .export_file(&ZERO_MK, NONCE_A, Timestamp::from_secs(1000))
+        .unwrap();
     assert_eq!(file.magic, KEYSTORE_MAGIC);
     assert_eq!(file.version, KEYSTORE_VERSION);
     let bytes = bincode_compat::serialize(&file).unwrap();
@@ -159,7 +161,9 @@ fn wire_format_magic_is_coreksfs_in_little_endian() {
 #[test]
 fn keystore_file_bincode_stable_shape() {
     let ks = Keystore::new(VK, SALT, UUID);
-    let file = ks.export_file(&ZERO_MK, NONCE_A, Timestamp::from_secs(123)).unwrap();
+    let file = ks
+        .export_file(&ZERO_MK, NONCE_A, Timestamp::from_secs(123))
+        .unwrap();
     let bytes = bincode_compat::serialize(&file).unwrap();
     // Magic muss in den ersten 8 Bytes als LE-u64 erkennbar sein:
     let mut magic_bytes = [0u8; 8];

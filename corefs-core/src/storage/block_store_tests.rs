@@ -7,8 +7,17 @@ use alloc::vec;
 
 // Helper: build a BlockRecord with the new fields, using a single simple extent
 // with a given device_block and allocated_blocks (for backward-compat tests).
-fn make_record(inode: InodeId, payload: &[u8], device_block: u64, allocated_blocks: u64) -> BlockRecord {
-    let crc = if payload.is_empty() { 0 } else { crate::storage::ondisk::checksum::Crc32c::hash(payload) };
+fn make_record(
+    inode: InodeId,
+    payload: &[u8],
+    device_block: u64,
+    allocated_blocks: u64,
+) -> BlockRecord {
+    let crc = if payload.is_empty() {
+        0
+    } else {
+        crate::storage::ondisk::checksum::Crc32c::hash(payload)
+    };
     BlockRecord {
         inode,
         logical_size: payload.len() as u64,
@@ -465,12 +474,20 @@ fn device_append_coalesces_into_tail_block_without_rewriting_file() {
     let mut store = BlockStore::default();
     let inode = InodeId(42);
 
-    store.write_device(&mut device, inode, b"hello").expect("write");
-    store.append_device(&mut device, inode, b" world").expect("append");
+    store
+        .write_device(&mut device, inode, b"hello")
+        .expect("write");
+    store
+        .append_device(&mut device, inode, b" world")
+        .expect("append");
 
     let rec = store.record(inode).expect("record");
     assert_eq!(rec.logical_size, 11);
-    assert_eq!(rec.extents.len(), 1, "small append should reuse tail room in the last block");
+    assert_eq!(
+        rec.extents.len(),
+        1,
+        "small append should reuse tail room in the last block"
+    );
     assert_eq!(rec.extents[0].logical_len, 11);
     assert_eq!(rec.extents[0].physical_len, 11);
 
@@ -487,8 +504,12 @@ fn device_append_allocates_new_extent_after_tail_block_is_full() {
     let mut store = BlockStore::default();
     let inode = InodeId(44);
 
-    store.write_device(&mut device, inode, &alloc::vec![0xAA; 4090]).expect("write");
-    store.append_device(&mut device, inode, &alloc::vec![0xBB; 16]).expect("append");
+    store
+        .write_device(&mut device, inode, &alloc::vec![0xAA; 4090])
+        .expect("write");
+    store
+        .append_device(&mut device, inode, &alloc::vec![0xBB; 16])
+        .expect("append");
 
     let rec = store.record(inode).expect("record");
     assert_eq!(rec.logical_size, 4106);
@@ -510,9 +531,15 @@ fn device_ranged_read_crosses_extent_boundaries_without_full_materialisation() {
     let mut store = BlockStore::default();
     let inode = InodeId(43);
 
-    store.write_device(&mut device, inode, b"abcd").expect("write");
-    store.append_device(&mut device, inode, b"efgh").expect("append");
-    store.append_device(&mut device, inode, b"ijkl").expect("append");
+    store
+        .write_device(&mut device, inode, b"abcd")
+        .expect("write");
+    store
+        .append_device(&mut device, inode, b"efgh")
+        .expect("append");
+    store
+        .append_device(&mut device, inode, b"ijkl")
+        .expect("append");
 
     let mut buf = [0u8; 6];
     let n = store.read_bytes(&device, inode, 3, &mut buf).expect("read");

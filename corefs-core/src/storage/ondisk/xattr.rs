@@ -225,10 +225,9 @@ impl XattrBlock {
             if XATTR_HDR + name_len + value_len > rec {
                 return Err(CoreFsError::State("xattr: lengths exceed rec".into()));
             }
-            let name =
-                str::from_utf8(&block[cursor + XATTR_HDR..cursor + XATTR_HDR + name_len])
-                    .map_err(|e| CoreFsError::State(format!("xattr: name utf-8: {e}")))?
-                    .to_string();
+            let name = str::from_utf8(&block[cursor + XATTR_HDR..cursor + XATTR_HDR + name_len])
+                .map_err(|e| CoreFsError::State(format!("xattr: name utf-8: {e}")))?
+                .to_string();
             let v_off = cursor + XATTR_HDR + name_len;
             let value = block[v_off..v_off + value_len].to_vec();
             xattrs.push(XattrPair { name, value });
@@ -251,10 +250,9 @@ impl XattrBlock {
             if ACL_HDR + subj_len > rec {
                 return Err(CoreFsError::State("acl: subject exceeds rec".into()));
             }
-            let subject =
-                str::from_utf8(&block[cursor + ACL_HDR..cursor + ACL_HDR + subj_len])
-                    .map_err(|e| CoreFsError::State(format!("acl: subject utf-8: {e}")))?
-                    .to_string();
+            let subject = str::from_utf8(&block[cursor + ACL_HDR..cursor + ACL_HDR + subj_len])
+                .map_err(|e| CoreFsError::State(format!("acl: subject utf-8: {e}")))?
+                .to_string();
             acls.push(AclRecord {
                 principal,
                 subject,

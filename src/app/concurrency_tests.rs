@@ -41,8 +41,7 @@ fn odf_session_opts() -> OdfSessionOptions {
 
 fn odf_session_with_files(count: usize) -> OdfDeviceSession {
     let opts = odf_session_opts();
-    let dev: Box<dyn BlockDevice> =
-        Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
+    let dev: Box<dyn BlockDevice> = Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
     let mut sess = OdfDeviceSession::format_new(dev, &opts).unwrap();
     sess.mutate(|fs| {
         for i in 0..count {
@@ -178,11 +177,7 @@ fn cs6_arc_mutex_serialises_concurrent_mutations() {
         handles.push(thread::spawn(move || {
             let mut guard = fs.lock().unwrap();
             guard
-                .create_file(
-                    &format!("/t{t}"),
-                    format!("thread-{t}").as_bytes(),
-                    &[],
-                )
+                .create_file(&format!("/t{t}"), format!("thread-{t}").as_bytes(), &[])
                 .unwrap();
         }));
     }
@@ -243,10 +238,7 @@ fn cs8_parallel_reads_on_odf_device_snapshot() {
             let paths = sess.service().list_paths();
             assert_eq!(paths.len(), 10);
             for i in 0..10 {
-                let data = sess
-                    .service()
-                    .read_file(&format!("/file{i:04}"))
-                    .unwrap();
+                let data = sess.service().read_file(&format!("/file{i:04}")).unwrap();
                 assert_eq!(data, format!("content-{i}").as_bytes());
             }
         }));
@@ -280,7 +272,11 @@ fn cs9_fsck_on_snapshot_while_writer_mutates() {
     // Independent fsck on the snapshot.
     let reader = CoreFsService::from_persisted_state(state);
     let report = reader.fsck();
-    assert_eq!(report.missing_blocks, Vec::<String>::new(), "fsck on snapshot should be clean");
+    assert_eq!(
+        report.missing_blocks,
+        Vec::<String>::new(),
+        "fsck on snapshot should be clean"
+    );
 
     let fs = writer.join().unwrap();
     assert_eq!(fs.list_paths().len(), 30);
@@ -303,8 +299,7 @@ fn cs10_snapshot_creation_is_deterministic_across_threads() {
         let s = Arc::clone(&state);
         handles.push(thread::spawn(move || {
             let mut local = CoreFsService::from_persisted_state((*s).clone());
-            local
-                .create_snapshot(&format!("snap-{t}"));
+            local.create_snapshot(&format!("snap-{t}"));
             let names = local.snapshot_names();
             assert!(names.contains(&format!("snap-{t}")));
             local.snapshots().len()

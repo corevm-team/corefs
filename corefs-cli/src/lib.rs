@@ -66,11 +66,7 @@ enum GateDecision {
 ///   because no ioctl/RPC path is wired yet.
 /// - `MountStatus::Unknown` → proceed; on AnyOS or environments without a
 ///   mount table this is the only workable default.
-fn check_mount_gate<E: Write>(
-    path: &str,
-    online: bool,
-    err: &mut E,
-) -> GateDecision {
+fn check_mount_gate<E: Write>(path: &str, online: bool, err: &mut E) -> GateDecision {
     match mount_check::probe_device(path) {
         MountStatus::NotMounted | MountStatus::Unknown => GateDecision::Proceed,
         MountStatus::Mounted { mount_paths } => {
@@ -162,7 +158,11 @@ fn run_mkfs<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> Ex
 
     let opts = FormatImageOptions {
         label,
-        layout_mode: if blob { LayoutMode::Blob } else { LayoutMode::Native },
+        layout_mode: if blob {
+            LayoutMode::Blob
+        } else {
+            LayoutMode::Native
+        },
         ..Default::default()
     };
     let result = mkfs::format_image(path, capacity, &opts);
@@ -185,7 +185,10 @@ fn run_repair<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> 
     };
     let json = has_flag(args, "--json");
     let online = has_flag(args, "--online");
-    if matches!(check_mount_gate(&positional[0], online, err), GateDecision::Refuse) {
+    if matches!(
+        check_mount_gate(&positional[0], online, err),
+        GateDecision::Refuse
+    ) {
         return ExitStatus::Unsupported;
     }
     finish(repair::repair_image(&positional[0]), out, err, json)
@@ -210,7 +213,10 @@ fn run_scrub<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> E
     };
     let json = has_flag(args, "--json");
     let online = has_flag(args, "--online");
-    if matches!(check_mount_gate(&positional[0], online, err), GateDecision::Refuse) {
+    if matches!(
+        check_mount_gate(&positional[0], online, err),
+        GateDecision::Refuse
+    ) {
         return ExitStatus::Unsupported;
     }
     finish(scrub::scrub_image(&positional[0], mode), out, err, json)
@@ -244,7 +250,10 @@ fn run_dump_inode<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E)
 
 fn run_snapshot<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> ExitStatus {
     if args.is_empty() {
-        return usage_err(err, "snapshot: missing subcommand (list|create|delete|restore)");
+        return usage_err(
+            err,
+            "snapshot: missing subcommand (list|create|delete|restore)",
+        );
     }
     match args[0].as_str() {
         "list" => {
@@ -256,10 +265,11 @@ fn run_snapshot<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -
             finish(snapshot::list(&positional[0]), out, err, json)
         }
         "create" => {
-            let positional = match collect_positional(&args[1..], 1, "snapshot create <path> --name <n>") {
-                Ok(v) => v,
-                Err(msg) => return usage_err(err, &msg),
-            };
+            let positional =
+                match collect_positional(&args[1..], 1, "snapshot create <path> --name <n>") {
+                    Ok(v) => v,
+                    Err(msg) => return usage_err(err, &msg),
+                };
             let name = match parse_string(&args[1..], "--name") {
                 Some(v) => v,
                 None => return usage_err(err, "snapshot create: --name is required"),
@@ -267,7 +277,10 @@ fn run_snapshot<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -
             let scope_root = parse_string(&args[1..], "--scope");
             let json = has_flag(&args[1..], "--json");
             let online = has_flag(&args[1..], "--online");
-            if matches!(check_mount_gate(&positional[0], online, err), GateDecision::Refuse) {
+            if matches!(
+                check_mount_gate(&positional[0], online, err),
+                GateDecision::Refuse
+            ) {
                 return ExitStatus::Unsupported;
             }
             finish(
@@ -278,38 +291,49 @@ fn run_snapshot<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -
             )
         }
         "delete" => {
-            let positional = match collect_positional(&args[1..], 1, "snapshot delete <path> --id <n>") {
-                Ok(v) => v,
-                Err(msg) => return usage_err(err, &msg),
-            };
+            let positional =
+                match collect_positional(&args[1..], 1, "snapshot delete <path> --id <n>") {
+                    Ok(v) => v,
+                    Err(msg) => return usage_err(err, &msg),
+                };
             let id = match parse_required_u64(&args[1..], "--id") {
                 Ok(v) => v,
                 Err(msg) => return usage_err(err, &msg),
             };
             let json = has_flag(&args[1..], "--json");
             let online = has_flag(&args[1..], "--online");
-            if matches!(check_mount_gate(&positional[0], online, err), GateDecision::Refuse) {
+            if matches!(
+                check_mount_gate(&positional[0], online, err),
+                GateDecision::Refuse
+            ) {
                 return ExitStatus::Unsupported;
             }
             finish(snapshot::delete(&positional[0], id), out, err, json)
         }
         "restore" => {
-            let positional = match collect_positional(&args[1..], 1, "snapshot restore <path> --id <n>") {
-                Ok(v) => v,
-                Err(msg) => return usage_err(err, &msg),
-            };
+            let positional =
+                match collect_positional(&args[1..], 1, "snapshot restore <path> --id <n>") {
+                    Ok(v) => v,
+                    Err(msg) => return usage_err(err, &msg),
+                };
             let id = match parse_required_u64(&args[1..], "--id") {
                 Ok(v) => v,
                 Err(msg) => return usage_err(err, &msg),
             };
             let json = has_flag(&args[1..], "--json");
             let online = has_flag(&args[1..], "--online");
-            if matches!(check_mount_gate(&positional[0], online, err), GateDecision::Refuse) {
+            if matches!(
+                check_mount_gate(&positional[0], online, err),
+                GateDecision::Refuse
+            ) {
                 return ExitStatus::Unsupported;
             }
             finish(snapshot::restore(&positional[0], id), out, err, json)
         }
-        other => usage_err(err, &format!("snapshot: unknown subcommand '{other}' (use list|create|delete|restore)")),
+        other => usage_err(
+            err,
+            &format!("snapshot: unknown subcommand '{other}' (use list|create|delete|restore)"),
+        ),
     }
 }
 
@@ -348,14 +372,12 @@ fn run_backup<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> 
             )
         }
         "restore" => {
-            let positional = match collect_positional(
-                &args[1..],
-                1,
-                "backup restore <path> [--input <stream>]",
-            ) {
-                Ok(v) => v,
-                Err(msg) => return usage_err(err, &msg),
-            };
+            let positional =
+                match collect_positional(&args[1..], 1, "backup restore <path> [--input <stream>]")
+                {
+                    Ok(v) => v,
+                    Err(msg) => return usage_err(err, &msg),
+                };
             let in_path = parse_string(&args[1..], "--input").map(std::path::PathBuf::from);
             let json = has_flag(&args[1..], "--json");
             finish(
@@ -365,7 +387,10 @@ fn run_backup<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> 
                 json,
             )
         }
-        other => usage_err(err, &format!("backup: unknown subcommand '{other}' (use dump|restore)")),
+        other => usage_err(
+            err,
+            &format!("backup: unknown subcommand '{other}' (use dump|restore)"),
+        ),
     }
 }
 
@@ -456,7 +481,10 @@ fn run_keys<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> Ex
                 json,
             )
         }
-        other => usage_err(err, &format!("keys: unknown subcommand '{other}' (use init|rotate|verify)")),
+        other => usage_err(
+            err,
+            &format!("keys: unknown subcommand '{other}' (use init|rotate|verify)"),
+        ),
     }
 }
 
@@ -467,7 +495,10 @@ fn run_defrag<O: Write, E: Write>(args: &[String], out: &mut O, err: &mut E) -> 
     };
     let json = has_flag(args, "--json");
     let online = has_flag(args, "--online");
-    if matches!(check_mount_gate(&positional[0], online, err), GateDecision::Refuse) {
+    if matches!(
+        check_mount_gate(&positional[0], online, err),
+        GateDecision::Refuse
+    ) {
         return ExitStatus::Unsupported;
     }
     finish(defrag::defrag_image(&positional[0]), out, err, json)
@@ -541,7 +572,10 @@ fn collect_positional(args: &[String], expected: usize, hint: &str) -> Result<Ve
 }
 
 fn is_known_bool_flag(flag: &str) -> bool {
-    matches!(flag, "--json" | "--blob" | "--help" | "-h" | "--online" | "--offline")
+    matches!(
+        flag,
+        "--json" | "--blob" | "--help" | "-h" | "--online" | "--offline"
+    )
 }
 
 fn has_flag(args: &[String], flag: &str) -> bool {
@@ -559,8 +593,7 @@ fn parse_string(args: &[String], flag: &str) -> Option<String> {
 }
 
 fn parse_required_u64(args: &[String], flag: &str) -> Result<u64, String> {
-    let s = parse_string(args, flag)
-        .ok_or_else(|| format!("missing required flag {flag}"))?;
+    let s = parse_string(args, flag).ok_or_else(|| format!("missing required flag {flag}"))?;
     s.parse::<u64>()
         .map_err(|_| format!("flag {flag}: '{s}' is not a valid unsigned integer"))
 }

@@ -582,8 +582,17 @@ mod tests {
         let reply = ReplyFrame {
             header: FrameHeader { unique: 6 },
             payload: ReplyPayload::Ok(Reply::Mkdir(Attr {
-                ino: 42, size: 0, blocks: 0, mode: 0o40755, nlink: 2,
-                uid: 0, gid: 0, kind: 2, crtime_secs: 1, mtime_secs: 1, ctime_secs: 1,
+                ino: 42,
+                size: 0,
+                blocks: 0,
+                mode: 0o40755,
+                nlink: 2,
+                uid: 0,
+                gid: 0,
+                kind: 2,
+                crtime_secs: 1,
+                mtime_secs: 1,
+                ctime_secs: 1,
             })),
         };
         let bytes = wire::encode_reply(&reply).unwrap();
@@ -608,8 +617,17 @@ mod tests {
             header: FrameHeader { unique: 7 },
             payload: ReplyPayload::Ok(Reply::Create {
                 attr: Attr {
-                    ino: 99, size: 0, blocks: 0, mode: 0o100644, nlink: 1,
-                    uid: 0, gid: 0, kind: 1, crtime_secs: 1, mtime_secs: 1, ctime_secs: 1,
+                    ino: 99,
+                    size: 0,
+                    blocks: 0,
+                    mode: 0o100644,
+                    nlink: 1,
+                    uid: 0,
+                    gid: 0,
+                    kind: 1,
+                    crtime_secs: 1,
+                    mtime_secs: 1,
+                    ctime_secs: 1,
                 },
                 fh: 17,
                 flags: 0,
@@ -641,8 +659,17 @@ mod tests {
         let reply = ReplyFrame {
             header: FrameHeader { unique: 10 },
             payload: ReplyPayload::Ok(Reply::Setattr(Attr {
-                ino: 42, size: 4096, blocks: 8, mode: 0o100640, nlink: 1,
-                uid: 1000, gid: 0, kind: 1, crtime_secs: 1, mtime_secs: 1_700_000_000, ctime_secs: 2,
+                ino: 42,
+                size: 4096,
+                blocks: 8,
+                mode: 0o100640,
+                nlink: 1,
+                uid: 1000,
+                gid: 0,
+                kind: 1,
+                crtime_secs: 1,
+                mtime_secs: 1_700_000_000,
+                ctime_secs: 2,
             })),
         };
         let bytes = wire::encode_reply(&reply).unwrap();
@@ -653,7 +680,10 @@ mod tests {
     fn rmdir_rename_round_trip() {
         let frame = RequestFrame {
             header: FrameHeader { unique: 11 },
-            op: Request::Rmdir { parent: 1, name: "old".to_string() },
+            op: Request::Rmdir {
+                parent: 1,
+                name: "old".to_string(),
+            },
         };
         let bytes = wire::encode_request(&frame).unwrap();
         assert_eq!(frame, wire::decode_request(&bytes).unwrap());
@@ -709,7 +739,11 @@ mod tests {
 
         let frame2 = RequestFrame {
             header: FrameHeader { unique: 16 },
-            op: Request::Fsync { ino: 3, fh: 5, datasync: true },
+            op: Request::Fsync {
+                ino: 3,
+                fh: 5,
+                datasync: true,
+            },
         };
         assert_eq!(
             frame2,
@@ -729,8 +763,17 @@ mod tests {
     #[test]
     fn types_implement_clone_and_eq_under_no_std() {
         let a = Attr {
-            ino: 1, size: 0, blocks: 0, mode: 0, nlink: 1,
-            uid: 0, gid: 0, kind: 1, crtime_secs: 0, mtime_secs: 0, ctime_secs: 0,
+            ino: 1,
+            size: 0,
+            blocks: 0,
+            mode: 0,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            kind: 1,
+            crtime_secs: 0,
+            mtime_secs: 0,
+            ctime_secs: 0,
         };
         let b = a;
         assert_eq!(a, b);

@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 // `use crate::storage::block_device::{BlockDevice, DeviceGeometry, …}`-Pfade
 // in den Konsumenten unverändert lauffähig.
 pub use corefs_core::storage::block_device::{
-    BlockDevice, DeviceGeometry, MemoryDevice, SECTOR_SIZE_4K, SECTOR_SIZE_512,
-    check_alignment, check_bounds, check_write_permission,
+    BlockDevice, DeviceGeometry, MemoryDevice, SECTOR_SIZE_4K, SECTOR_SIZE_512, check_alignment,
+    check_bounds, check_write_permission,
 };
 
 // ---------------------------------------------------------------------------
@@ -287,7 +287,8 @@ impl FileImageDevice {
         let path = path.as_ref();
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(!read_only);
-        apply_write_through(&mut options, write_through && !read_only);
+        let actual_write_through = cfg!(windows) && write_through && !read_only;
+        apply_write_through(&mut options, actual_write_through);
         let file = options.open(path).map_err(|e| {
             CoreFsError::State(format!("failed to open image file {}: {e}", path.display()))
         })?;
@@ -311,7 +312,7 @@ impl FileImageDevice {
             metadata_dirty: false,
             data_dirty: false,
             defer_data_sync: false,
-            write_through: write_through && !read_only,
+            write_through: actual_write_through,
         })
     }
 
@@ -947,7 +948,6 @@ pub mod raw {
             .is_some_and(|v| v > 0)
     }
 }
-
 
 // ===========================================================================
 // Tests

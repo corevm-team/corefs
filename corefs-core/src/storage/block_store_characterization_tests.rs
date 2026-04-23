@@ -100,7 +100,10 @@ fn char_overwrite_in_place_when_size_fits_preserves_device_block() {
     // Second write: 4 bytes ≤ allocated 2 blocks → reuses the extent.
     store.write(inode, b"abcd".to_vec());
     let second = store.read(inode).expect("second record");
-    assert_eq!(first.device_block, second.device_block, "device_block must not change on in-place update");
+    assert_eq!(
+        first.device_block, second.device_block,
+        "device_block must not change on in-place update"
+    );
     assert_eq!(second.bytes, b"abcd");
 }
 
@@ -126,7 +129,10 @@ fn char_shrinking_write_releases_tail_as_free_extent_and_trim() {
     store.drain_freed_extents(); // clear startup trims
     store.write(inode, b"ab".to_vec()); // 1 block — tail freed
     let freed = store.drain_freed_extents();
-    assert!(!freed.is_empty(), "shrink must emit a TRIM extent for the released tail");
+    assert!(
+        !freed.is_empty(),
+        "shrink must emit a TRIM extent for the released tail"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -157,7 +163,10 @@ fn char_append_to_shared_blob_materializes_cow() {
     let src_rec = store.read(src).expect("src record");
     let dst_rec = store.read(dst).expect("dst record");
     assert_eq!(src_rec.bytes, b"original-extra");
-    assert_eq!(dst_rec.bytes, b"original", "clone must not be affected by append to source");
+    assert_eq!(
+        dst_rec.bytes, b"original",
+        "clone must not be affected by append to source"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +180,10 @@ fn char_dedup_identical_bytes_share_storage() {
     store.write(InodeId(13), b"dedup-payload".to_vec());
     let stats = store.dedupe_stats();
     assert_eq!(stats.logical_blocks, 2);
-    assert_eq!(stats.unique_blobs, 1, "identical payloads must share one blob");
+    assert_eq!(
+        stats.unique_blobs, 1,
+        "identical payloads must share one blob"
+    );
     assert_eq!(stats.deduplicated_blocks, 1);
 }
 
@@ -185,7 +197,10 @@ fn char_dedup_modifying_one_does_not_affect_other() {
     // Overwrite inode a — must not disturb inode b.
     store.write(a, b"different".to_vec());
     let rec_b = store.read(b).expect("inode b");
-    assert_eq!(rec_b.bytes, b"same", "modifying a must not affect b's bytes");
+    assert_eq!(
+        rec_b.bytes, b"same",
+        "modifying a must not affect b's bytes"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +216,10 @@ fn char_clone_then_write_source_preserves_target() {
     store.clone_for_inode(src, tgt);
     store.write(src, b"modified data".to_vec());
     let tgt_rec = store.read(tgt).expect("target record");
-    assert_eq!(tgt_rec.bytes, b"shared data", "clone must be unaffected by source write");
+    assert_eq!(
+        tgt_rec.bytes, b"shared data",
+        "clone must be unaffected by source write"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -255,7 +273,10 @@ fn char_random_payload_verifies_true() {
     let inode = InodeId(20);
     let payload = prng_bytes(0xCAFE_BABE, 1024);
     store.write(inode, payload);
-    assert!(store.verify(inode), "freshly written payload must verify clean");
+    assert!(
+        store.verify(inode),
+        "freshly written payload must verify clean"
+    );
 }
 
 #[test]
@@ -278,5 +299,8 @@ fn char_corrupted_data_block_detected_by_verify() {
     };
     // Reconstruct a store with the corrupted record.
     let store2 = BlockStore::from_records(vec![bad_rec]);
-    assert!(!store2.verify(inode), "mismatched checksum must be detected by verify");
+    assert!(
+        !store2.verify(inode),
+        "mismatched checksum must be detected by verify"
+    );
 }

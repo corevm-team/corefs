@@ -344,8 +344,7 @@ impl<'d> Journal<'d> {
     pub fn replay(&mut self) -> CoreFsResult<Vec<ReplayedTxn>> {
         let mut cursor = self.header.head_offset;
         let tail = self.header.tail_offset;
-        let mut pending: BTreeMap<u64, Vec<Op>> =
-            BTreeMap::new();
+        let mut pending: BTreeMap<u64, Vec<Op>> = BTreeMap::new();
         let mut applied: Vec<ReplayedTxn> = Vec::new();
         while cursor < tail {
             let rec = match self.read_record_at(cursor)? {

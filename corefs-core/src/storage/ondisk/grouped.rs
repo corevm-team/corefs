@@ -519,7 +519,7 @@ pub fn load_state_native_grouped(device: &dyn BlockDevice) -> CoreFsResult<Persi
         })?;
         // Reconstruct a BlockRecord (metadata-only) from on-disk extents.
         if on_disk.size_bytes > 0 || !on_disk.extents.is_empty() {
-            use crate::storage::block_store::{ExtentRef, EXTENT_COMPRESSED, EXTENT_ENCRYPTED};
+            use crate::storage::block_store::{EXTENT_COMPRESSED, EXTENT_ENCRYPTED, ExtentRef};
             let extent_refs: Vec<ExtentRef> = on_disk
                 .extents
                 .iter()
@@ -681,7 +681,12 @@ fn write_user_inode_from_record(
             if on_disk_extents.len() > super::inode::MAX_INLINE_EXTENTS {
                 on_disk_extents.truncate(super::inode::MAX_INLINE_EXTENTS);
             }
-            (on_disk_extents, rec.logical_size, rec.content_crc as u64, total_blocks)
+            (
+                on_disk_extents,
+                rec.logical_size,
+                rec.content_crc as u64,
+                total_blocks,
+            )
         }
     } else {
         (Vec::new(), 0u64, 0u64, 0u64)

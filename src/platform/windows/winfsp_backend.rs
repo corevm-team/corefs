@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Mike Strathmann
+// Copyright (c) 2026 Mike Strathmann
 // SPDX-License-Identifier: MIT
 
 use super::WindowsMountReport;
@@ -10,8 +10,8 @@ use crate::storage::volume_image::{self, DeviceImageCache};
 use corefs_core::platform::Timestamp;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::NTSTATUS;
@@ -19,12 +19,12 @@ use windows::Win32::System::Console::{
     CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
     SetConsoleCtrlHandler,
 };
+use winfsp::U16CStr;
 use winfsp::filesystem::{
     DirInfo, DirMarker, FileInfo, FileSecurity, FileSystemContext, OpenFileInfo, VolumeInfo,
     WideNameInfo,
 };
 use winfsp::host::{FileSystemHost, FileSystemParams, OperationGuardStrategy, VolumeParams};
-use winfsp::U16CStr;
 use winfsp_sys::{FILE_ACCESS_RIGHTS, FILE_FLAGS_AND_ATTRIBUTES, FspCleanupDelete};
 
 const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
@@ -169,7 +169,11 @@ impl CoreFsWinFsp {
     fn open_state(image_path: PathBuf, writable: bool) -> CoreFsResult<Arc<CoreFsState>> {
         let service = CoreFsService::load_image_from_path(&image_path)?;
         let flush_mode = windows_flush_mode();
-        let mut device = FileImageDevice::open(&image_path, !writable)?;
+        let mut device = if flush_mode == FlushMode::Strict {
+            FileImageDevice::open_with_write_through(&image_path, !writable, writable)?
+        } else {
+            FileImageDevice::open(&image_path, !writable)?
+        };
         if flush_mode == FlushMode::Deferred {
             device.set_defer_data_sync(true);
         }
@@ -189,7 +193,11 @@ impl CoreFsWinFsp {
         }))
     }
 
-    fn fill_file_info(service: &CoreFsService, path: &str, info: &mut FileInfo) -> winfsp::Result<()> {
+    fn fill_file_info(
+        service: &CoreFsService,
+        path: &str,
+        info: &mut FileInfo,
+    ) -> winfsp::Result<()> {
         if path == "/" {
             fill_root_info(service, info);
             return Ok(());
@@ -320,7 +328,11 @@ impl FileSystemContext for CoreFsWinFsp {
         _reparse_point_resolver: impl FnOnce(&U16CStr) -> Option<FileSecurity>,
     ) -> winfsp::Result<FileSecurity> {
         let path = corefs_path_from_wide(file_name)?;
-        let service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+        let service = self
+            .state
+            .service
+            .lock()
+            .map_err(|_| nt(STATUS_ACCESS_DENIED))?;
         let mut info = FileInfo::default();
         Self::fill_file_info(&service, &path, &mut info)?;
         Ok(FileSecurity {
@@ -338,7 +350,11 @@ impl FileSystemContext for CoreFsWinFsp {
         file_info: &mut OpenFileInfo,
     ) -> winfsp::Result<Self::FileContext> {
         let path = corefs_path_from_wide(file_name)?;
-        let service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+        let service = self
+            .state
+            .service
+            .lock()
+            .map_err(|_| nt(STATUS_ACCESS_DENIED))?;
         let kind = if path == "/" {
             InodeKind::Directory
         } else {
@@ -378,7 +394,11 @@ impl FileSystemContext for CoreFsWinFsp {
             return Err(nt(STATUS_OBJECT_NAME_COLLISION));
         }
 
-        let mut service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+        let mut service = self
+            .state
+            .service
+            .lock()
+            .map_err(|_| nt(STATUS_ACCESS_DENIED))?;
         if service.get_inode(&path).is_some() {
             return Err(nt(STATUS_OBJECT_NAME_COLLISION));
         }
@@ -414,7 +434,8 @@ impl FileSystemContext for CoreFsWinFsp {
     }
 
     fn cleanup(&self, context: &Self::FileContext, file_name: Option<&U16CStr>, flags: u32) {
-        if flags & FspCleanupDelete as u32 == 0 && !context.delete_on_cleanup.load(Ordering::SeqCst) {
+        if flags & FspCleanupDelete as u32 == 0 && !context.delete_on_cleanup.load(Ordering::SeqCst)
+        {
             return;
         }
         if !self.state.writable || context.path == "/" {
@@ -431,17 +452,33 @@ impl FileSystemContext for CoreFsWinFsp {
         }
     }
 
-    fn flush(&self, context: Option<&Self::FileContext>, file_info: &mut FileInfo) -> winfsp::Result<()> {
+    fn flush(
+        &self,
+        context: Option<&Self::FileContext>,
+        file_info: &mut FileInfo,
+    ) -> winfsp::Result<()> {
         if self.state.writable && self.state.flush_mode == FlushMode::Strict {
             self.state.persist_if_dirty()?;
         }
-        let service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+        let service = self
+            .state
+            .service
+            .lock()
+            .map_err(|_| nt(STATUS_ACCESS_DENIED))?;
         let path = context.map(|handle| handle.path.as_str()).unwrap_or("/");
         Self::fill_file_info(&service, path, file_info)
     }
 
-    fn get_file_info(&self, context: &Self::FileContext, file_info: &mut FileInfo) -> winfsp::Result<()> {
-        let service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+    fn get_file_info(
+        &self,
+        context: &Self::FileContext,
+        file_info: &mut FileInfo,
+    ) -> winfsp::Result<()> {
+        let service = self
+            .state
+            .service
+            .lock()
+            .map_err(|_| nt(STATUS_ACCESS_DENIED))?;
         Self::fill_file_info(&service, &context.path, file_info)
     }
 
@@ -456,7 +493,11 @@ impl FileSystemContext for CoreFsWinFsp {
             return Err(nt(STATUS_NOT_A_DIRECTORY));
         }
 
-        let service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+        let service = self
+            .state
+            .service
+            .lock()
+            .map_err(|_| nt(STATUS_ACCESS_DENIED))?;
         let mut entries = Vec::new();
         entries.push((".".to_string(), context.path.clone()));
         entries.push(("..".to_string(), parent_path(&context.path)));
@@ -469,9 +510,7 @@ impl FileSystemContext for CoreFsWinFsp {
             entries.push((name, path));
         }
 
-        let marker_name = marker
-            .inner_as_cstr()
-            .map(|value| value.to_string_lossy());
+        let marker_name = marker.inner_as_cstr().map(|value| value.to_string_lossy());
         let mut cursor = 0u32;
 
         for (name, path) in entries {
@@ -483,7 +522,9 @@ impl FileSystemContext for CoreFsWinFsp {
 
             let mut dir_info = DirInfo::<255>::new();
             Self::fill_file_info(&service, &path, dir_info.file_info_mut())?;
-            dir_info.set_name(name).map_err(|_| nt(STATUS_INVALID_PARAMETER))?;
+            dir_info
+                .set_name(name)
+                .map_err(|_| nt(STATUS_INVALID_PARAMETER))?;
             if !dir_info.append_to_buffer(buffer, &mut cursor) {
                 break;
             }
@@ -506,7 +547,11 @@ impl FileSystemContext for CoreFsWinFsp {
             return Err(nt(STATUS_OBJECT_NAME_COLLISION));
         }
 
-        let mut service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+        let mut service = self
+            .state
+            .service
+            .lock()
+            .map_err(|_| nt(STATUS_ACCESS_DENIED))?;
         if service.get_inode(&new_path).is_some() && !replace_if_exists {
             return Err(nt(STATUS_OBJECT_NAME_COLLISION));
         }
@@ -528,7 +573,11 @@ impl FileSystemContext for CoreFsWinFsp {
         file_info: &mut FileInfo,
     ) -> winfsp::Result<()> {
         self.ensure_writable()?;
-        let service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+        let service = self
+            .state
+            .service
+            .lock()
+            .map_err(|_| nt(STATUS_ACCESS_DENIED))?;
         Self::fill_file_info(&service, &context.path, file_info)
     }
 
@@ -540,12 +589,18 @@ impl FileSystemContext for CoreFsWinFsp {
     ) -> winfsp::Result<()> {
         self.ensure_writable()?;
         if delete_file && context.kind == InodeKind::Directory {
-            let service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+            let service = self
+                .state
+                .service
+                .lock()
+                .map_err(|_| nt(STATUS_ACCESS_DENIED))?;
             if !Self::is_directory_empty(&service, &context.path) {
                 return Err(nt(STATUS_DIRECTORY_NOT_EMPTY));
             }
         }
-        context.delete_on_cleanup.store(delete_file, Ordering::SeqCst);
+        context
+            .delete_on_cleanup
+            .store(delete_file, Ordering::SeqCst);
         Ok(())
     }
 
@@ -561,7 +616,11 @@ impl FileSystemContext for CoreFsWinFsp {
             return Err(nt(STATUS_FILE_IS_A_DIRECTORY));
         }
 
-        let mut service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+        let mut service = self
+            .state
+            .service
+            .lock()
+            .map_err(|_| nt(STATUS_ACCESS_DENIED))?;
         service
             .truncate_file(&context.path, new_size)
             .map_err(corefs_to_winfsp)?;
@@ -569,12 +628,21 @@ impl FileSystemContext for CoreFsWinFsp {
         Self::fill_file_info(&service, &context.path, file_info)
     }
 
-    fn read(&self, context: &Self::FileContext, buffer: &mut [u8], offset: u64) -> winfsp::Result<u32> {
+    fn read(
+        &self,
+        context: &Self::FileContext,
+        buffer: &mut [u8],
+        offset: u64,
+    ) -> winfsp::Result<u32> {
         if context.kind != InodeKind::File && context.kind != InodeKind::Symlink {
             return Err(nt(STATUS_FILE_IS_A_DIRECTORY));
         }
 
-        let service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+        let service = self
+            .state
+            .service
+            .lock()
+            .map_err(|_| nt(STATUS_ACCESS_DENIED))?;
         let bytes = service
             .read_file_range(&context.path, offset, buffer.len())
             .map_err(corefs_to_winfsp)?;
@@ -596,7 +664,11 @@ impl FileSystemContext for CoreFsWinFsp {
             return Err(nt(STATUS_FILE_IS_A_DIRECTORY));
         }
 
-        let mut service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+        let mut service = self
+            .state
+            .service
+            .lock()
+            .map_err(|_| nt(STATUS_ACCESS_DENIED))?;
         let current_size = service
             .get_inode(&context.path)
             .ok_or_else(|| nt(STATUS_OBJECT_NAME_NOT_FOUND))?
@@ -625,7 +697,11 @@ impl FileSystemContext for CoreFsWinFsp {
     }
 
     fn get_volume_info(&self, out_volume_info: &mut VolumeInfo) -> winfsp::Result<()> {
-        let service = self.state.service.lock().map_err(|_| nt(STATUS_ACCESS_DENIED))?;
+        let service = self
+            .state
+            .service
+            .lock()
+            .map_err(|_| nt(STATUS_ACCESS_DENIED))?;
         let used = service.logical_bytes_used() as u64;
         out_volume_info.total_size = VOLUME_SIZE_BYTES;
         out_volume_info.free_size = VOLUME_SIZE_BYTES.saturating_sub(used);
@@ -650,7 +726,11 @@ fn fill_root_info(service: &CoreFsService, info: &mut FileInfo) {
     let _ = service;
 }
 
-fn fill_inode_info(service: &CoreFsService, inode: &Inode, info: &mut FileInfo) -> winfsp::Result<()> {
+fn fill_inode_info(
+    service: &CoreFsService,
+    inode: &Inode,
+    info: &mut FileInfo,
+) -> winfsp::Result<()> {
     let size = match inode.kind {
         InodeKind::Directory => 0,
         InodeKind::File | InodeKind::Symlink => inode.size as u64,
@@ -803,4 +883,3 @@ trait Pipe: Sized {
 }
 
 impl<T> Pipe for T {}
-

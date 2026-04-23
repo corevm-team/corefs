@@ -257,8 +257,18 @@ fn incremental_restore_applies_delete() {
 fn restore_overwrites_existing_inode_by_path() {
     let mut state = mk_state();
     // Modifiziere a.txt: setze size=999
-    state.active_inodes.iter_mut().find(|i| i.path == "/a.txt").unwrap().size = 999;
-    state.active_inodes.iter_mut().find(|i| i.path == "/a.txt").unwrap().changed_at = t(1000);
+    state
+        .active_inodes
+        .iter_mut()
+        .find(|i| i.path == "/a.txt")
+        .unwrap()
+        .size = 999;
+    state
+        .active_inodes
+        .iter_mut()
+        .find(|i| i.path == "/a.txt")
+        .unwrap()
+        .changed_at = t(1000);
 
     let mut buf: Vec<u8> = Vec::new();
     stream_dump(&state, None, &mut buf, t(1000)).unwrap();
@@ -266,13 +276,23 @@ fn restore_overwrites_existing_inode_by_path() {
     let mut target = mk_state();
     // Ziel hat ursprüngliche Größe 5.
     assert_eq!(
-        target.active_inodes.iter().find(|i| i.path == "/a.txt").unwrap().size,
+        target
+            .active_inodes
+            .iter()
+            .find(|i| i.path == "/a.txt")
+            .unwrap()
+            .size,
         5
     );
     let mut reader = SliceReader::new(&buf);
     stream_restore(&mut target, &mut reader).unwrap();
     assert_eq!(
-        target.active_inodes.iter().find(|i| i.path == "/a.txt").unwrap().size,
+        target
+            .active_inodes
+            .iter()
+            .find(|i| i.path == "/a.txt")
+            .unwrap()
+            .size,
         999
     );
 }
@@ -343,8 +363,7 @@ fn blob_provider_contributes_active_content() {
     let state = mk_state();
     let mut buf: Vec<u8> = Vec::new();
     let mut p = FakeProvider;
-    let report =
-        stream_dump_with_blobs(&state, None, &mut buf, t(100), &mut p).unwrap();
+    let report = stream_dump_with_blobs(&state, None, &mut buf, t(100), &mut p).unwrap();
     assert_eq!(report.blob_records, 1);
 
     // Restore: Blob wird in einem neuen Snapshot installiert.
@@ -356,7 +375,10 @@ fn blob_provider_contributes_active_content() {
         .iter()
         .find(|s| s.name == "restore-blobs")
         .expect("restore-blobs snapshot installed");
-    assert_eq!(snap.file_data.get("/a.txt").map(|v| v.as_slice()), Some(&b"ACTIVE"[..]));
+    assert_eq!(
+        snap.file_data.get("/a.txt").map(|v| v.as_slice()),
+        Some(&b"ACTIVE"[..])
+    );
 }
 
 #[test]

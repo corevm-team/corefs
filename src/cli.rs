@@ -298,7 +298,9 @@ where
             }
             #[cfg(target_os = "windows")]
             {
-                println!("mounting CoreFS image read-write on {mount_point}; keep this process running");
+                println!(
+                    "mounting CoreFS image read-write on {mount_point}; keep this process running"
+                );
                 let report = windows::mount_image_as_drive(
                     image_path,
                     mount_point,

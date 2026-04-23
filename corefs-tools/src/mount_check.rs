@@ -14,7 +14,6 @@
 
 // `corefs-tools` is std-only (see crate-level docs).
 
-
 /// Result of a mount-status probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MountStatus {

@@ -167,7 +167,10 @@ impl Report for SnapshotCreateReport {
 }
 
 /// Erzeugt einen Snapshot der Image-Datei `path`.
-pub fn create(path: impl AsRef<Path>, options: &CreateOptions) -> ToolsResult<SnapshotCreateReport> {
+pub fn create(
+    path: impl AsRef<Path>,
+    options: &CreateOptions,
+) -> ToolsResult<SnapshotCreateReport> {
     let path = path.as_ref();
     let mut session = OdfFileSession::open(path)?;
     let (snap, _flush) = session.mutate(|svc| {
@@ -284,10 +287,7 @@ impl Report for SnapshotRestoreReport {
 }
 
 /// Stellt den Snapshot mit der ID `snapshot_id` in der Image-Datei `path` wieder her.
-pub fn restore(
-    path: impl AsRef<Path>,
-    snapshot_id: u64,
-) -> ToolsResult<SnapshotRestoreReport> {
+pub fn restore(path: impl AsRef<Path>, snapshot_id: u64) -> ToolsResult<SnapshotRestoreReport> {
     let path = path.as_ref();
     let mut session = OdfFileSession::open(path)?;
     let (inner, _flush) = session.mutate(|svc| svc.restore_snapshot(snapshot_id))?;

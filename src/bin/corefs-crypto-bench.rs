@@ -71,11 +71,16 @@ fn main() {
     let mut payload = vec![0u8; payload_mib * 1024 * 1024];
     let mut state: u64 = 0x12345678_9ABCDEF0;
     for b in payload.iter_mut() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *b = (state >> 33) as u8;
     }
 
-    println!("== corefs-crypto-bench: write + read {} MiB ==", payload_mib);
+    println!(
+        "== corefs-crypto-bench: write + read {} MiB ==",
+        payload_mib
+    );
 
     // Full: compression + encryption (default config).
     let cfg_full = CoreFsConfig::default();

@@ -10,7 +10,7 @@
 //! `crate::services::journal::*`-Pfade lauffähig.
 
 pub use corefs_core::services::journal::{
-    JournalEntry, JournalRecoverySummary, JournalReplayState, JournalRepairSummary,
+    JournalEntry, JournalRecoverySummary, JournalRepairSummary, JournalReplayState,
     JournalRuntimeState, JournalService, JournalTransaction, reconcile_persisted_state,
 };
 

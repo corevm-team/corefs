@@ -270,7 +270,10 @@ impl Report for InodeDumpReport {
         out.push_str(&format!("slot              : {}\n", self.slot));
         out.push_str(&format!("kind              : {}\n", self.kind));
         out.push_str(&format!("mode              : 0o{:o}\n", self.mode & 0o7777));
-        out.push_str(&format!("uid / gid         : {} / {}\n", self.uid, self.gid));
+        out.push_str(&format!(
+            "uid / gid         : {} / {}\n",
+            self.uid, self.gid
+        ));
         out.push_str(&format!("link count        : {}\n", self.link_count));
         out.push_str(&format!("flags             : 0x{:08x}\n", self.flags));
         out.push_str(&format!("size              : {} bytes\n", self.size_bytes));

@@ -3,9 +3,9 @@
 
 use crate::app::{CoreFsService, PersistedState};
 use crate::domain::inode::{Inode, InodeId, InodeKind};
-use corefs_core::platform::Timestamp;
 use crate::error::{CoreFsError, CoreFsResult};
 use crate::storage::volume_wal::{VolumeWal, WalOperation};
+use corefs_core::platform::Timestamp;
 use fuser::{
     FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate, ReplyData,
     ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
@@ -694,7 +694,9 @@ fn parse_datetime(s: &str) -> Option<Timestamp> {
     let min: u64 = time_parts.get(1)?.parse().ok()?;
     let sec: u64 = time_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
     let offset_secs = h * 3600 + min * 60 + sec;
-    Some(Timestamp::from_secs(base.as_secs().saturating_add(offset_secs)))
+    Some(Timestamp::from_secs(
+        base.as_secs().saturating_add(offset_secs),
+    ))
 }
 
 /// Returns days since Unix epoch (1970-01-01) for a proleptic Gregorian date.
@@ -760,13 +762,7 @@ impl CoreFsFuseMountRw {
             return;
         }
         // Collect all pending requests first to avoid borrow conflict.
-        let pending: Vec<_> = self
-            .ctl_listener
-            .as_ref()
-            .unwrap()
-            .rx
-            .try_iter()
-            .collect();
+        let pending: Vec<_> = self.ctl_listener.as_ref().unwrap().rx.try_iter().collect();
         for p in pending {
             let response = self.handle_online_request(&p.request);
             let _ = p.reply_tx.send(response);
@@ -795,9 +791,7 @@ impl CoreFsFuseMountRw {
                 OnlineResponse::Ok {
                     message: format!(
                         "scrub: checked_paths={} valid_blocks={} invalid_blocks={}",
-                        report.checked_paths,
-                        report.valid_blocks,
-                        report.invalid_blocks,
+                        report.checked_paths, report.valid_blocks, report.invalid_blocks,
                     ),
                 }
             }
@@ -914,16 +908,16 @@ impl CoreFsFuseMountRw {
         save_state_native_incremental(&mut device, &dirty_state)?;
 
         // Build ODF extents cache and restore file bytes from ODF device.
-        let odf_extents = crate::storage::ondisk::session::build_odf_extents_cache_pub(
-            &service.export_state(),
-        );
-        crate::storage::ondisk::session::restore_bytes_from_odf_device_pub(
-            &device,
-            &mut service,
-        )?;
+        let odf_extents =
+            crate::storage::ondisk::session::build_odf_extents_cache_pub(&service.export_state());
+        crate::storage::ondisk::session::restore_bytes_from_odf_device_pub(&device, &mut service)?;
         Ok(Self::from_service(
             service,
-            FuseBacking::Odf { device, image_path, odf_extents },
+            FuseBacking::Odf {
+                device,
+                image_path,
+                odf_extents,
+            },
         ))
     }
 
@@ -942,7 +936,11 @@ impl CoreFsFuseMountRw {
     ///   previous generation intact.
     fn persist(&mut self) -> CoreFsResult<()> {
         match &mut self.backing {
-            FuseBacking::File { path, device, cache } => {
+            FuseBacking::File {
+                path,
+                device,
+                cache,
+            } => {
                 // P3: incremental segment-level persist against the open
                 // FileImageDevice.  Block content is carried through via
                 // `persist_to_device_incremental_with_bytes` so the DATA
@@ -986,7 +984,10 @@ impl CoreFsFuseMountRw {
                     let total: usize = block_bytes.values().map(|v| v.len()).sum();
                     eprintln!(
                         "[fsync] state={:?} read_all_bytes={:?} inodes={} total={} KiB",
-                        _t_state, _t_bytes, block_bytes.len(), total / 1024
+                        _t_state,
+                        _t_bytes,
+                        block_bytes.len(),
+                        total / 1024
                     );
                 }
                 let _t_persist = std::time::Instant::now();
@@ -1022,7 +1023,11 @@ impl CoreFsFuseMountRw {
                         },
                     )?;
                 if _trace {
-                    eprintln!("[fsync] persist_device={:?} report={:?}", _t_persist.elapsed(), _report);
+                    eprintln!(
+                        "[fsync] persist_device={:?} report={:?}",
+                        _t_persist.elapsed(),
+                        _report
+                    );
                 }
 
                 let _ = self.service.take_dirty_inodes();
@@ -1037,7 +1042,11 @@ impl CoreFsFuseMountRw {
                 )?;
                 Ok(())
             }
-            FuseBacking::Odf { device, odf_extents, .. } => {
+            FuseBacking::Odf {
+                device,
+                odf_extents,
+                ..
+            } => {
                 let state = self.service.persisted_state();
                 let state = crate::storage::ondisk::session::write_bytes_to_odf_device_pub(
                     device,
@@ -1648,9 +1657,8 @@ impl CoreFsFuseMountRw {
             let logical_end = handle.committed_size + handle.data.len();
             let is_sequential = write_start == logical_end;
             let buffer_would_exceed = handle.data.len() + data.len() > flush_threshold;
-            let streaming = is_sequential
-                && buffer_would_exceed
-                && write_start >= handle.committed_size;
+            let streaming =
+                is_sequential && buffer_would_exceed && write_start >= handle.committed_size;
             let needs_session = streaming && handle.committed_size == 0;
             (streaming, needs_session)
         };

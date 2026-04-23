@@ -81,11 +81,7 @@ impl Keystore {
     /// Der Master-Key wird hier noch **nicht** benötigt — er wird erst
     /// beim [`Keystore::export_file`] (wrap) und [`Keystore::import_file`]
     /// (unwrap) gebraucht.
-    pub fn new(
-        volume_key: [u8; KEY_BYTES],
-        salt: [u8; SALT_BYTES],
-        volume_uuid: [u8; 16],
-    ) -> Self {
+    pub fn new(volume_key: [u8; KEY_BYTES], salt: [u8; SALT_BYTES], volume_uuid: [u8; 16]) -> Self {
         Self {
             volume_key,
             kdf: KdfConfig::with_salt(salt),
@@ -127,7 +123,11 @@ impl Keystore {
     ///
     /// Der Aufrufer liefert eine 12-Byte-Nonce (z. B. aus einem CSPRNG).
     /// Das Ergebnis trägt `nonce || ciphertext || tag`.
-    pub fn wrap(&self, master_key: &[u8; KEY_BYTES], nonce: [u8; NONCE_BYTES]) -> CoreFsResult<Vec<u8>> {
+    pub fn wrap(
+        &self,
+        master_key: &[u8; KEY_BYTES],
+        nonce: [u8; NONCE_BYTES],
+    ) -> CoreFsResult<Vec<u8>> {
         let cipher = ChaCha20Poly1305::new_from_slice(master_key)
             .map_err(|_| CoreFsError::State("keystore: invalid master key length".to_string()))?;
         let nonce_obj = Nonce::from_slice(&nonce);
@@ -216,10 +216,7 @@ impl Keystore {
     }
 
     /// Importiert einen Keystore aus einer persistierten Datei.
-    pub fn import_file(
-        file: &KeystoreFile,
-        master_key: &[u8; KEY_BYTES],
-    ) -> CoreFsResult<Self> {
+    pub fn import_file(file: &KeystoreFile, master_key: &[u8; KEY_BYTES]) -> CoreFsResult<Self> {
         if file.magic != KEYSTORE_MAGIC {
             return Err(CoreFsError::InvalidInput(format!(
                 "keystore: bad magic 0x{:016x} (expected 0x{:016x})",

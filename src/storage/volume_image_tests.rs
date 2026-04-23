@@ -364,7 +364,8 @@ fn repair_volume_image_reconstructs_corrupted_block_descriptors() {
     // written to the DATA segment via save_image_to_path.
     let mut svc = CoreFsService::format(CoreFsConfig::default());
     svc.create_file("/payload.txt", b"hello", &[]).unwrap();
-    svc.save_image_to_path(&path).expect("volume image should be written");
+    svc.save_image_to_path(&path)
+        .expect("volume image should be written");
     let mut bytes = fs::read(&path).expect("image should exist");
     let entries = parse_directory(
         &bytes[HEADER_SIZE..HEADER_SIZE + (EXPECTED_SEGMENT_KINDS.len() * SEGMENT_ENTRY_SIZE)],

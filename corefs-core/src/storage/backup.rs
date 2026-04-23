@@ -271,7 +271,12 @@ pub fn derive_volume_id(name: &str, created_at: Timestamp) -> [u8; 16] {
     let secs = created_at.as_secs();
     let nanos = created_at.subsec_nanos();
     let lo = fnv1a_64(name.as_bytes(), 0xcbf2_9ce4_8422_2325, secs, nanos);
-    let hi = fnv1a_64(name.as_bytes(), 0x8421_4733_9941_ab11, secs ^ 0xaaaa_5555_aaaa_5555, nanos.wrapping_mul(0x9e37_79b9));
+    let hi = fnv1a_64(
+        name.as_bytes(),
+        0x8421_4733_9941_ab11,
+        secs ^ 0xaaaa_5555_aaaa_5555,
+        nanos.wrapping_mul(0x9e37_79b9),
+    );
     let mut out = [0u8; 16];
     out[..8].copy_from_slice(&lo.to_le_bytes());
     out[8..].copy_from_slice(&hi.to_le_bytes());
@@ -332,15 +337,13 @@ fn read_frame<R: BackupReader>(reader: &mut R) -> CoreFsResult<Vec<u8>> {
 }
 
 fn encode<T: Serialize>(value: &T) -> CoreFsResult<Vec<u8>> {
-    bincode_compat::serialize(value).map_err(|e| {
-        CoreFsError::State(format!("backup: bincode serialize failed: {e}"))
-    })
+    bincode_compat::serialize(value)
+        .map_err(|e| CoreFsError::State(format!("backup: bincode serialize failed: {e}")))
 }
 
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> CoreFsResult<T> {
-    bincode_compat::deserialize(bytes).map_err(|e| {
-        CoreFsError::InvalidInput(format!("backup: bincode deserialize failed: {e}"))
-    })
+    bincode_compat::deserialize(bytes)
+        .map_err(|e| CoreFsError::InvalidInput(format!("backup: bincode deserialize failed: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -371,15 +374,9 @@ pub fn stream_dump_with_blobs<W: BackupWriter, P: BlobProvider>(
 ) -> CoreFsResult<DumpReport> {
     // --- Auswahl treffen ---
     let base_snapshot = if let Some(id) = since {
-        Some(
-            state
-                .snapshots
-                .iter()
-                .find(|s| s.id == id)
-                .ok_or_else(|| {
-                    CoreFsError::NotFound(format!("base snapshot {id} not found in state"))
-                })?,
-        )
+        Some(state.snapshots.iter().find(|s| s.id == id).ok_or_else(|| {
+            CoreFsError::NotFound(format!("base snapshot {id} not found in state"))
+        })?)
     } else {
         None
     };
@@ -435,14 +432,11 @@ pub fn stream_dump_with_blobs<W: BackupWriter, P: BlobProvider>(
 
     // Delete-Marker: Pfade im Basis-Snapshot, die jetzt nicht mehr existieren.
     if let Some(snap) = base_snapshot {
-        let mut active_paths: Vec<&String> =
-            state.active_inodes.iter().map(|i| &i.path).collect();
+        let mut active_paths: Vec<&String> = state.active_inodes.iter().map(|i| &i.path).collect();
         active_paths.sort();
         for path in snap.paths.iter() {
             if active_paths.binary_search(&path).is_err() {
-                entries.push(BackupEntry::Delete {
-                    path: path.clone(),
-                });
+                entries.push(BackupEntry::Delete { path: path.clone() });
                 delete_markers += 1;
             }
         }
@@ -577,9 +571,7 @@ pub fn stream_restore<R: BackupReader>(
                 metadata,
             } => {
                 // Overwrite-by-path
-                if let Some(existing) =
-                    state.active_inodes.iter_mut().find(|i| i.path == path)
-                {
+                if let Some(existing) = state.active_inodes.iter_mut().find(|i| i.path == path) {
                     existing.id = id;
                     existing.kind = kind;
                     existing.size = size;
@@ -625,9 +617,7 @@ pub fn stream_restore<R: BackupReader>(
             }
             BackupEntry::SnapshotRecord { snapshot } => {
                 // Duplikate per ID werden überschrieben.
-                if let Some(existing) =
-                    state.snapshots.iter_mut().find(|s| s.id == snapshot.id)
-                {
+                if let Some(existing) = state.snapshots.iter_mut().find(|s| s.id == snapshot.id) {
                     *existing = snapshot.clone();
                 } else {
                     if snapshot.id >= state.next_snapshot_id {
@@ -666,7 +656,7 @@ pub fn stream_restore<R: BackupReader>(
         _ => {
             return Err(CoreFsError::InvalidInput(
                 "backup: trailer is not an End entry".to_string(),
-            ))
+            ));
         }
     }
 
@@ -712,9 +702,7 @@ fn install_blobs(
             );
             file_data.insert(inode.path.clone(), data);
             // Gleichzeitig inode.size aktualisieren, damit Listings konsistent sind.
-            if let Some(inode_mut) =
-                state.active_inodes.iter_mut().find(|i| i.id == id)
-            {
+            if let Some(inode_mut) = state.active_inodes.iter_mut().find(|i| i.id == id) {
                 inode_mut.size = file_data.get(&inode_mut.path).map(|v| v.len()).unwrap_or(0);
             }
         }

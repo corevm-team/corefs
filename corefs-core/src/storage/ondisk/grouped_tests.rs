@@ -70,7 +70,9 @@ fn sample_inode(id: u64, path: &str, kind: InodeKind, size: usize) -> Inode {
 
 /// Build a BlockRecord for grouped tests (no bytes in RAM).
 fn make_record(inode_id: InodeId, size: usize, content: &[u8]) -> BlockRecord {
-    let crc = if content.is_empty() { 0 } else {
+    let crc = if content.is_empty() {
+        0
+    } else {
         crate::storage::ondisk::checksum::Crc32c::hash(content)
     };
     BlockRecord {
@@ -146,7 +148,9 @@ fn populated_state_grouped_roundtrip() {
         );
         state.active_inodes.push(inode.clone());
         // New-style: no bytes in BlockRecord
-        state.block_records.push(make_record(inode.id, content.len(), content.as_bytes()));
+        state
+            .block_records
+            .push(make_record(inode.id, content.len(), content.as_bytes()));
     }
 
     let report = save_state_native_grouped(&mut dev, &state).unwrap();
@@ -176,7 +180,9 @@ fn extents_land_in_home_group() {
             512,
         );
         state.active_inodes.push(inode.clone());
-        state.block_records.push(make_record(inode.id, 512, &alloc::vec![i as u8; 512]));
+        state
+            .block_records
+            .push(make_record(inode.id, 512, &alloc::vec![i as u8; 512]));
     }
     save_state_native_grouped(&mut dev, &state).unwrap();
 
@@ -230,7 +236,9 @@ fn per_group_bitmap_crc_is_persisted() {
     state
         .active_inodes
         .push(sample_inode(1, "/x", InodeKind::File, 256));
-    state.block_records.push(make_record(InodeId(1), 256, &alloc::vec![0xABu8; 256]));
+    state
+        .block_records
+        .push(make_record(InodeId(1), 256, &alloc::vec![0xABu8; 256]));
     save_state_native_grouped(&mut dev, &state).unwrap();
 
     let table_bytes = dev

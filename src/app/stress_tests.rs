@@ -39,10 +39,26 @@ fn stress_fs() -> CoreFsService {
 
 fn assert_fsck_clean(fs: &CoreFsService, context: &str) {
     let r = fs.fsck();
-    assert_eq!(r.missing_blocks, Vec::<String>::new(), "fsck missing_blocks [{context}]");
-    assert!(r.orphaned_blocks.is_empty(), "fsck orphaned_blocks [{context}]: {:?}", r.orphaned_blocks);
-    assert!(r.size_mismatches.is_empty(), "fsck size_mismatches [{context}]: {:?}", r.size_mismatches);
-    assert!(r.checksum_failures.is_empty(), "fsck checksum_failures [{context}]: {:?}", r.checksum_failures);
+    assert_eq!(
+        r.missing_blocks,
+        Vec::<String>::new(),
+        "fsck missing_blocks [{context}]"
+    );
+    assert!(
+        r.orphaned_blocks.is_empty(),
+        "fsck orphaned_blocks [{context}]: {:?}",
+        r.orphaned_blocks
+    );
+    assert!(
+        r.size_mismatches.is_empty(),
+        "fsck size_mismatches [{context}]: {:?}",
+        r.size_mismatches
+    );
+    assert!(
+        r.checksum_failures.is_empty(),
+        "fsck checksum_failures [{context}]: {:?}",
+        r.checksum_failures
+    );
 }
 
 // ----- a1: many files in a single directory ---------------------------------
@@ -74,9 +90,7 @@ fn a1_many_files_in_catalog() {
 fn a2_large_single_file() {
     let mut fs = stress_fs();
     // 2 MiB payload (larger values would slow the test without adding coverage).
-    let payload: Vec<u8> = (0..2 * 1024 * 1024)
-        .map(|i| (i % 251) as u8)
-        .collect();
+    let payload: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
 
     fs.create_file("/bigfile", &payload, &[]).unwrap();
 
@@ -226,8 +240,7 @@ fn a7_dedup_defrag_optimise_cascade() {
     // full optimisation pipeline at scale — dedup audit + defrag +
     // optimise — and verifying that all files survive unscathed.
     for i in 0..500 {
-        fs.create_file(&format!("/f{i:03}"), payload, &[])
-            .unwrap();
+        fs.create_file(&format!("/f{i:03}"), payload, &[]).unwrap();
     }
 
     // Run the full optimisation pipeline.

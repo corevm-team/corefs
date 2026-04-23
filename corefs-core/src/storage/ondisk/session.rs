@@ -219,12 +219,9 @@ mod tests {
             capacity_bytes: 4 * 1024 * 1024,
             ..OdfSessionOptions::with_defaults()
         };
-        let session = OdfDeviceSession::format_new_at(
-            make_dev(4 * 1024 * 1024),
-            &opts,
-            Timestamp::EPOCH,
-        )
-        .expect("format ok");
+        let session =
+            OdfDeviceSession::format_new_at(make_dev(4 * 1024 * 1024), &opts, Timestamp::EPOCH)
+                .expect("format ok");
         // Zustand ist leer
         assert!(session.state().active_inodes.is_empty());
         assert!(session.state().clean_unmount);

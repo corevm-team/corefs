@@ -4,7 +4,7 @@
 use crate::config::CoreFsConfig;
 use crate::storage::block_device::{BlockDevice, MemoryDevice};
 use crate::storage::ondisk::layout::BLOCK_SIZE;
-use crate::storage::ondisk::scrub::{run, ScrubPlan, ScrubReport};
+use crate::storage::ondisk::scrub::{ScrubPlan, ScrubReport, run};
 use crate::storage::ondisk::session::{OdfDeviceSession, OdfSessionOptions};
 
 fn populated_device() -> Box<dyn BlockDevice> {

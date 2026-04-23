@@ -90,14 +90,23 @@ fn write_inode_content(
     // and create the BlockRecord manually.
     // We'll use a high data block offset (block 500+) to avoid ODF metadata.
     let base_block: u64 = 500;
-    let needed_blocks = if bytes.is_empty() { 0u64 } else { (bytes.len() as u64).div_ceil(BLOCK_SIZE) };
+    let needed_blocks = if bytes.is_empty() {
+        0u64
+    } else {
+        (bytes.len() as u64).div_ceil(BLOCK_SIZE)
+    };
     if needed_blocks > 0 {
         let padded_len = (needed_blocks * BLOCK_SIZE) as usize;
         let mut buf = alloc::vec![0u8; padded_len];
         buf[..bytes.len()].copy_from_slice(bytes);
-        dev.write_at(base_block * BLOCK_SIZE, &buf).expect("write ok");
+        dev.write_at(base_block * BLOCK_SIZE, &buf)
+            .expect("write ok");
     }
-    let crc = if bytes.is_empty() { 0u32 } else { crate::storage::ondisk::checksum::Crc32c::hash(bytes) };
+    let crc = if bytes.is_empty() {
+        0u32
+    } else {
+        crate::storage::ondisk::checksum::Crc32c::hash(bytes)
+    };
     // Remove any existing record for this inode.
     state.block_records.retain(|r| r.inode != inode.id);
     if !bytes.is_empty() {
@@ -169,7 +178,10 @@ fn single_file_roundtrip() {
     assert_eq!(loaded.active_inodes[0].id, inode.id);
     assert_eq!(loaded.active_inodes[0].path, inode.path);
     assert_eq!(loaded.block_records.len(), 1);
-    assert_eq!(read_inode_bytes(&dev, &loaded.block_records[0]), b"hello, world!");
+    assert_eq!(
+        read_inode_bytes(&dev, &loaded.block_records[0]),
+        b"hello, world!"
+    );
     // data_crc should be set to the CRC32C of the content.
     let expected_crc = u32::from(crate::storage::ondisk::checksum::Crc32c::hash(
         b"hello, world!",
@@ -358,7 +370,12 @@ fn incremental_skips_unchanged_inodes() {
     let mut state = empty_state();
     for i in 1..=5 {
         let payload = alloc::format!("v1-{i}");
-        let inode = sample_inode(i as u64, &alloc::format!("/f{i}"), InodeKind::File, payload.len());
+        let inode = sample_inode(
+            i as u64,
+            &alloc::format!("/f{i}"),
+            InodeKind::File,
+            payload.len(),
+        );
         state.active_inodes.push(inode.clone());
         state.block_records.push(BlockRecord {
             inode: inode.id,
@@ -388,7 +405,12 @@ fn incremental_classifies_create_update_remove() {
     format_device(&mut dev, &default_options()).unwrap();
     let mut s1 = empty_state();
     let push = |state: &mut PersistedState, id: u64, content: &str| {
-        let inode = sample_inode(id, &alloc::format!("/f{id}"), InodeKind::File, content.len());
+        let inode = sample_inode(
+            id,
+            &alloc::format!("/f{id}"),
+            InodeKind::File,
+            content.len(),
+        );
         state.active_inodes.push(inode.clone());
         state.block_records.push(BlockRecord {
             inode: inode.id,
@@ -447,8 +469,7 @@ fn dirty_incremental_persists_metadata_only_update() {
     state.active_inodes[0].path = "/renamed".into();
     state.active_inodes[0].metadata.mode = 0o600;
     state.active_inodes[0].touch_changed_at(Timestamp::EPOCH);
-    let report =
-        save_state_native_incremental_dirty(&mut dev, &state, &[InodeId(1)], &[]).unwrap();
+    let report = save_state_native_incremental_dirty(&mut dev, &state, &[InodeId(1)], &[]).unwrap();
     assert_eq!(report.updated, 1);
     assert_eq!(report.created, 0);
     assert_eq!(report.removed, 0);
@@ -558,8 +579,7 @@ fn dirty_incremental_releases_removed_inode_slot() {
     save_state_native(&mut dev, &state).unwrap();
 
     state.active_inodes.clear();
-    let report =
-        save_state_native_incremental_dirty(&mut dev, &state, &[], &[InodeId(1)]).unwrap();
+    let report = save_state_native_incremental_dirty(&mut dev, &state, &[], &[InodeId(1)]).unwrap();
     assert_eq!(report.removed, 1);
 
     let loaded = load_state_native(&dev).unwrap();
@@ -617,7 +637,8 @@ fn incremental_passes_fsck() {
     }
     save_state_native(&mut dev, &state).unwrap();
     // Mutate one inode's content CRC.
-    state.block_records[1].content_crc = crate::storage::ondisk::checksum::Crc32c::hash(b"new content for inode 2");
+    state.block_records[1].content_crc =
+        crate::storage::ondisk::checksum::Crc32c::hash(b"new content for inode 2");
     state.active_inodes[1].size = 23;
     save_state_native_incremental(&mut dev, &state).unwrap();
 

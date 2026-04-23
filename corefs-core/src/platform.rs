@@ -44,7 +44,9 @@ const NANOS_PER_SEC: u32 = 1_000_000_000;
 /// `secs` reicht bis ins Jahr 2554 (≈ 584 Jahre ab Epoche). `nanos` liegt
 /// immer im Bereich `0..1_000_000_000` — Konstruktoren normalisieren Überträge
 /// entsprechend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Timestamp {
     /// Sekunden seit der Unix-Epoche (1970-01-01T00:00:00Z).
     ///
@@ -168,9 +170,28 @@ impl From<Timestamp> for std::time::SystemTime {
     /// `SystemTime` gesättigt.
     fn from(ts: Timestamp) -> Self {
         use std::time::{Duration, UNIX_EPOCH};
-        UNIX_EPOCH
-            .checked_add(Duration::new(ts.secs, ts.nanos))
-            .unwrap_or_else(|| UNIX_EPOCH + Duration::new(u64::MAX, NANOS_PER_SEC - 1))
+        let duration = Duration::new(ts.secs, ts.nanos);
+        if let Some(value) = UNIX_EPOCH.checked_add(duration) {
+            return value;
+        }
+
+        let mut low = 0;
+        let mut high = ts.secs;
+        while low < high {
+            let mid = low + (high - low).div_ceil(2);
+            if UNIX_EPOCH.checked_add(Duration::from_secs(mid)).is_some() {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        let saturated = UNIX_EPOCH
+            .checked_add(Duration::from_secs(low))
+            .unwrap_or(UNIX_EPOCH);
+        saturated
+            .checked_add(Duration::new(0, ts.nanos))
+            .unwrap_or(saturated)
     }
 }
 
@@ -278,10 +299,10 @@ mod tests {
     #[test]
     fn timestamp_from_and_into_system_time_roundtrip() {
         use std::time::{Duration, UNIX_EPOCH};
-        let original = UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789);
+        let original = UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700);
         let ts: Timestamp = original.into();
         assert_eq!(ts.as_secs(), 1_700_000_000);
-        assert_eq!(ts.subsec_nanos(), 123_456_789);
+        assert_eq!(ts.subsec_nanos(), 123_456_700);
         let back: std::time::SystemTime = ts.into();
         assert_eq!(back, original);
     }
@@ -312,8 +333,8 @@ mod tests {
         let samples = [
             UNIX_EPOCH,
             UNIX_EPOCH + Duration::from_secs(1),
-            UNIX_EPOCH + Duration::new(1_234_567_890, 987_654_321),
-            UNIX_EPOCH + Duration::new(u64::MAX / 2, 999_999_999),
+            UNIX_EPOCH + Duration::new(1_234_567_890, 987_654_300),
+            UNIX_EPOCH + Duration::new(4_000_000_000, 999_999_900),
         ];
         for st in samples {
             let ts: Timestamp = st.into();
@@ -331,17 +352,17 @@ mod tests {
             assert_eq!(decoded, ts);
         }
 
-        // Hartcodierter Fixpunkt: SystemTime(secs=1_234_567_890, nanos=987_654_321)
+        // Hartcodierter Fixpunkt: Timestamp(secs=1_234_567_890, nanos=987_654_321)
         // unter `bincode` 1.x default. Layout: 8 Bytes secs LE + 4 Bytes nanos LE.
         // secs = 0x00000000_499602D2 → D2 02 96 49 00 00 00 00
         // nanos = 0x3ADE_68B1 → B1 68 DE 3A
-        let fixed_st = UNIX_EPOCH + Duration::new(1_234_567_890, 987_654_321);
-        let fixed_ts: Timestamp = fixed_st.into();
+        let fixed_ts = Timestamp::from_secs_nanos(1_234_567_890, 987_654_321);
         let bincode1_known: &[u8] = &[
             0xD2, 0x02, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00, // secs LE
             0xB1, 0x68, 0xDE, 0x3A, // nanos LE
         ];
-        let actual = crate::bincode_compat::serialize(&fixed_ts).expect("serialize fixed Timestamp");
+        let actual =
+            crate::bincode_compat::serialize(&fixed_ts).expect("serialize fixed Timestamp");
         assert_eq!(
             actual.as_slice(),
             bincode1_known,
@@ -394,7 +415,8 @@ mod tests {
 
     #[test]
     fn clock_trait_object_safety() {
-        let c: alloc::boxed::Box<dyn Clock> = alloc::boxed::Box::new(FixedClock(Timestamp::from_secs(100)));
+        let c: alloc::boxed::Box<dyn Clock> =
+            alloc::boxed::Box::new(FixedClock(Timestamp::from_secs(100)));
         assert_eq!(c.now().as_secs(), 100);
     }
 

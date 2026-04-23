@@ -102,8 +102,11 @@ fn dump_json_render_contains_bytes_written_field() {
 #[test]
 fn restore_from_missing_input_errors() {
     let tgt = fresh_image("restore-missing");
-    let err = restore(&tgt, Some(std::path::Path::new("/nope/corefs/does/not/exist.bkp")))
-        .unwrap_err();
+    let err = restore(
+        &tgt,
+        Some(std::path::Path::new("/nope/corefs/does/not/exist.bkp")),
+    )
+    .unwrap_err();
     let msg = format!("{err:?}");
     assert!(msg.contains("open input") || msg.contains("No such file"));
     let _ = std::fs::remove_file(&tgt);

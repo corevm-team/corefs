@@ -212,9 +212,7 @@ impl PersistedState {
                     continue;
                 }
                 Some(_) => {
-                    if let Some(inode) =
-                        self.active_inodes.iter_mut().find(|i| &i.path == path)
-                    {
+                    if let Some(inode) = self.active_inodes.iter_mut().find(|i| &i.path == path) {
                         inode.kind = snap_inode.kind;
                         inode.size = snap_inode.size;
                         inode.created_at = snap_inode.created_at;
@@ -367,27 +365,21 @@ impl PersistedState {
                     applied_structural += 1;
                 }
                 WalOperation::DeletePath { path } => {
-                    if let Some(pos) =
-                        self.active_inodes.iter().position(|i| i.path == path)
-                    {
+                    if let Some(pos) = self.active_inodes.iter().position(|i| i.path == path) {
                         let node = self.active_inodes.remove(pos);
                         self.deleted_inodes.push(node);
                     }
                     applied_structural += 1;
                 }
                 WalOperation::RenamePath { from, to } => {
-                    if let Some(inode) =
-                        self.active_inodes.iter_mut().find(|i| i.path == from)
-                    {
+                    if let Some(inode) = self.active_inodes.iter_mut().find(|i| i.path == from) {
                         inode.path = to;
                         inode.changed_at = now;
                     }
                     applied_structural += 1;
                 }
                 WalOperation::TruncateInode { inode, size } => {
-                    if let Some(node) =
-                        self.active_inodes.iter_mut().find(|i| i.id == inode)
-                    {
+                    if let Some(node) = self.active_inodes.iter_mut().find(|i| i.id == inode) {
                         node.size = size;
                         node.modified_at = now;
                         node.changed_at = now;
@@ -419,9 +411,7 @@ impl PersistedState {
         })
     }
 
-    pub fn defragment_in_place(
-        &mut self,
-    ) -> crate::storage::block_store::DefragmentationReport {
+    pub fn defragment_in_place(&mut self) -> crate::storage::block_store::DefragmentationReport {
         use crate::storage::block_store::BlockStore;
         let block_size = self.volume.block_size;
         let mut store = BlockStore::from_records_with_allocator(
@@ -575,7 +565,12 @@ mod tests {
         }
     }
 
-    fn push_snapshot(state: &mut PersistedState, id: u64, inodes: Vec<(String, SnapshotInode)>, data: Vec<(String, Vec<u8>)>) {
+    fn push_snapshot(
+        state: &mut PersistedState,
+        id: u64,
+        inodes: Vec<(String, SnapshotInode)>,
+        data: Vec<(String, Vec<u8>)>,
+    ) {
         let mut inode_map: BTreeMap<String, SnapshotInode> = BTreeMap::new();
         for (p, si) in &inodes {
             inode_map.insert(p.clone(), si.clone());
@@ -688,7 +683,11 @@ mod tests {
         assert_eq!(f.size, 2);
         // InodeId unchanged (overwrote the existing entry).
         assert_eq!(f.id, InodeId(7));
-        let br = state.block_records.iter().find(|r| r.inode == f.id).unwrap();
+        let br = state
+            .block_records
+            .iter()
+            .find(|r| r.inode == f.id)
+            .unwrap();
         // Extent-based design: logical_size reflects the snapshot data length.
         assert_eq!(br.logical_size, 2);
     }
@@ -837,9 +836,7 @@ mod tests {
         assert!(state.pending_wal.is_none());
 
         // Rename took effect.
-        assert!(
-            state.active_inodes.iter().any(|i| i.path == "/renamed.txt")
-        );
+        assert!(state.active_inodes.iter().any(|i| i.path == "/renamed.txt"));
         assert!(!state.active_inodes.iter().any(|i| i.path == "/old.txt"));
         // Truncate size applied.
         let node = state
@@ -851,12 +848,7 @@ mod tests {
         // Dir present.
         assert!(state.active_inodes.iter().any(|i| i.path == "/dir"));
         // CreateFile then DeletePath => file is now in deleted_inodes.
-        assert!(
-            state
-                .deleted_inodes
-                .iter()
-                .any(|i| i.path == "/dir/file")
-        );
+        assert!(state.deleted_inodes.iter().any(|i| i.path == "/dir/file"));
         // Audit journal has an entry.
         assert!(
             state

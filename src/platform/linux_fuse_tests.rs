@@ -258,13 +258,19 @@ fn odf_rw_persist_is_incremental() {
     // Reach into the underlying device to read the incremental report.
     // Use write_bytes_to_odf_device first to ensure correct ODF extents.
     let state = mount.service.persisted_state();
-    if let FuseBacking::Odf { device, odf_extents, .. } = &mut mount.backing {
+    if let FuseBacking::Odf {
+        device,
+        odf_extents,
+        ..
+    } = &mut mount.backing
+    {
         let state = crate::storage::ondisk::session::write_bytes_to_odf_device_pub(
             device,
             &mount.service,
             state,
             odf_extents,
-        ).expect("prepare bytes");
+        )
+        .expect("prepare bytes");
         let report = save_state_native_incremental(device, &state).expect("incr");
         // Initial file + 9 unchanged from the initial population + the
         // churned file = 9 unchanged minimum (being conservative).
@@ -352,7 +358,14 @@ fn rw_mount_from_demo() -> CoreFsFuseMountRw {
     fs.create_directory("/docs").expect("dir");
     fs.create_file("/docs/readme.txt", b"hello", &[])
         .expect("file");
-    CoreFsFuseMountRw::from_service(fs, FuseBacking::File { path, device: None, cache: None })
+    CoreFsFuseMountRw::from_service(
+        fs,
+        FuseBacking::File {
+            path,
+            device: None,
+            cache: None,
+        },
+    )
 }
 
 #[test]
@@ -666,7 +679,11 @@ fn statfs_reports_capacity_and_decreases_free_blocks_with_data() {
     // Empty mount: all blocks should be free.
     let empty = CoreFsFuseMountRw::from_service(
         CoreFsService::format(CoreFsConfig::default()),
-        FuseBacking::File { path: PathBuf::from("/tmp/test.img"), device: None, cache: None },
+        FuseBacking::File {
+            path: PathBuf::from("/tmp/test.img"),
+            device: None,
+            cache: None,
+        },
     );
     let total = fuse_total_blocks();
     let free_empty = fuse_free_blocks(&empty.nodes_by_ino);
@@ -676,8 +693,14 @@ fn statfs_reports_capacity_and_decreases_free_blocks_with_data() {
     let mut fs = CoreFsService::format(CoreFsConfig::default());
     fs.create_file("/big.bin", &vec![0u8; 8192], &[])
         .expect("file");
-    let mount =
-        CoreFsFuseMountRw::from_service(fs, FuseBacking::File { path: PathBuf::from("/tmp/test.img"), device: None, cache: None });
+    let mount = CoreFsFuseMountRw::from_service(
+        fs,
+        FuseBacking::File {
+            path: PathBuf::from("/tmp/test.img"),
+            device: None,
+            cache: None,
+        },
+    );
     let free_with_data = fuse_free_blocks(&mount.nodes_by_ino);
     assert!(
         free_with_data < total,
@@ -724,8 +747,14 @@ fn rw_mount_rename_directory_cascades_in_indexes() {
     fs.create_directory("/src/utils").expect("subdir");
     fs.create_file("/src/utils/helper.rs", b"//h", &[])
         .expect("file");
-    let mut mount =
-        CoreFsFuseMountRw::from_service(fs, FuseBacking::File { path: PathBuf::from("/tmp/test.img"), device: None, cache: None });
+    let mut mount = CoreFsFuseMountRw::from_service(
+        fs,
+        FuseBacking::File {
+            path: PathBuf::from("/tmp/test.img"),
+            device: None,
+            cache: None,
+        },
+    );
 
     mount
         .service
@@ -764,7 +793,14 @@ fn rw_mount_persist_saves_image_and_clears_dirty() {
     let mut fs = CoreFsService::format(CoreFsConfig::default());
     fs.create_file("/hello.txt", b"persisted", &[])
         .expect("file");
-    let mut mount = CoreFsFuseMountRw::from_service(fs, FuseBacking::File { path: path.clone(), device: None, cache: None });
+    let mut mount = CoreFsFuseMountRw::from_service(
+        fs,
+        FuseBacking::File {
+            path: path.clone(),
+            device: None,
+            cache: None,
+        },
+    );
     mount.dirty = true;
 
     assert!(mount.flush_to_backing().is_ok());
@@ -879,7 +915,14 @@ fn rw_mount_with_snapshot() -> CoreFsFuseMountRw {
     // Now write v2 so the live file differs from the snapshot.
     fs.write_file("/data/hello.txt", b"v2 content")
         .expect("write v2");
-    CoreFsFuseMountRw::from_service(fs, FuseBacking::File { path, device: None, cache: None })
+    CoreFsFuseMountRw::from_service(
+        fs,
+        FuseBacking::File {
+            path,
+            device: None,
+            cache: None,
+        },
+    )
 }
 
 #[test]

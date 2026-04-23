@@ -155,7 +155,9 @@ fn i3_silent_data_block_corruption_is_caught_by_data_crc() {
         let slot = summaries[0].slot;
         reader.read_on_disk_inode(slot).unwrap().extents[0].physical_block
     };
-    let mut raw = dev_box.read_at(data_block * BLOCK_SIZE, BLOCK_SIZE).unwrap();
+    let mut raw = dev_box
+        .read_at(data_block * BLOCK_SIZE, BLOCK_SIZE)
+        .unwrap();
     raw[3] ^= 0xFF;
     dev_box.write_at(data_block * BLOCK_SIZE, &raw).unwrap();
 

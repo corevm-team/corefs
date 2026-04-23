@@ -144,7 +144,7 @@ fn read_primary(device: &dyn BlockDevice) -> CoreFsResult<Superblock> {
 mod tests {
     use super::*;
     use crate::storage::block_device::MemoryDevice;
-    use crate::storage::ondisk::volume::{format_device, FormatOptions};
+    use crate::storage::ondisk::volume::{FormatOptions, format_device};
     use alloc::boxed::Box;
 
     fn make_volume(device_capacity_bytes: u64, fs_capacity_blocks: u64) -> Box<dyn BlockDevice> {

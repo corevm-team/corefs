@@ -35,13 +35,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // ---------------------------------------------------------------------------
 
 mod rand_bytes {
-    use std::fs::File;
-    use std::io::Read;
+    use std::io::{Error, ErrorKind, Result};
 
-    pub fn fill_random(buf: &mut [u8]) -> std::io::Result<()> {
-        let mut f = File::open("/dev/urandom")?;
-        f.read_exact(buf)?;
-        Ok(())
+    pub fn fill_random(buf: &mut [u8]) -> Result<()> {
+        getrandom::getrandom(buf)
+            .map_err(|e| Error::new(ErrorKind::Other, format!("getrandom: {e}")))
     }
 }
 
@@ -57,9 +55,7 @@ fn now() -> Timestamp {
 }
 
 fn read_master_key(path: &Path) -> ToolsResult<[u8; KEY_BYTES]> {
-    let meta = fs::metadata(path).map_err(|e| {
-        te(format!("master-key {}: {e}", path.display()))
-    })?;
+    let meta = fs::metadata(path).map_err(|e| te(format!("master-key {}: {e}", path.display())))?;
     if meta.len() != KEY_BYTES as u64 {
         return Err(ToolsError::InvalidArgument(format!(
             "master-key {}: expected exactly {KEY_BYTES} bytes, got {}",
@@ -67,8 +63,8 @@ fn read_master_key(path: &Path) -> ToolsResult<[u8; KEY_BYTES]> {
             meta.len()
         )));
     }
-    let mut f = File::open(path)
-        .map_err(|e| te(format!("open master-key {}: {e}", path.display())))?;
+    let mut f =
+        File::open(path).map_err(|e| te(format!("open master-key {}: {e}", path.display())))?;
     let mut key = [0u8; KEY_BYTES];
     f.read_exact(&mut key)
         .map_err(|e| te(format!("read master-key {}: {e}", path.display())))?;
@@ -76,7 +72,10 @@ fn read_master_key(path: &Path) -> ToolsResult<[u8; KEY_BYTES]> {
 }
 
 fn parse_uuid_hex(s: &str) -> ToolsResult<[u8; 16]> {
-    let clean: String = s.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+    let clean: String = s
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect();
     if clean.len() != 32 {
         return Err(ToolsError::InvalidArgument(format!(
             "volume-uuid: expected 32 hex chars (got {})",
@@ -85,16 +84,15 @@ fn parse_uuid_hex(s: &str) -> ToolsResult<[u8; 16]> {
     }
     let mut out = [0u8; 16];
     for i in 0..16 {
-        out[i] = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16).map_err(|e| {
-            ToolsError::InvalidArgument(format!("volume-uuid: not hex ({e})"))
-        })?;
+        out[i] = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16)
+            .map_err(|e| ToolsError::InvalidArgument(format!("volume-uuid: not hex ({e})")))?;
     }
     Ok(out)
 }
 
 fn write_keystore_file(path: &Path, file: &KeystoreFile) -> ToolsResult<()> {
-    let bytes = bincode_compat::serialize(file)
-        .map_err(|e| te(format!("serialize keystore: {e}")))?;
+    let bytes =
+        bincode_compat::serialize(file).map_err(|e| te(format!("serialize keystore: {e}")))?;
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -107,11 +105,10 @@ fn write_keystore_file(path: &Path, file: &KeystoreFile) -> ToolsResult<()> {
 }
 
 fn read_keystore_file(path: &Path) -> ToolsResult<KeystoreFile> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| te(format!("read keystore {}: {e}", path.display())))?;
-    let file: KeystoreFile = bincode_compat::deserialize(&bytes).map_err(|e| {
-        te(format!("deserialize keystore {}: {e}", path.display()))
-    })?;
+    let bytes =
+        std::fs::read(path).map_err(|e| te(format!("read keystore {}: {e}", path.display())))?;
+    let file: KeystoreFile = bincode_compat::deserialize(&bytes)
+        .map_err(|e| te(format!("deserialize keystore {}: {e}", path.display())))?;
     Ok(file)
 }
 
@@ -172,9 +169,7 @@ pub fn init(
         .export_file(&master, nonce, now())
         .map_err(ToolsError::from)?;
     write_keystore_file(keystore_path, &file)?;
-    let bytes_written = fs::metadata(keystore_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let bytes_written = fs::metadata(keystore_path).map(|m| m.len()).unwrap_or(0);
 
     let uuid_str = uuid
         .iter()
@@ -206,7 +201,10 @@ pub struct KeystoreRotateReport {
 
 impl Report for KeystoreRotateReport {
     fn summary(&self) -> String {
-        format!("keystore rotated {} (uuid={})", self.keystore_path, self.volume_uuid)
+        format!(
+            "keystore rotated {} (uuid={})",
+            self.keystore_path, self.volume_uuid
+        )
     }
     fn render_text(&self) -> String {
         format!(
@@ -243,7 +241,10 @@ pub fn rotate(
         .iter()
         .map(|b| format!("{:02x}", b))
         .collect::<String>();
-    let nonce_str = nonce.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    let nonce_str = nonce
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
     Ok(KeystoreRotateReport {
         keystore_path: keystore_path.display().to_string(),
         volume_uuid: uuid_str,
@@ -279,7 +280,10 @@ impl Report for KeystoreVerifyReport {
         if self.magic_ok && self.version_ok && self.unwrap_ok {
             format!("keystore ok: {}", self.keystore_path)
         } else {
-            format!("keystore FAILED: {} — {}", self.keystore_path, self.diagnosis)
+            format!(
+                "keystore FAILED: {} — {}",
+                self.keystore_path, self.diagnosis
+            )
         }
     }
     fn render_text(&self) -> String {

@@ -62,4 +62,3 @@ fn pointer_attributes_resolve_dynamically() {
         &inode.metadata.attributes[0].1
     ));
 }
-

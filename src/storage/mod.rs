@@ -5,7 +5,7 @@
 // corefs-core. Existing call sites such as `crate::storage::allocator::*`,
 // `crate::storage::catalog::*` and `crate::storage::block_store::*` continue
 // to compile unchanged.
-pub use corefs_core::storage::{allocator, catalog, block_store};
+pub use corefs_core::storage::{allocator, block_store, catalog};
 
 pub mod block_device;
 pub mod device_volume;

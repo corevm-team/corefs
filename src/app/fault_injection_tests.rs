@@ -18,7 +18,9 @@ use crate::storage::block_device::{BlockDevice, MemoryDevice};
 use crate::storage::ondisk::fault_injection::{FaultPlan, FaultyDevice};
 use crate::storage::ondisk::fsck;
 use crate::storage::ondisk::layout::BLOCK_SIZE;
-use crate::storage::ondisk::native::{load_state_native, save_state_native, save_state_native_incremental};
+use crate::storage::ondisk::native::{
+    load_state_native, save_state_native, save_state_native_incremental,
+};
 use crate::storage::ondisk::session::{OdfDeviceSession, OdfSessionOptions};
 use crate::storage::ondisk::volume::{FormatOptions, format_device};
 
@@ -107,8 +109,7 @@ fn fi2_full_save_failure_leaves_superblock_generation_unchanged() {
     .generation;
 
     // Arm fault and attempt a full save with modified state.
-    let mut service =
-        CoreFsService::from_persisted_state(load_state_native(&dev).unwrap());
+    let mut service = CoreFsService::from_persisted_state(load_state_native(&dev).unwrap());
     service.create_file("/extra", b"fail-me", &[]).unwrap();
 
     dev.set_plan(FaultPlan::new().fail_after_writes(3));
@@ -190,10 +191,7 @@ fn fi4_fsck_detects_post_save_corruption() {
 
     let report = fsck::check(&dev).unwrap();
     assert!(
-        report
-            .issues
-            .iter()
-            .any(|i| i.code.contains("TERTIARY")),
+        report.issues.iter().any(|i| i.code.contains("TERTIARY")),
         "fsck should flag the corrupted tertiary superblock"
     );
 }
@@ -206,8 +204,7 @@ fn fi5_silent_corruption_detected_on_reload() {
 
     // Identify the data block for /file000 via slot_for_path.
     let data_block = {
-        let mut reader =
-            crate::storage::ondisk::reader::OdfReader::open(&dev).unwrap();
+        let mut reader = crate::storage::ondisk::reader::OdfReader::open(&dev).unwrap();
         let slot = reader.slot_for_path("/file000").unwrap().unwrap();
         let on_disk = reader.read_on_disk_inode(slot).unwrap();
         on_disk.extents[0].physical_block
@@ -220,8 +217,7 @@ fn fi5_silent_corruption_detected_on_reload() {
     dev.write_at(offset, &raw).unwrap();
 
     // Now reading via the reader should detect the CRC mismatch.
-    let mut reader =
-        crate::storage::ondisk::reader::OdfReader::open(&dev).unwrap();
+    let mut reader = crate::storage::ondisk::reader::OdfReader::open(&dev).unwrap();
     let result = reader.read_file_by_path("/file000");
     assert!(
         result.is_err(),
@@ -258,8 +254,7 @@ fn fi6_sync_failure_is_propagated_through_save() {
 #[test]
 fn fi7_service_fsck_clean_after_mutate_flush_roundtrip() {
     let opts = session_opts();
-    let dev: Box<dyn BlockDevice> =
-        Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
+    let dev: Box<dyn BlockDevice> = Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
     let mut sess = OdfDeviceSession::format_new(dev, &opts).unwrap();
 
     // Several mutation rounds.
@@ -276,16 +271,22 @@ fn fi7_service_fsck_clean_after_mutate_flush_roundtrip() {
 
     // In-memory fsck.
     let report = sess.service().fsck();
-    assert_eq!(report.missing_blocks, Vec::<String>::new(), "service fsck: {:?}", report);
-    assert_eq!(report.orphaned_blocks.len(), 0, "service fsck orphans: {:?}", report);
+    assert_eq!(
+        report.missing_blocks,
+        Vec::<String>::new(),
+        "service fsck: {:?}",
+        report
+    );
+    assert_eq!(
+        report.orphaned_blocks.len(),
+        0,
+        "service fsck orphans: {:?}",
+        report
+    );
 
     // On-disk fsck.
     let report = fsck::check(sess.device()).unwrap();
-    assert!(
-        report.is_clean(),
-        "ODF fsck: {:?}",
-        report.issues
-    );
+    assert!(report.is_clean(), "ODF fsck: {:?}", report.issues);
 }
 
 // ----- fi8: reload from device preserves all service state -------------------
@@ -293,8 +294,7 @@ fn fi7_service_fsck_clean_after_mutate_flush_roundtrip() {
 #[test]
 fn fi8_service_state_survives_save_reload_cycle() {
     let opts = session_opts();
-    let dev: Box<dyn BlockDevice> =
-        Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
+    let dev: Box<dyn BlockDevice> = Box::new(MemoryDevice::new(opts.capacity_bytes, 4096).unwrap());
     let mut sess = OdfDeviceSession::format_new(dev, &opts).unwrap();
 
     sess.mutate(|fs| {
@@ -382,6 +382,16 @@ fn fi10_repeated_fault_recovery_cycles_stay_consistent() {
     let final_state = load_state_native(&dev).unwrap();
     let final_service = CoreFsService::from_persisted_state(final_state);
     let report = final_service.fsck();
-    assert_eq!(report.missing_blocks, Vec::<String>::new(), "fsck after fault cycles: {:?}", report);
-    assert_eq!(report.orphaned_blocks.len(), 0, "fsck orphans after fault cycles: {:?}", report);
+    assert_eq!(
+        report.missing_blocks,
+        Vec::<String>::new(),
+        "fsck after fault cycles: {:?}",
+        report
+    );
+    assert_eq!(
+        report.orphaned_blocks.len(),
+        0,
+        "fsck orphans after fault cycles: {:?}",
+        report
+    );
 }

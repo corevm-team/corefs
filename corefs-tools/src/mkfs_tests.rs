@@ -84,8 +84,8 @@ fn format_image_label_is_preserved_in_report() {
 #[test]
 fn report_summary_mentions_image_and_size() {
     let path = tmp_image_path("summary");
-    let report = format_image(&path, 4 * 1024 * 1024, &FormatImageOptions::default())
-        .expect("format ok");
+    let report =
+        format_image(&path, 4 * 1024 * 1024, &FormatImageOptions::default()).expect("format ok");
 
     let summary = report.summary();
     assert!(summary.contains("formatted"));
@@ -97,8 +97,8 @@ fn report_summary_mentions_image_and_size() {
 #[test]
 fn report_render_text_is_multiline() {
     let path = tmp_image_path("text");
-    let report = format_image(&path, 4 * 1024 * 1024, &FormatImageOptions::default())
-        .expect("format ok");
+    let report =
+        format_image(&path, 4 * 1024 * 1024, &FormatImageOptions::default()).expect("format ok");
 
     let text = report.render_text();
     assert!(text.contains("mkfs report"));
@@ -111,8 +111,8 @@ fn report_render_text_is_multiline() {
 #[test]
 fn report_render_json_is_valid_json() {
     let path = tmp_image_path("json");
-    let report = format_image(&path, 4 * 1024 * 1024, &FormatImageOptions::default())
-        .expect("format ok");
+    let report =
+        format_image(&path, 4 * 1024 * 1024, &FormatImageOptions::default()).expect("format ok");
 
     let json = report.render_json();
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");

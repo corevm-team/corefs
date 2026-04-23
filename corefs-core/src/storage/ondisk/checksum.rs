@@ -70,8 +70,7 @@ impl Crc32c {
             // Unrolled slicing-by-8.  `crc` XOR-combined with the low
             // four bytes, then each byte of that XOR and each of the
             // next four source bytes indexes one of the eight tables.
-            let lo =
-                crc ^ u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            let lo = crc ^ u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             crc = TABLES[7][(lo & 0xFF) as usize]
                 ^ TABLES[6][((lo >> 8) & 0xFF) as usize]
                 ^ TABLES[5][((lo >> 16) & 0xFF) as usize]
