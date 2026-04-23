@@ -24,6 +24,7 @@ pub mod fault_injection;
 pub mod fsck;
 pub mod inode;
 pub mod journal;
+pub mod journal_capture;
 pub mod layout;
 pub mod multi_group_allocator;
 pub mod refcount;
