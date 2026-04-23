@@ -7,6 +7,7 @@ members = [
     "corefs-fuse-proto",
     "corefs-fuse-adapter",
     "corefs-cli",
+    "certification",
 ]
 resolver = "2"
 

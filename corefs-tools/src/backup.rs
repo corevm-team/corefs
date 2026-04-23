@@ -15,13 +15,15 @@
 use crate::error::{ToolsError, ToolsResult};
 use crate::report::{Report, to_pretty_json};
 use corefs::storage::ondisk::session::OdfFileSession;
+use corefs_core::domain::inode::{InodeId, InodeKind};
 use corefs_core::error::CoreFsError;
 use corefs_core::platform::Timestamp;
 use corefs_core::storage::backup::{
-    BackupReader, BackupWriter, DumpReport as CoreDumpReport, RestoreReport as CoreRestoreReport,
-    SliceReader, stream_dump, stream_restore,
+    BackupReader, BackupWriter, BlobProvider, DumpReport as CoreDumpReport, SliceReader,
+    stream_dump_with_blobs, stream_restore,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -154,6 +156,7 @@ pub fn dump(
     let sess = OdfFileSession::open(image)
         .map_err(|e| te(format!("open image {}: {e}", image.display())))?;
     let state = sess.service().persisted_state();
+    let mut blobs = ServiceBlobProvider::from_session(&sess);
 
     // Output-Ziel: Datei oder stdout
     let (output_path_str, bytes_written, core_report): (String, u64, CoreDumpReport) = match output
@@ -170,7 +173,7 @@ pub fn dump(
                 let mut adapter = IoWriter {
                     inner: &mut counting,
                 };
-                stream_dump(&state, since, &mut adapter, now())
+                stream_dump_with_blobs(&state, since, &mut adapter, now(), &mut blobs)
                     .map_err(|e| te(format!("backup dump: {e}")))?
             };
             // Flush BufWriter
@@ -188,7 +191,7 @@ pub fn dump(
                 let mut adapter = IoWriter {
                     inner: &mut counting,
                 };
-                stream_dump(&state, since, &mut adapter, now())
+                stream_dump_with_blobs(&state, since, &mut adapter, now(), &mut blobs)
                     .map_err(|e| te(format!("backup dump: {e}")))?
             };
             ("-".to_string(), counting.count, core_report)
@@ -312,8 +315,11 @@ pub fn restore(image: &Path, input: Option<&Path>) -> ToolsResult<BackupRestoreR
             let mut reader = SliceReader::new(&payload);
             let r = stream_restore(&mut state, &mut reader)
                 .map_err(|e| CoreFsError::State(format!("backup restore: {e}")))?;
+            let restored_blobs = restored_blob_bytes_by_inode(&state);
             // Service aus neuem State neu bauen.
-            *service = corefs::app::CoreFsService::from_persisted_state(state);
+            let mut restored_service = corefs::app::CoreFsService::from_persisted_state(state);
+            restored_service.restore_block_bytes(restored_blobs);
+            *service = restored_service;
             Ok::<_, CoreFsError>(r)
         })
         .map_err(|e| te(format!("mutate: {e}")))?;
@@ -356,6 +362,50 @@ impl<W: Write> Write for CountingWriter<W> {
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
     }
+}
+
+struct ServiceBlobProvider {
+    by_inode: HashMap<InodeId, Vec<u8>>,
+}
+
+impl ServiceBlobProvider {
+    fn from_session(sess: &OdfFileSession) -> Self {
+        let mut by_inode = HashMap::new();
+        let state = sess.service().persisted_state();
+        for inode in &state.active_inodes {
+            if inode.kind != InodeKind::File || inode.size == 0 {
+                continue;
+            }
+            if let Ok(bytes) = sess.service().read_file(&inode.path) {
+                by_inode.insert(inode.id, bytes);
+            }
+        }
+        Self { by_inode }
+    }
+}
+
+impl BlobProvider for ServiceBlobProvider {
+    fn read_inode(&mut self, inode_id: InodeId) -> Option<Vec<u8>> {
+        self.by_inode.get(&inode_id).cloned()
+    }
+}
+
+fn restored_blob_bytes_by_inode(
+    state: &corefs_core::storage::persisted_state::PersistedState,
+) -> HashMap<InodeId, Vec<u8>> {
+    let Some(snapshot) = state.snapshots.iter().find(|s| s.name == "restore-blobs") else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::new();
+    for inode in &state.active_inodes {
+        if inode.kind != InodeKind::File {
+            continue;
+        }
+        if let Some(bytes) = snapshot.file_data.get(&inode.path) {
+            out.insert(inode.id, bytes.clone());
+        }
+    }
+    out
 }
 
 // Internal helpers exported for test-adjacency

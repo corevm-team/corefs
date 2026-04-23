@@ -1,0 +1,15 @@
+[package]
+name = "corefs-certification"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+description = "Cross-platform production certification suite for CoreFS."
+
+[dependencies]
+corefs = { path = ".." }
+corefs-cli = { path = "../corefs-cli" }
+corefs-core = { path = "../corefs-core", features = ["std"] }
+corefs-tools = { path = "../corefs-tools" }
+
+[lib]
+path = "src/lib.rs"
